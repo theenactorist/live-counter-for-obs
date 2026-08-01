@@ -294,31 +294,109 @@
         font-size: 0.8rem;
         margin-bottom: 0.5rem;
       }
+      /* Task 2.8 — Diagnostics view */
+      .diag-section-title {
+        font-size: 0.8rem;
+        color: #a0a0a0;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 0.9rem 0 0.4rem;
+      }
+      .diag-section-title:first-child {
+        margin-top: 0;
+      }
+      .diag-checklist {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+      .diag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: baseline;
+        padding: 0.5rem 0.6rem;
+        border-radius: 6px;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        font-size: 0.9rem;
+      }
+      .diag-row-label {
+        font-weight: 700;
+        min-width: 7rem;
+      }
+      .diag-row[data-state='ok'] {
+        border-color: #1f6b39;
+      }
+      .diag-row[data-state='ok'] .diag-row-text {
+        color: #7be495;
+      }
+      .diag-row[data-state='warn'] {
+        border-color: #7a4d00;
+      }
+      .diag-row[data-state='warn'] .diag-row-text {
+        color: #ffd699;
+      }
+      .diag-row[data-state='fail'] {
+        border-color: #6b1f1f;
+      }
+      .diag-row[data-state='fail'] .diag-row-text {
+        color: #ff9a9a;
+      }
+      .diag-url-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        margin-bottom: 0.5rem;
+      }
+      .diag-url-row input {
+        flex: 1;
+        min-width: 12rem;
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.4rem 0.5rem;
+        min-height: 40px;
+        font-size: 0.85rem;
+      }
+      .copy-confirm {
+        color: #7be495;
+        font-size: 0.85rem;
+      }
+      .diag-log {
+        max-height: 16rem;
+        overflow-y: auto;
+        background: #0f0f0f;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 0.5rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.78rem;
+        margin-bottom: 0.6rem;
+      }
+      .diag-log-line {
+        padding: 0.1rem 0;
+        border-bottom: 1px solid #1e1e1e;
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <div data-testid="app-shell">
         <div data-testid="banner-ws" class="banner banner-warn" hidden></div>
-        <div class="settings-row">
-          <label
-            >Port
-            <input data-testid="settings-port" type="number" min="1" max="65535" />
-          </label>
-          <label
-            >Password
-            <input data-testid="settings-password" type="password" />
-          </label>
-          <button data-testid="settings-save" class="ctl">Save</button>
-        </div>
         <div class="tabs">
           <button data-testid="tab-presets">Presets</button>
           <button data-testid="tab-setup">Setup</button>
           <button data-testid="tab-live" class="active">Live</button>
+          <button data-testid="tab-diagnostics">Diagnostics</button>
         </div>
         <div data-testid="pane-presets" class="pane" hidden></div>
         <div data-testid="pane-setup" class="pane" hidden></div>
         <div data-testid="pane-live" class="pane"></div>
+        <div data-testid="pane-diagnostics" class="pane" hidden></div>
       </div>
     </div>
     <script type="module" src="./main.ts"></script>

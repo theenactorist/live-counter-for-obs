@@ -1,23 +1,24 @@
 import '../styles/fonts.css';
 
 /**
- * Task 2.5/2.6: real dock shell. Boots the full stack (ObsWsClient ->
+ * Task 2.5/2.6/2.8: real dock shell. Boots the full stack (ObsWsClient ->
  * DockStorage -> Bus -> AutoTimer -> Scheduler -> SessionController), owns
- * the three-tab shell (Presets/Setup/Live, all real views as of Task 2.6),
- * the first-run "not connected" banner, the minimal settings row that lets
- * an operator enter the OBS WebSocket password without a full Settings UI
- * (Task 2.8 replaces this with the real thing), and — after `init()`
- * restores a session — re-deriving that session's style/template from its
- * preset (see the `adoptPresentation` call in `boot()`).
+ * the four-tab shell (Presets/Setup/Live/Diagnostics, all real views as of
+ * Task 2.8), the first-run "not connected" banner (which deep-links to the
+ * Diagnostics tab, where Task 2.5's minimal always-visible settings row now
+ * lives as the real Settings section — see diagnostics.ts), and — after
+ * `init()` restores a session — re-deriving that session's style/template
+ * from its preset (see the `adoptPresentation` call in `boot()`).
  */
 import { ObsWsClient } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
-import { DockStorage, type DockSettings } from '../protocol/persistence.js';
+import { DockStorage } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
 import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
+import { mountDiagnosticsView, type DiagnosticsViewHandle } from './diagnostics.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 
@@ -61,11 +62,8 @@ class RealScheduler implements Scheduler {
 
 interface Shell {
   bannerWs: HTMLElement;
-  settingsPort: HTMLInputElement;
-  settingsPassword: HTMLInputElement;
-  settingsSave: HTMLButtonElement;
-  tabButtons: { presets: HTMLButtonElement; setup: HTMLButtonElement; live: HTMLButtonElement };
-  panes: { presets: HTMLElement; setup: HTMLElement; live: HTMLElement };
+  tabButtons: { presets: HTMLButtonElement; setup: HTMLButtonElement; live: HTMLButtonElement; diagnostics: HTMLButtonElement };
+  panes: { presets: HTMLElement; setup: HTMLElement; live: HTMLElement; diagnostics: HTMLElement };
 }
 
 function requireEl<T extends HTMLElement>(selector: string): T {
@@ -77,23 +75,22 @@ function requireEl<T extends HTMLElement>(selector: string): T {
 function queryShell(): Shell {
   return {
     bannerWs: requireEl('[data-testid="banner-ws"]'),
-    settingsPort: requireEl<HTMLInputElement>('[data-testid="settings-port"]'),
-    settingsPassword: requireEl<HTMLInputElement>('[data-testid="settings-password"]'),
-    settingsSave: requireEl<HTMLButtonElement>('[data-testid="settings-save"]'),
     tabButtons: {
       presets: requireEl<HTMLButtonElement>('[data-testid="tab-presets"]'),
       setup: requireEl<HTMLButtonElement>('[data-testid="tab-setup"]'),
       live: requireEl<HTMLButtonElement>('[data-testid="tab-live"]'),
+      diagnostics: requireEl<HTMLButtonElement>('[data-testid="tab-diagnostics"]'),
     },
     panes: {
       presets: requireEl('[data-testid="pane-presets"]'),
       setup: requireEl('[data-testid="pane-setup"]'),
       live: requireEl('[data-testid="pane-live"]'),
+      diagnostics: requireEl('[data-testid="pane-diagnostics"]'),
     },
   };
 }
 
-type TabName = 'presets' | 'setup' | 'live';
+type TabName = 'presets' | 'setup' | 'live' | 'diagnostics';
 
 interface TabController {
   activate(tab: TabName): void;
@@ -110,6 +107,7 @@ function wireTabs(shell: Shell, onActivate?: (tab: TabName) => void): TabControl
     { name: 'presets', btn: shell.tabButtons.presets, pane: shell.panes.presets },
     { name: 'setup', btn: shell.tabButtons.setup, pane: shell.panes.setup },
     { name: 'live', btn: shell.tabButtons.live, pane: shell.panes.live },
+    { name: 'diagnostics', btn: shell.tabButtons.diagnostics, pane: shell.panes.diagnostics },
   ];
   function activate(name: TabName): void {
     for (const t of tabs) {
@@ -136,9 +134,22 @@ function main(): void {
   // Presets tab becomes active, so edits saved from Setup (a sibling view,
   // no direct subscription between the two) show up without extra plumbing.
   let presetsHandle: PresetsViewHandle | null = null;
+  // diagnosticsHandle mirrors presetsHandle's own closure pattern above: it
+  // is assigned inside boot() but referenced here so tab activation can
+  // force an immediate checklist + log refresh (Task 2.8 brief) instead of
+  // waiting out the periodic 2s poll.
+  let diagnosticsHandle: DiagnosticsViewHandle | null = null;
   const tabs = wireTabs(shell, (name) => {
     if (name === 'presets') presetsHandle?.refresh();
+    else if (name === 'diagnostics') diagnosticsHandle?.refresh();
   });
+
+  // Task 2.8: banner-ws deep-links to the Diagnostics tab — a connectivity
+  // problem's actionable fix (port/password, the checklist) lives there now
+  // that Task 2.5's always-visible minimal settings row has been absorbed
+  // into it.
+  shell.bannerWs.addEventListener('click', () => tabs.activate('diagnostics'));
+  shell.bannerWs.style.cursor = 'pointer';
 
   const params = new URLSearchParams(location.search);
   const devhook = params.has('devhook');
@@ -149,6 +160,12 @@ function main(): void {
   // default.
   const overlaySilenceMsParam = params.get('overlaySilenceMs');
   const overlaySilenceMsOverride = overlaySilenceMsParam !== null ? Number(overlaySilenceMsParam) : undefined;
+  // Test seam (Task 2.8): lets Playwright shrink the Diagnostics tab's 2s
+  // checklist/log poll interval — needed so a shrunk `overlaySilenceMs`
+  // (above) has any chance of producing an observable "ok" window at all;
+  // see diagnostics.ts's own `refreshMs` option doc comment.
+  const diagRefreshMsParam = params.get('diagRefreshMs');
+  const diagRefreshMsOverride = diagRefreshMsParam !== null ? Number(diagRefreshMsParam) : undefined;
 
   // loadSettings() only ever touches localStorage — reading it before a
   // client exists (to learn what port/password to build the client with) is
@@ -157,9 +174,6 @@ function main(): void {
   const bootStorage = new DockStorage(window.localStorage, null);
   const initialSettings = bootStorage.loadSettings();
   const initialPort = portOverride !== null ? Number(portOverride) : initialSettings.wsPort;
-
-  shell.settingsPort.value = String(initialSettings.wsPort);
-  shell.settingsPassword.value = initialSettings.wsPassword;
 
   let client: ObsWsClient;
   let storage: DockStorage;
@@ -205,6 +219,10 @@ function main(): void {
     if (presetsHandle) {
       presetsHandle.destroy();
       presetsHandle = null;
+    }
+    if (diagnosticsHandle) {
+      diagnosticsHandle.destroy();
+      diagnosticsHandle = null;
     }
     if (wsBannerPoll !== null) {
       clearInterval(wsBannerPoll);
@@ -282,6 +300,26 @@ function main(): void {
       onSessionStarted: () => tabs.activate('live'),
     });
 
+    // exactOptionalPropertyTypes forbids `{ overlaySilenceMs: undefined }` —
+    // same pattern as `liveOpts` above; the SAME `overlaySilenceMs` override
+    // (if any) shrinks both banners' silence thresholds so Playwright specs
+    // don't need to wait out either real 10s default.
+    const diagnosticsOpts = {
+      ...(overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {}),
+      ...(diagRefreshMsOverride !== undefined ? { refreshMs: diagRefreshMsOverride } : {}),
+    };
+    diagnosticsHandle = mountDiagnosticsView(shell.panes.diagnostics, {
+      client,
+      bus,
+      storage,
+      initialSettings: { wsPort, wsPassword, schemaVersion: 1 },
+      onSaveSettings: (port, password) => {
+        storage.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
+        boot(port, password);
+      },
+      ...diagnosticsOpts,
+    });
+
     // Local snapshots of THIS boot() call's controller/storage: the outer
     // `controller`/`storage` bindings are reassigned by a later boot() call
     // (settings-save reconnect) — without capturing them here, a slow
@@ -335,18 +373,6 @@ function main(): void {
       };
     }
   }
-
-  shell.settingsSave.addEventListener('click', () => {
-    const port = Number(shell.settingsPort.value);
-    const password = shell.settingsPassword.value;
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) return;
-
-    storage.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 } satisfies DockSettings);
-    // The old controller/client are torn down at the top of boot() itself
-    // (see the fix-round-1 comment there), not here — one place owns that
-    // teardown guarantee regardless of who calls boot().
-    boot(port, password);
-  });
 
   boot(initialPort, initialSettings.wsPassword);
 }

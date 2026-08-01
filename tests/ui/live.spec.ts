@@ -504,9 +504,12 @@ test.describe('dock Live view', () => {
 
       // Re-save settings with the SAME port: forces main.ts's boot() to
       // dispose() the old controller, close() the old client, and build a
-      // fresh stack in place (no navigation).
+      // fresh stack in place (no navigation). Settings now live under the
+      // Diagnostics tab (Task 2.8) — switch there first.
+      await page.getByTestId('tab-diagnostics').click();
       await page.getByTestId('settings-port').fill(String(mock.port));
       await page.getByTestId('settings-save').click();
+      await page.getByTestId('tab-live').click();
 
       // The reconnected controller's own init() restores an
       // automatic+running session as paused (Task 2.4 rule) — it will not

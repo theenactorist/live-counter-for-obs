@@ -29,6 +29,8 @@ export interface MockObs {
   delayNextResponse(ms: number): void;
   persistent: Map<string, unknown>;
   broadcasts: Array<{ from: number; eventData: unknown }>;
+  /** Every requestType this server has ever received, in arrival order — lets a test assert NO scene/source-mutation request type was ever sent (only BroadcastCustomEvent/SetPersistentData/GetPersistentData). */
+  requestLog: string[];
   close(): Promise<void>;
 }
 
@@ -59,6 +61,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
 
   const persistent = new Map<string, unknown>();
   const broadcasts: Array<{ from: number; eventData: unknown }> = [];
+  const requestLog: string[] = [];
   const identifiedClients = new Set<WsSocket>();
   const clientIds = new WeakMap<WsSocket, number>();
   let nextClientId = 1;
@@ -76,6 +79,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
       return;
     }
     const { requestType, requestId, requestData } = msg.d;
+    requestLog.push(requestType);
     let result = true;
     let code = 100;
     let responseData: Record<string, unknown> = {};
@@ -207,6 +211,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     },
     persistent,
     broadcasts,
+    requestLog,
     close() {
       return new Promise<void>((resolve, reject) => {
         for (const c of wss.clients) c.terminate();
