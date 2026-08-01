@@ -157,17 +157,28 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     startFromPreset(preset);
   }
 
+  // Review fix (Important 3): both mutations below re-fetch the current
+  // presets straight from storage immediately before computing `next`,
+  // mirroring performSave()'s pattern in setup.ts, rather than trusting this
+  // view's own possibly-stale `ui.presets` cache. Without this, a concurrent
+  // edit from another window/tab (or Setup saving a preset since this list
+  // was last loaded) would be silently discarded — savePresets() overwrites
+  // the whole array, so mutating a stale copy loses whatever changed since.
   async function onDuplicate(preset: Preset): Promise<void> {
+    const outcome = await opts.storage.loadPresets();
+    const existing = outcome.value ?? [];
     const now = new Date().toISOString();
     const copy: Preset = { ...preset, id: crypto.randomUUID(), title: `${preset.title} (copy)`, createdAt: now, updatedAt: now };
-    const next = [...ui.presets, copy];
+    const next = [...existing, copy];
     opts.storage.savePresets(next);
     ui.presets = next;
     render();
   }
 
   async function onDelete(preset: Preset): Promise<void> {
-    const next = ui.presets.filter((p) => p.id !== preset.id);
+    const outcome = await opts.storage.loadPresets();
+    const existing = outcome.value ?? [];
+    const next = existing.filter((p) => p.id !== preset.id);
     opts.storage.savePresets(next);
     ui.presets = next;
     ui.deleteConfirmId = null;

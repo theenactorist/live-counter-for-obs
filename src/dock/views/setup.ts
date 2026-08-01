@@ -29,7 +29,7 @@
 // content — every dynamic string this view renders goes through
 // `textContent`/`.value`, never `innerHTML`.
 import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode } from '../../engine/types.js';
-import { SPEED_LEVELS, isValidCountValue } from '../../engine/types.js';
+import { SPEED_LEVELS, isValidCountValue, isPreset } from '../../engine/types.js';
 import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
@@ -81,6 +81,7 @@ interface SetupUiState {
   completionSeconds: number;
   editing: EditingState | null;
   conflict: boolean;
+  error: string | null;
 }
 
 interface FocusSnapshot {
@@ -169,6 +170,7 @@ function defaultUiState(): SetupUiState {
     completionSeconds: DEFAULT_COMPLETION_SECONDS,
     editing: null,
     conflict: false,
+    error: null,
   };
 }
 
@@ -214,12 +216,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return s !== null && f !== null && isValidCountValue(s) && isValidCountValue(f) && s !== f;
   }
 
+  // Review fix (Critical 1/2): holdThenHide with seconds <= 0 (or non-integer,
+  // or a cleared/garbage field coercing to 0 via Number('')) previously slid
+  // straight through into a Preset/SessionConfig that only fails validation
+  // deep inside the engine (createSession throws; a saved preset would fail
+  // isPreset on the NEXT load, quarantining the entire presets list — see
+  // isCompletionConfig in engine/types.ts). Gating it here, identically for
+  // both canSave() and canStart(), stops it at the form instead.
+  function completionValid(): boolean {
+    if (ui.completionKind !== 'holdThenHide') return true;
+    return Number.isInteger(ui.completionSeconds) && ui.completionSeconds > 0;
+  }
+
   function canSave(): boolean {
-    return ui.title.trim().length > 0 && templateError() === null;
+    return ui.title.trim().length > 0 && rangeValid() && templateError() === null && completionValid();
   }
 
   function canStart(): boolean {
-    return rangeValid() && templateError() === null;
+    return rangeValid() && templateError() === null && completionValid();
   }
 
   function previewValue(): number {
@@ -235,6 +249,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   async function performSave(force: boolean): Promise<void> {
     if (!canSave()) return;
+    ui.error = null;
 
     const outcome = await opts.storage.loadPresets();
     const existing = outcome.value ?? [];
@@ -272,6 +287,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       updatedAt: now,
     };
 
+    // Belt-and-suspenders (review fix, Critical 1b): canSave()'s gates above
+    // should already guarantee this, but NEVER write an isPreset-failing
+    // object to storage.savePresets() — engine/migrate.ts's loadPresets()
+    // rejects the ENTIRE array on the first item that fails isPreset (see
+    // migrateItem/loadPresets in engine/migrate.ts), which would quarantine
+    // every other, perfectly good preset right along with this one on the
+    // next load.
+    if (!isPreset(preset)) {
+      ui.error = 'Could not save: the preset data is invalid.';
+      render();
+      return;
+    }
+
     const next = ui.editing
       ? existing.map((p) => (p.id === preset.id ? preset : p))
       : [...existing, preset];
@@ -295,6 +323,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   function onStartSession(): void {
     if (!canStart()) return;
+    ui.error = null;
     const startValue = parseIntStrict(ui.startValue)!;
     const finishValue = parseIntStrict(ui.finishValue)!;
     const cfg: SessionConfig = {
@@ -307,7 +336,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     };
     const style = buildStyle();
     const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
-    opts.controller.startSession(cfg, style, template);
+    // Review fix (Critical 2): canStart()'s completionValid() gate above
+    // should already prevent createSession() from throwing on an invalid
+    // completion config, but wrap the call anyway — defense in depth, so ANY
+    // unexpected throw from startSession() surfaces to the operator via
+    // setup-error instead of silently escaping the click handler (button
+    // click handlers have no caller to report a thrown error to).
+    try {
+      opts.controller.startSession(cfg, style, template);
+    } catch (err) {
+      ui.error = err instanceof Error ? err.message : String(err);
+      render();
+      return;
+    }
     opts.onSessionStarted();
   }
 
@@ -347,8 +388,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     value: string,
     onChange: (v: string) => void,
     type: 'text' | 'number' = 'text',
+    extraAttrs: Record<string, string> = {},
   ): HTMLInputElement {
-    const input = el('input', { 'data-testid': testid, type }) as HTMLInputElement;
+    const input = el('input', { 'data-testid': testid, type, ...extraAttrs }) as HTMLInputElement;
     input.value = value;
     input.addEventListener('input', () => {
       onChange(input.value);
@@ -527,6 +569,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
 
     if (ui.conflict) root.appendChild(renderConflict());
+    if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
 
     root.appendChild(
       formRow(
@@ -547,17 +590,29 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     root.appendChild(
       formRow(
         'Start value',
-        inputField('setup-start', ui.startValue, (v) => {
-          ui.startValue = v;
-        }),
+        inputField(
+          'setup-start',
+          ui.startValue,
+          (v) => {
+            ui.startValue = v;
+          },
+          'number',
+          { min: '0', max: '999999', step: '1' },
+        ),
       ),
     );
     root.appendChild(
       formRow(
         'Finish value',
-        inputField('setup-finish', ui.finishValue, (v) => {
-          ui.finishValue = v;
-        }),
+        inputField(
+          'setup-finish',
+          ui.finishValue,
+          (v) => {
+            ui.finishValue = v;
+          },
+          'number',
+          { min: '0', max: '999999', step: '1' },
+        ),
       ),
     );
     root.appendChild(formRow('Mode', renderModeSelect()));
@@ -675,6 +730,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.completionSeconds = preset.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
       ui.conflict = false;
+      ui.error = null;
       render();
     },
   };

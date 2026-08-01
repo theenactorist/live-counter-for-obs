@@ -408,4 +408,161 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Fix round 1 (coordinator review): Critical 1, Critical 2, Important 3 ---
+
+  test('garbage start value, or equal start/finish, disables Save (Critical 1 regression)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Garbage Guard');
+
+      // setup-start is a native type="number" input (Critical 1 fix): the
+      // browser itself refuses to hold non-numeric characters, so typing
+      // "abc" leaves it empty rather than literally containing "abc" —
+      // Playwright's fill() rejects that mismatch outright (by design), so
+      // simulate real keystrokes instead and assert on the resulting
+      // (invalid/empty) state, which is what actually matters here.
+      const startInput = page.getByTestId('setup-start');
+      await startInput.fill('');
+      await startInput.pressSequentially('abc');
+      await expect(startInput).toHaveValue('');
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+
+      await page.getByTestId('setup-start').fill('5');
+      await page.getByTestId('setup-finish').fill('5'); // equal to start: invalid range
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+
+      await page.getByTestId('setup-finish').fill('15');
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('holdThenHide with empty/zero seconds disables both Save and Start; a valid value enables both (Critical 1 + 2 regression)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Hold Guard');
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('10');
+      await page.getByTestId('setup-completion').selectOption('holdThenHide');
+
+      await page.getByTestId('setup-completion-seconds').fill('0');
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+
+      await page.getByTestId('setup-completion-seconds').fill('');
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+
+      await page.getByTestId('setup-completion-seconds').fill('5');
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('whole-list protection: a blocked invalid save never corrupts the good presets already on disk', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Good Preset' });
+      await page.getByTestId('setup-save').click();
+
+      // Attempt the previously-broken flow (holdThenHide, 0 seconds) as far
+      // as the now-fixed UI allows: Save stays disabled, so nothing new is
+      // ever written — this is the regression check for Critical 1.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Bad Preset Attempt');
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('10');
+      await page.getByTestId('setup-completion').selectOption('holdThenHide');
+      await page.getByTestId('setup-completion-seconds').fill('0');
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+
+      // Reload: engine/migrate.ts's loadPresets() quarantines the ENTIRE
+      // array on the first isPreset failure — if the (blocked) bad preset
+      // had somehow been written anyway, the good one would vanish too.
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('preset-row')).toHaveCount(1);
+      await expect(page.getByTestId('preset-row')).toContainText('Good Preset');
+      await expect(page.getByTestId('presets-empty')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('duplicate preserves a concurrently-added preset instead of silently discarding it (Important 3 regression)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Preset A' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('preset-row')).toHaveCount(1); // this view only knows about A so far
+
+      // Simulate a concurrent edit from another window/tab: append a second,
+      // independently-valid preset straight into storage, behind this
+      // mounted view's back (its in-memory `ui.presets` still only has A).
+      await page.evaluate(() => {
+        const raw = window.localStorage.getItem('lc.presets.v1');
+        const presets = raw ? (JSON.parse(raw) as unknown[]) : [];
+        const now = new Date().toISOString();
+        presets.push({
+          schemaVersion: 1,
+          id: 'preset-b-injected',
+          title: 'Preset B',
+          description: null,
+          startValue: 0,
+          finishValue: 20,
+          mode: 'manual',
+          intervalSeconds: 1,
+          template: null,
+          style: {
+            fontFamily: 'Inter',
+            fontWeight: 700,
+            numberSizePx: 96,
+            textSizePx: 24,
+            numberColor: '#ffffff',
+            textColor: '#cccccc',
+            alignH: 'center',
+            alignV: 'middle',
+            outline: null,
+            shadow: null,
+            background: null,
+            paddingPx: 8,
+          },
+          animation: { type: 'none', target: 'number', durationMs: 300 },
+          completion: { kind: 'hold' },
+          createdAt: now,
+          updatedAt: now,
+        });
+        window.localStorage.setItem('lc.presets.v1', JSON.stringify(presets));
+      });
+
+      await page.getByTestId('preset-row').filter({ hasText: 'Preset A' }).getByTestId('preset-duplicate').click();
+
+      await expect(page.getByTestId('preset-row')).toHaveCount(3); // A, B (never lost), and the copy
+
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as Array<{ title: string }>,
+      );
+      expect(stored.map((p) => p.title).sort()).toEqual(['Preset A', 'Preset A (copy)', 'Preset B'].sort());
+    } finally {
+      await mock.close();
+    }
+  });
 });
