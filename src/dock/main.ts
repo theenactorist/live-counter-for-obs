@@ -1,22 +1,227 @@
 import '../styles/fonts.css';
 
 /**
- * Task 2.1 stub: renders the dock shell with a disconnected-state banner.
- * No OBS WebSocket wiring yet — that lands in Task 2.2+ (ObsWsClient).
+ * Task 2.5: real dock shell. Boots the full stack (ObsWsClient -> DockStorage
+ * -> Bus -> AutoTimer -> Scheduler -> SessionController), owns the three-tab
+ * shell (Presets/Setup/Live — Presets and Setup are placeholder panes until
+ * Task 2.6), the first-run "not connected" banner, and the minimal settings
+ * row that lets an operator enter the OBS WebSocket password without a full
+ * Settings UI (Task 2.8 replaces this with the real thing).
  */
-function renderAppShell(): void {
+import { ObsWsClient } from '../protocol/obsws-client.js';
+import { Bus } from '../protocol/bus.js';
+import { DockStorage, type DockSettings } from '../protocol/persistence.js';
+import { AutoTimer } from './timer.js';
+import { SessionController, type Scheduler } from './controller.js';
+import { mountLiveView, type LiveViewHandle } from './views/live.js';
+import type { SessionConfig } from '../engine/counter.js';
+import type { StyleConfig } from '../engine/types.js';
+
+const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
+const FIRST_RUN_BANNER_DELAY_MS = 3000;
+const BANNER_WS_TEXT = 'Not connected to OBS — Tools → WebSocket Server Settings, then enter the password in Settings';
+
+// Dev-hook-only default style: Task 2.6 lands the real Setup form that
+// collects this from the operator; until then, `?devhook` needs SOME
+// StyleConfig to hand `SessionController.startSession()` (a required,
+// non-nullable argument) so tests can start a session without the Setup view.
+const DEV_DEFAULT_STYLE: StyleConfig = {
+  fontFamily: 'Inter',
+  fontWeight: 700,
+  numberSizePx: 96,
+  textSizePx: 24,
+  numberColor: '#ffffff',
+  textColor: '#cccccc',
+  alignH: 'center',
+  alignV: 'middle',
+  outline: null,
+  shadow: null,
+  background: null,
+  paddingPx: 8,
+};
+
+class RealScheduler implements Scheduler {
+  schedule(ms: number, fn: () => void): unknown {
+    return setTimeout(fn, ms);
+  }
+  cancel(h: unknown): void {
+    clearTimeout(h as ReturnType<typeof setTimeout>);
+  }
+}
+
+interface Shell {
+  bannerWs: HTMLElement;
+  settingsPort: HTMLInputElement;
+  settingsPassword: HTMLInputElement;
+  settingsSave: HTMLButtonElement;
+  tabButtons: { presets: HTMLButtonElement; setup: HTMLButtonElement; live: HTMLButtonElement };
+  panes: { presets: HTMLElement; setup: HTMLElement; live: HTMLElement };
+}
+
+function requireEl<T extends HTMLElement>(selector: string): T {
+  const found = document.querySelector<T>(selector);
+  if (!found) throw new Error(`dock shell: missing required element ${selector}`);
+  return found;
+}
+
+function queryShell(): Shell {
+  return {
+    bannerWs: requireEl('[data-testid="banner-ws"]'),
+    settingsPort: requireEl<HTMLInputElement>('[data-testid="settings-port"]'),
+    settingsPassword: requireEl<HTMLInputElement>('[data-testid="settings-password"]'),
+    settingsSave: requireEl<HTMLButtonElement>('[data-testid="settings-save"]'),
+    tabButtons: {
+      presets: requireEl<HTMLButtonElement>('[data-testid="tab-presets"]'),
+      setup: requireEl<HTMLButtonElement>('[data-testid="tab-setup"]'),
+      live: requireEl<HTMLButtonElement>('[data-testid="tab-live"]'),
+    },
+    panes: {
+      presets: requireEl('[data-testid="pane-presets"]'),
+      setup: requireEl('[data-testid="pane-setup"]'),
+      live: requireEl('[data-testid="pane-live"]'),
+    },
+  };
+}
+
+function wireTabs(shell: Shell): void {
+  const tabs: Array<{ btn: HTMLButtonElement; pane: HTMLElement }> = [
+    { btn: shell.tabButtons.presets, pane: shell.panes.presets },
+    { btn: shell.tabButtons.setup, pane: shell.panes.setup },
+    { btn: shell.tabButtons.live, pane: shell.panes.live },
+  ];
+  function activate(active: HTMLButtonElement): void {
+    for (const { btn, pane } of tabs) {
+      const isActive = btn === active;
+      btn.classList.toggle('active', isActive);
+      pane.hidden = !isActive;
+    }
+  }
+  for (const { btn } of tabs) {
+    btn.addEventListener('click', () => activate(btn));
+  }
+  activate(shell.tabButtons.live); // Live is default-active.
+}
+
+function main(): void {
   const root = document.getElementById('app');
   if (!root) return;
 
-  const shell = document.createElement('div');
-  shell.dataset.testid = 'app-shell';
+  const shell = queryShell();
+  wireTabs(shell);
 
-  const banner = document.createElement('div');
-  banner.dataset.testid = 'banner-ws';
-  banner.textContent = 'Not connected to OBS — open Settings';
+  const params = new URLSearchParams(location.search);
+  const devhook = params.has('devhook');
+  const portOverride = params.get('wsPort');
 
-  shell.appendChild(banner);
-  root.appendChild(shell);
+  // loadSettings() only ever touches localStorage — reading it before a
+  // client exists (to learn what port/password to build the client with) is
+  // safe; DockStorage's client-backed mirror is only consulted by
+  // loadSession()/loadPresets(), neither of which run here.
+  const bootStorage = new DockStorage(window.localStorage, null);
+  const initialSettings = bootStorage.loadSettings();
+  const initialPort = portOverride !== null ? Number(portOverride) : initialSettings.wsPort;
+
+  shell.settingsPort.value = String(initialSettings.wsPort);
+  shell.settingsPassword.value = initialSettings.wsPassword;
+
+  let client: ObsWsClient;
+  let storage: DockStorage;
+  let bus: Bus;
+  let controller: SessionController;
+  let liveHandle: LiveViewHandle | null = null;
+  let identifiedBannerTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showBannerWs(text: string): void {
+    shell.bannerWs.textContent = text;
+    shell.bannerWs.hidden = false;
+  }
+  function hideBannerWs(): void {
+    shell.bannerWs.hidden = true;
+  }
+
+  // Reported to DockStorage's constructor: a failed localStorage write (quota
+  // exceeded, disabled storage) surfaces via the same banner element used for
+  // connectivity — there's only one "something's wrong, look here" banner in
+  // this minimal shell — plus a console log for a diagnosable trail. Must
+  // never call storage.log() here: a write failure that originated inside
+  // DockStorage.log()'s own safeSet() would otherwise re-enter this callback
+  // and recurse.
+  function onWriteError(key: string, err: unknown): void {
+    // eslint-disable-next-line no-console
+    console.error(`[dock] storage write failed for "${key}"`, err);
+    showBannerWs('Local storage write failed — settings and session may not be saved. See console for details.');
+  }
+
+  function boot(wsPort: number, wsPassword: string): void {
+    if (liveHandle) {
+      liveHandle.destroy();
+      liveHandle = null;
+    }
+    if (identifiedBannerTimer !== null) {
+      clearTimeout(identifiedBannerTimer);
+      identifiedBannerTimer = null;
+    }
+
+    client = new ObsWsClient({
+      url: `ws://127.0.0.1:${wsPort}`,
+      password: wsPassword,
+      eventSubscriptions: EVENT_SUBSCRIPTIONS,
+    });
+    storage = new DockStorage(window.localStorage, client, onWriteError);
+    bus = new Bus(client, 'dock');
+    const timer = new AutoTimer(() => performance.now());
+    const scheduler = new RealScheduler();
+    controller = new SessionController({ storage, bus, timer, scheduler });
+
+    hideBannerWs();
+    client.on('identified', () => {
+      hideBannerWs();
+      if (identifiedBannerTimer !== null) {
+        clearTimeout(identifiedBannerTimer);
+        identifiedBannerTimer = null;
+      }
+    });
+
+    // First-run heuristic (locked in the Task 2.5 brief): only nag with the
+    // "go set a password" banner when the operator hasn't set one yet. Once a
+    // password is on file we assume they've been through setup before, even
+    // if this particular boot fails to connect for some other reason.
+    if (wsPassword === '') {
+      identifiedBannerTimer = setTimeout(() => {
+        identifiedBannerTimer = null;
+        if (client.state !== 'identified') showBannerWs(BANNER_WS_TEXT);
+      }, FIRST_RUN_BANNER_DELAY_MS);
+    }
+
+    liveHandle = mountLiveView(shell.panes.live, controller, bus);
+
+    void controller.init();
+    client.connect();
+
+    if (devhook) {
+      // Test-only seam: Task 2.6 replaces this with the real Setup flow,
+      // which will call controller.startSession() from an actual form. Until
+      // then, Playwright specs need a way to create a session without that
+      // UI existing yet.
+      (window as unknown as { __lc: unknown }).__lc = {
+        controller,
+        startSession: (cfg: SessionConfig, style?: StyleConfig, template?: string | null) =>
+          controller.startSession(cfg, style ?? DEV_DEFAULT_STYLE, template ?? null),
+      };
+    }
+  }
+
+  shell.settingsSave.addEventListener('click', () => {
+    const port = Number(shell.settingsPort.value);
+    const password = shell.settingsPassword.value;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return;
+
+    storage.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 } satisfies DockSettings);
+    client.close();
+    boot(port, password);
+  });
+
+  boot(initialPort, initialSettings.wsPassword);
 }
 
-renderAppShell();
+main();

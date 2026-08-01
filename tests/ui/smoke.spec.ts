@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
+import { startMockObs } from '../helpers/mock-obsws.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
@@ -28,29 +29,40 @@ async function trackRequests(page: Page): Promise<string[]> {
 }
 
 test.describe('dock.html', () => {
-  test('renders app-shell + disconnected banner, loads fonts, zero console errors, no network', async ({
+  // Task 2.5 replaced the static stub with the real shell, which connects to
+  // OBS on load — a real (mock) obs-websocket server is required so that
+  // connection succeeds instead of logging a failed-WebSocket console error
+  // that would trip the zero-console-errors assertion below.
+  test('renders app-shell + tabs, connects to OBS, loads fonts, zero console errors, no disallowed network', async ({
     page,
   }) => {
-    const errors = trackConsoleErrors(page);
-    const requests = await trackRequests(page);
+    const mock = await startMockObs();
+    try {
+      const errors = trackConsoleErrors(page);
+      const requests = await trackRequests(page);
 
-    await page.goto(DOCK_URL);
+      await page.goto(`${DOCK_URL}?wsPort=${mock.port}`);
 
-    const shell = page.getByTestId('app-shell');
-    await expect(shell).toBeVisible();
+      const shell = page.getByTestId('app-shell');
+      await expect(shell).toBeVisible();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+      await expect(page.getByTestId('pane-live')).toBeVisible();
 
-    const banner = page.getByTestId('banner-ws');
-    await expect(banner).toBeVisible();
-    await expect(banner).toHaveText('Not connected to OBS — open Settings');
+      // Password is empty (default settings) but the mock server identifies
+      // well within the 3s first-run grace period, so the banner never shows.
+      await expect(page.getByTestId('banner-ws')).toBeHidden();
 
-    await page.evaluate(() => document.fonts.ready);
-    const interLoaded = await page.evaluate(() => document.fonts.check('16px Inter'));
-    expect(interLoaded).toBe(true);
+      await page.evaluate(() => document.fonts.ready);
+      const interLoaded = await page.evaluate(() => document.fonts.check('16px Inter'));
+      expect(interLoaded).toBe(true);
 
-    expect(errors).toEqual([]);
+      expect(errors).toEqual([]);
 
-    for (const url of requests) {
-      expect(url.startsWith('file://')).toBe(true);
+      for (const url of requests) {
+        expect(url.startsWith('file://')).toBe(true);
+      }
+    } finally {
+      await mock.close();
     }
   });
 });

@@ -4,9 +4,227 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Live Counter — Dock</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #121212;
+        color: #e8e8e8;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        overflow-x: hidden;
+      }
+      #app {
+        min-height: 100vh;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .banner {
+        padding: 0.6rem 1rem;
+        font-size: 0.9rem;
+      }
+      .banner-warn {
+        background: #4a2f00;
+        color: #ffd699;
+        border-bottom: 1px solid #7a4d00;
+      }
+      .banner-info {
+        background: #123a52;
+        color: #b3ddff;
+        border-bottom: 1px solid #1f6491;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      .settings-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.5rem 1rem;
+        background: #1a1a1a;
+        border-bottom: 1px solid #2a2a2a;
+        font-size: 0.85rem;
+      }
+      .settings-row label {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .settings-row input {
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.35rem 0.5rem;
+        min-height: 32px;
+        width: 6.5rem;
+      }
+      .tabs {
+        display: flex;
+        border-bottom: 1px solid #2a2a2a;
+      }
+      .tabs button {
+        flex: 1;
+        min-height: 44px;
+        background: #1a1a1a;
+        color: #e8e8e8;
+        border: none;
+        border-bottom: 3px solid transparent;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      .tabs button.active {
+        border-bottom-color: #4da3ff;
+        background: #202020;
+        font-weight: 700;
+      }
+      .pane {
+        padding: 1rem;
+      }
+      .live-empty {
+        padding: 2rem 1rem;
+        color: #a0a0a0;
+        font-size: 1.1rem;
+      }
+      .current-value {
+        font-size: clamp(2.5rem, 14vw, 5rem);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.1;
+        margin: 0.25rem 0;
+      }
+      .progress-line {
+        color: #b0b0b0;
+        font-size: 0.95rem;
+        margin-bottom: 0.5rem;
+      }
+      .status-chip {
+        display: inline-block;
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        margin-bottom: 0.75rem;
+      }
+      .status-chip[data-state='showing'] {
+        background: #123a1f;
+        color: #7be495;
+        border: 1px solid #1f6b39;
+      }
+      .status-chip[data-state='hidden'] {
+        background: #3a1212;
+        color: #ff9a9a;
+        border: 1px solid #6b1f1f;
+      }
+      .status-chip[data-state='unknown'] {
+        background: #2a2a2a;
+        color: #c0c0c0;
+        border: 1px solid #444;
+      }
+      .action-feedback {
+        min-height: 1.2rem;
+        color: #7be495;
+        font-size: 0.9rem;
+        margin-bottom: 0.75rem;
+      }
+      .btn-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+      button.ctl {
+        min-height: 44px;
+        min-width: 44px;
+        padding: 0.5rem 0.9rem;
+        font-size: 1rem;
+        background: #2a2a2a;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button.ctl:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      button.ctl.danger {
+        border-color: #6b1f1f;
+      }
+      .jump-box,
+      .confirm-box {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 0.6rem;
+        margin-bottom: 0.75rem;
+      }
+      .jump-box input {
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.35rem 0.5rem;
+        min-height: 32px;
+        width: 6rem;
+        font-size: 1rem;
+      }
+      .jump-error {
+        color: #ff9a9a;
+        font-size: 0.85rem;
+        width: 100%;
+      }
+      .mode-row {
+        margin-bottom: 0.75rem;
+      }
+      .auto-cluster {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div data-testid="app-shell">
+        <div data-testid="banner-ws" class="banner banner-warn" hidden></div>
+        <div class="settings-row">
+          <label
+            >Port
+            <input data-testid="settings-port" type="number" min="1" max="65535" />
+          </label>
+          <label
+            >Password
+            <input data-testid="settings-password" type="password" />
+          </label>
+          <button data-testid="settings-save" class="ctl">Save</button>
+        </div>
+        <div class="tabs">
+          <button data-testid="tab-presets">Presets</button>
+          <button data-testid="tab-setup">Setup</button>
+          <button data-testid="tab-live" class="active">Live</button>
+        </div>
+        <div data-testid="pane-presets" class="pane" hidden>Presets — coming in Task 2.6</div>
+        <div data-testid="pane-setup" class="pane" hidden>Setup — coming in Task 2.6</div>
+        <div data-testid="pane-live" class="pane"></div>
+      </div>
+    </div>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
