@@ -131,7 +131,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       completion: preset.completion,
       presetId: preset.id,
     };
-    opts.controller.startSession(cfg, preset.style, preset.template);
+    opts.controller.startSession(cfg, preset.style, preset.template, preset.animation);
     opts.onSessionStarted();
   }
 

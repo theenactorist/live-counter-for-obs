@@ -336,6 +336,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     };
     const style = buildStyle();
     const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
+    const animation = buildAnimation();
     // Review fix (Critical 2): canStart()'s completionValid() gate above
     // should already prevent createSession() from throwing on an invalid
     // completion config, but wrap the call anyway — defense in depth, so ANY
@@ -343,7 +344,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // setup-error instead of silently escaping the click handler (button
     // click handlers have no caller to report a thrown error to).
     try {
-      opts.controller.startSession(cfg, style, template);
+      opts.controller.startSession(cfg, style, template, animation);
     } catch (err) {
       ui.error = err instanceof Error ? err.message : String(err);
       render();

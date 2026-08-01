@@ -4,7 +4,7 @@
 // that ever calls `storage.saveSession`/`bus.send('state', …)`. Everything
 // else (dock UI, overlay) only reads via `getState()`/`subscribe()` or issues
 // commands via `dispatch()`.
-import type { Session, Command, ApplyResult, Effect, StyleConfig } from '../engine/types.js';
+import type { Session, Command, ApplyResult, Effect, StyleConfig, AnimationConfig } from '../engine/types.js';
 import { applyCommand, createSession, NonceWindow, type SessionConfig } from '../engine/counter.js';
 import type { AutoTimer, TimerHooks } from './timer.js';
 import type { Bus } from '../protocol/bus.js';
@@ -75,6 +75,12 @@ export class SessionController {
   // adopted, and correctly stays number-only (style/template null).
   private style: StyleConfig | null = null;
   private template: string | null = null;
+  // Task 2.7 — same controller-instance-only lifetime/recovery story as
+  // style/template above (see the comment block just above): the overlay
+  // renderer needs an AnimationConfig to know how to animate a value change,
+  // but AnimationConfig lives on Preset, not Session, so it rides along next
+  // to style/template rather than becoming Session state.
+  private animation: AnimationConfig | null = null;
 
   private heartbeat = 0;
   private heartbeatHandle: unknown = null;
@@ -181,12 +187,13 @@ export class SessionController {
     this.startHeartbeat();
   }
 
-  startSession(cfg: SessionConfig, style: StyleConfig, template: string | null): void {
+  startSession(cfg: SessionConfig, style: StyleConfig, template: string | null, animation: AnimationConfig | null): void {
     this.timer.stop();
     this.cancelHold();
     this.session = createSession(cfg, this.nowMs());
     this.style = style;
     this.template = template;
+    this.animation = animation;
     this.recovered = false;
     this.lastAction = null;
     // A snapshot left over from a previous session's keepOverlay:true
@@ -208,10 +215,11 @@ export class SessionController {
   // state was missing. Guarded by `disposed` for the same reason every other
   // mutating method is: a settings-save reconnect that races this call must
   // never have an old, torn-down controller instance broadcast again.
-  adoptPresentation(style: StyleConfig, template: string | null): void {
+  adoptPresentation(style: StyleConfig, template: string | null, animation: AnimationConfig | null): void {
     if (this.disposed) return;
     this.style = style;
     this.template = template;
+    this.animation = animation;
     void this.broadcast();
     this.notify();
   }
@@ -429,6 +437,7 @@ export class SessionController {
         snapshot: this.snapshot,
         style: this.style, // Task 2.6 re-derives from preset after a reload
         template: this.template, // Task 2.6 re-derives from preset after a reload
+        animation: this.animation, // Task 2.7 — same re-derivation story as style/template
         heartbeat: this.heartbeat,
       });
       this.broadcastFailureLogged = false;

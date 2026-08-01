@@ -19,7 +19,7 @@ import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
 import type { SessionConfig } from '../engine/counter.js';
-import type { StyleConfig } from '../engine/types.js';
+import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 
 const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
@@ -307,7 +307,7 @@ function main(): void {
         if (session === null || session.presetId === null) return;
         const outcome = await bootedStorage.loadPresets();
         const preset = (outcome.value ?? []).find((p) => p.id === session.presetId);
-        if (preset) bootedController.adoptPresentation(preset.style, preset.template);
+        if (preset) bootedController.adoptPresentation(preset.style, preset.template, preset.animation);
       })
       .catch(() => {
         // Best-effort re-derivation only: init() and loadPresets() are both
@@ -326,8 +326,12 @@ function main(): void {
       // hook is a deliberately-retained shortcut, not a stub.
       (window as unknown as { __lc: unknown }).__lc = {
         controller,
-        startSession: (cfg: SessionConfig, style?: StyleConfig, template?: string | null) =>
-          controller.startSession(cfg, style ?? DEV_DEFAULT_STYLE, template ?? null),
+        startSession: (
+          cfg: SessionConfig,
+          style?: StyleConfig,
+          template?: string | null,
+          animation?: AnimationConfig | null,
+        ) => controller.startSession(cfg, style ?? DEV_DEFAULT_STYLE, template ?? null, animation ?? null),
       };
     }
   }

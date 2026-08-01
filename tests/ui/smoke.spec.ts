@@ -68,27 +68,48 @@ test.describe('dock.html', () => {
 });
 
 test.describe('overlay.html', () => {
-  test('renders empty overlay-root over a transparent body, zero console errors, no network', async ({
+  // Task 2.7 replaced the static stub with the real overlay boot, which
+  // connects to OBS on load (same reasoning as the dock.html test above) — a
+  // real (mock) obs-websocket server is required so the connection succeeds
+  // instead of logging a failed-WebSocket console error that would trip the
+  // zero-console-errors assertion below.
+  test('renders overlay-root over a transparent body, connects to OBS + sends hello, zero console errors, no disallowed network', async ({
     page,
   }) => {
-    const errors = trackConsoleErrors(page);
-    const requests = await trackRequests(page);
+    const mock = await startMockObs();
+    try {
+      const errors = trackConsoleErrors(page);
+      const requests = await trackRequests(page);
 
-    await page.goto(OVERLAY_URL);
+      await page.goto(`${OVERLAY_URL}?port=${mock.port}`);
 
-    const root = page.getByTestId('overlay-root');
-    await expect(root).toBeAttached();
+      const root = page.getByTestId('overlay-root');
+      await expect(root).toBeAttached();
 
-    const bodyBackground = await page.evaluate(
-      () => getComputedStyle(document.body).backgroundColor,
-    );
-    // Transparent renders as rgba(0, 0, 0, 0) once computed.
-    expect(bodyBackground).toBe('rgba(0, 0, 0, 0)');
+      const bodyBackground = await page.evaluate(
+        () => getComputedStyle(document.body).backgroundColor,
+      );
+      // Transparent renders as rgba(0, 0, 0, 0) once computed.
+      expect(bodyBackground).toBe('rgba(0, 0, 0, 0)');
 
-    expect(errors).toEqual([]);
+      // Proves the real WS wiring (not just the markup) is live: identifies
+      // against the mock server and sends its 'hello' handshake.
+      await expect
+        .poll(() =>
+          mock.broadcasts.some((b) => {
+            const d = b.eventData as { kind?: string; source?: string } | undefined;
+            return d?.kind === 'hello' && d?.source === 'overlay';
+          }),
+        )
+        .toBe(true);
 
-    for (const url of requests) {
-      expect(url.startsWith('file://')).toBe(true);
+      expect(errors).toEqual([]);
+
+      for (const url of requests) {
+        expect(url.startsWith('file://')).toBe(true);
+      }
+    } finally {
+      await mock.close();
     }
   });
 });

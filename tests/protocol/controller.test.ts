@@ -13,7 +13,7 @@ import { AutoTimer } from '../../src/dock/timer.js';
 import { SessionController, type Scheduler } from '../../src/dock/controller.js';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession } from '../../src/engine/migrate.js';
-import type { StyleConfig } from '../../src/engine/types.js';
+import type { StyleConfig, AnimationConfig } from '../../src/engine/types.js';
 
 const KEY_SESSION = 'lc.session.v1';
 
@@ -159,7 +159,7 @@ async function setup(): Promise<Harness> {
 describe('SessionController — accept path: persist then broadcast', () => {
   it('an accepted command calls storage.saveSession before bus.send, exactly once each', async () => {
     const { storage, bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
 
     const saveSpy = vi.spyOn(storage, 'saveSession');
     const sendSpy = vi.spyOn(bus, 'send');
@@ -173,10 +173,24 @@ describe('SessionController — accept path: persist then broadcast', () => {
   });
 });
 
+describe('SessionController — startSession() animation broadcast', () => {
+  it('broadcasts the animation config passed to startSession, defaulting to null when omitted', async () => {
+    const { bus, controller } = await setup();
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    const animation: AnimationConfig = { type: 'slideUp', target: 'both', durationMs: 250 };
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, animation);
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const payload = sendSpy.mock.calls[0]![1] as { animation: unknown };
+    expect(payload.animation).toEqual(animation);
+  });
+});
+
 describe('SessionController — nonce dedup', () => {
   it('a duplicate nonce is rejected with duplicate-nonce, same session ref, no persist/broadcast', async () => {
     const { storage, bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
 
     const first = controller.dispatch({ type: 'increment', nonce: 'dup-1' });
     expect(first.accepted).toBe(true);
@@ -197,7 +211,7 @@ describe('SessionController — nonce dedup', () => {
 describe('SessionController — rejection logging', () => {
   it('an engine rejection (out-of-range) is logged via storage.log, not persisted or broadcast', async () => {
     const { storage, bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 2, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 2, mode: 'manual' }, styleFixture(), null, null);
 
     const logSpy = vi.spyOn(storage, 'log');
     const saveSpy = vi.spyOn(storage, 'saveSession');
@@ -240,6 +254,7 @@ describe('SessionController — timer wiring', () => {
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 2 },
       styleFixture(),
       null,
+      null,
     );
 
     const startSpy = vi.spyOn(timer, 'start');
@@ -256,6 +271,7 @@ describe('SessionController — timer wiring', () => {
     controller.startSession(
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
@@ -274,6 +290,7 @@ describe('SessionController — timer wiring', () => {
     controller.startSession(
       { startValue: 0, finishValue: 5, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
     controller.dispatch({ type: 'reverse', nonce: 'n1' }); // direction -> down, value stays 0 (now the boundary)
@@ -294,6 +311,7 @@ describe('SessionController — timer wiring', () => {
       { startValue: 4, finishValue: 5, mode: 'automatic', intervalSeconds: 1, completion: { kind: 'hold' } },
       styleFixture(),
       null,
+      null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
     expect(timer.running).toBe(true);
@@ -311,6 +329,7 @@ describe('SessionController — timer wiring', () => {
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
       null,
+      null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
 
@@ -326,6 +345,7 @@ describe('SessionController — timer wiring', () => {
     controller.startSession(
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
@@ -346,6 +366,7 @@ describe('SessionController — timer wiring', () => {
     controller.startSession(
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
@@ -373,6 +394,7 @@ describe('SessionController — holdThenHide completion', () => {
       { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 5 } },
       styleFixture(),
       null,
+      null,
     );
 
     const result = controller.dispatch({ type: 'increment', nonce: 'n1' }); // 0 -> 1: completes
@@ -393,6 +415,7 @@ describe('SessionController — holdThenHide completion', () => {
     controller.startSession(
       { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 5 } },
       styleFixture(),
+      null,
       null,
     );
 
@@ -417,6 +440,7 @@ describe('SessionController — exit-from-complete re-show', () => {
       { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } },
       styleFixture(),
       null,
+      null,
     );
 
     controller.dispatch({ type: 'increment', nonce: 'n1' }); // 0 -> 1: completes, kind:hide auto-hides
@@ -436,7 +460,7 @@ describe('SessionController — endSession', () => {
     const { storage, bus, controller } = await setup();
     const style = styleFixture();
 
-    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, style, '{count} left');
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, style, '{count} left', null);
     controller.dispatch({ type: 'increment', nonce: 'n1' });
     controller.dispatch({ type: 'increment', nonce: 'n2' }); // currentValue = 2
 
@@ -457,7 +481,7 @@ describe('SessionController — endSession', () => {
 
   it('keepOverlay:false clears the snapshot', async () => {
     const { storage, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'tpl');
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'tpl', null);
     controller.dispatch({ type: 'increment', nonce: 'n1' });
 
     const result = controller.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'n2' });
@@ -469,12 +493,12 @@ describe('SessionController — endSession', () => {
 
   it('startSession clears any stale overlay snapshot left over from a previous ended session', async () => {
     const { storage, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-a');
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-a', null);
     controller.dispatch({ type: 'increment', nonce: 'n1' });
     controller.dispatch({ type: 'endSession', keepOverlay: true, nonce: 'n2' });
     expect(controller.getState().snapshot).not.toBeNull(); // sanity: a snapshot really is there
 
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-b');
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-b', null);
 
     expect(controller.getState().snapshot).toBeNull();
     expect(storage.loadSnapshot()).toBeNull();
@@ -545,7 +569,7 @@ describe('SessionController — init()', () => {
     const controller = new SessionController({ storage, bus, timer, scheduler });
 
     const initPromise = controller.init(); // storage.loadSession() kicks off, not yet resolved
-    controller.startSession({ startValue: 0, finishValue: 20, mode: 'manual' }, styleFixture(), null); // wins the race
+    controller.startSession({ startValue: 0, finishValue: 20, mode: 'manual' }, styleFixture(), null, null);
     await initPromise;
 
     const state = controller.getState();
@@ -605,7 +629,7 @@ describe('SessionController — init()', () => {
 describe('SessionController — lastAction', () => {
   it('is set on an accepted dispatch with the human-short label and resulting value; unchanged on rejection', async () => {
     const { controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
 
     controller.dispatch({ type: 'increment', nonce: 'n1' });
     expect(controller.getState().lastAction).toEqual({ label: '+1', value: 1 });
@@ -620,6 +644,7 @@ describe('SessionController — lastAction', () => {
     controller.startSession(
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
 
@@ -640,6 +665,7 @@ describe('SessionController — notify() resilience', () => {
     controller.startSession(
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
+      null,
       null,
     );
 
@@ -672,7 +698,7 @@ describe('SessionController — notify() resilience', () => {
 
   it('a subscriber that unsubscribes itself mid-notify does not break delivery to the remaining subscribers', async () => {
     const { controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
 
     const order: string[] = [];
     let unsubA: () => void = () => {};
@@ -692,7 +718,7 @@ describe('SessionController — notify() resilience', () => {
 describe('SessionController — broadcast() resilience', () => {
   it('broadcast failures log broadcast-failed only once until a subsequent success (flag resets), and dispatch always returns correctly with no unhandled rejection', async () => {
     const { storage, bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
 
     const logSpy = vi.spyOn(storage, 'log');
     const sendSpy = vi.spyOn(bus, 'send');
@@ -736,27 +762,29 @@ describe('SessionController — adoptPresentation()', () => {
     // adoptPresentation to prove the method — not startSession — is what
     // changed the broadcast payload.
     void storage2; // storage2 unused beyond documenting the recovery scenario in prose
-    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'old-{count}');
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'old-{count}', null);
     const sessionBefore = controller.getState().session;
 
     const sendSpy = vi.spyOn(bus, 'send');
     const newStyle = { ...styleFixture(), numberColor: '#00ff00' };
-    controller.adoptPresentation(newStyle, 'new-{count}');
+    const newAnimation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 300 };
+    controller.adoptPresentation(newStyle, 'new-{count}', newAnimation);
 
     expect(controller.getState().session).toBe(sessionBefore); // untouched
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    const payload = sendSpy.mock.calls[0]![1] as { style: unknown; template: unknown };
+    const payload = sendSpy.mock.calls[0]![1] as { style: unknown; template: unknown; animation: unknown };
     expect(payload.style).toEqual(newStyle);
     expect(payload.template).toBe('new-{count}');
+    expect(payload.animation).toEqual(newAnimation);
   });
 
   it('is a no-op after dispose() — no broadcast, no state change', async () => {
     const { bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
     controller.dispose();
 
     const sendSpy = vi.spyOn(bus, 'send');
-    controller.adoptPresentation(styleFixture(), 'tpl');
+    controller.adoptPresentation(styleFixture(), 'tpl', null);
 
     expect(sendSpy).not.toHaveBeenCalled();
   });
@@ -790,6 +818,7 @@ describe('SessionController — dispose()', () => {
       { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
       styleFixture(),
       null,
+      null,
     );
     controller.dispatch({ type: 'start', nonce: 'n1' });
     expect(timer.running).toBe(true);
@@ -808,6 +837,7 @@ describe('SessionController — dispose()', () => {
       { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 5 } },
       styleFixture(),
       null,
+      null,
     );
     controller.dispatch({ type: 'increment', nonce: 'n1' }); // completes, hold scheduled
     expect(scheduler.pendingCount()).toBe(1);
@@ -818,7 +848,7 @@ describe('SessionController — dispose()', () => {
 
   it('dispatch() after dispose returns the synthetic invalid-state rejection and never persists/broadcasts', async () => {
     const { storage, bus, controller } = await setup();
-    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
 
     controller.dispose();
 
