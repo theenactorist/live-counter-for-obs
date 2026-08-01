@@ -6,12 +6,23 @@
 //
 // Rendering strategy: a single `render()` rebuilds the mounted container's
 // entire subtree from (controller.getState(), local UI state) on every
-// controller notification, bus "is the overlay alive" tick, and local UI
-// interaction (jump typing, confirm dialogs). This is simple and correct —
+// controller notification (including automatic-mode ticks, up to several
+// times a second) and local UI interaction (jump typing, confirm dialogs).
 // Playwright drives every interaction through a fresh `getByTestId(...)`
-// locator lookup, which always finds the current element instance — at the
-// cost of recreating DOM nodes more often than a diffing approach would.
-// Given the Live view's size that tradeoff is the right one for Task 2.5.
+// locator lookup, which always finds the current element instance — but a
+// real operator can be mid-keystroke in `jump-input` when an unrelated
+// automatic tick fires a re-render, so `render()` captures the focused
+// element's `data-testid` (+ selection range, for text inputs) before
+// tearing down the subtree and restores it afterward (fix round 1, Task 2.5
+// review, Critical 2) — otherwise every re-render silently stole focus back
+// to nothing, dropping keystrokes.
+//
+// The one render trigger that does NOT go through `render()` at all is the
+// once-a-second overlay-silence poll (`updateOverlayBanner()`): it toggles
+// only the `banner-overlay` element in place, because a full rebuild purely
+// on a timer — with nothing else about the state having changed — has no
+// reason to exist and is exactly the kind of "helpful" background mutation
+// that stole focus in the first place.
 //
 // Escaping discipline: every dynamic string this view renders (values,
 // labels, progress text) is engine-produced or operator-typed-into-a-number-
@@ -33,10 +44,14 @@ export interface LiveViewHandle {
 
 // How long the "overlay not rendering" banner waits without a hello/
 // overlay-status bus message before it shows (locked in the brief at 10s).
+// Overridable via mountLiveView's opts (main.ts wires this to the
+// `?overlaySilenceMs=` test seam) so Playwright specs don't need to wait out
+// a real 10s window.
 const OVERLAY_SILENCE_MS = 10_000;
-// Re-render tick for the overlay-silence banner (it has no other event to
-// hang off of — nothing about the bus or the controller "ticks" once a
-// second on its own).
+// Poll tick for the overlay-silence banner (it has no other event to hang
+// off of — nothing about the bus or the controller "ticks" once a second on
+// its own). Deliberately does NOT call the full render() — see the module
+// doc comment above.
 const BANNER_POLL_MS = 1000;
 
 interface LiveUiState {
@@ -45,6 +60,16 @@ interface LiveUiState {
   resetConfirmOpen: boolean;
   endConfirmOpen: boolean;
   recoveredDismissed: boolean;
+}
+
+export interface MountLiveViewOptions {
+  overlaySilenceMs?: number;
+}
+
+interface FocusSnapshot {
+  testid: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -67,7 +92,14 @@ function button(testid: string, text: string, opts: { disabled?: boolean; extraC
   return b;
 }
 
-export function mountLiveView(container: HTMLElement, controller: SessionController, bus: Bus): LiveViewHandle {
+export function mountLiveView(
+  container: HTMLElement,
+  controller: SessionController,
+  bus: Bus,
+  opts: MountLiveViewOptions = {},
+): LiveViewHandle {
+  const silenceMs = opts.overlaySilenceMs ?? OVERLAY_SILENCE_MS;
+
   const ui: LiveUiState = {
     jumpOpen: false,
     jumpValue: '',
@@ -94,6 +126,8 @@ export function mountLiveView(container: HTMLElement, controller: SessionControl
   }
 
   function render(): void {
+    const focusSnapshot = captureFocus();
+
     const state = controller.getState();
     container.innerHTML = '';
 
@@ -110,14 +144,73 @@ export function mountLiveView(container: HTMLElement, controller: SessionControl
       container.appendChild(
         el('div', { 'data-testid': 'live-empty', class: 'live-empty' }, 'No active session — create one in Setup'),
       );
-      return;
+    } else {
+      container.appendChild(renderLive(session, state));
     }
 
-    container.appendChild(renderLive(session, state));
+    restoreFocus(focusSnapshot);
+  }
+
+  // Captures the currently-focused element's data-testid (+ text selection,
+  // for an input/textarea) so a full rebuild can restore it afterward.
+  // Returns null when nothing inside this view is focused, or the focused
+  // element carries no testid to re-find it by.
+  function captureFocus(): FocusSnapshot | null {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
+    const testid = active.getAttribute('data-testid');
+    if (!testid) return null;
+    let selectionStart: number | null = null;
+    let selectionEnd: number | null = null;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+      selectionStart = active.selectionStart;
+      selectionEnd = active.selectionEnd;
+    }
+    return { testid, selectionStart, selectionEnd };
+  }
+
+  function restoreFocus(snapshot: FocusSnapshot | null): void {
+    if (!snapshot) return;
+    const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
+    if (!target) return;
+    target.focus();
+    if (
+      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+      snapshot.selectionStart !== null &&
+      snapshot.selectionEnd !== null
+    ) {
+      try {
+        target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+      } catch {
+        // Some input types (e.g. a future numeric-only variant) don't
+        // support selection ranges — restoring focus alone is still
+        // strictly better than nothing, so swallow and move on.
+      }
+    }
   }
 
   function overlaySilent(): boolean {
-    return Date.now() - lastOverlaySeenAt >= OVERLAY_SILENCE_MS;
+    return Date.now() - lastOverlaySeenAt >= silenceMs;
+  }
+
+  // Fix round 1 (Task 2.5 review, Critical 2): the once-a-second poll below
+  // calls ONLY this — never the full render() — so an idle countdown to the
+  // overlay-silence banner can never itself be the thing that steals focus
+  // out of jump-input. Surgical: finds/creates/removes exactly the
+  // banner-overlay element, in place, leaving every other node (and focus)
+  // untouched.
+  function updateOverlayBanner(): void {
+    const session = controller.getState().session;
+    const shouldShow = session !== null && overlaySilent();
+    const existing = container.querySelector<HTMLElement>('[data-testid="banner-overlay"]');
+    if (shouldShow && !existing) {
+      const anchor = container.querySelector<HTMLElement>('[data-testid="live-root"], [data-testid="live-empty"]');
+      const banner = renderOverlayBanner();
+      if (anchor) container.insertBefore(banner, anchor);
+      else container.appendChild(banner);
+    } else if (!shouldShow && existing) {
+      existing.remove();
+    }
   }
 
   function renderRecoveredBanner(): HTMLElement {
@@ -242,10 +335,10 @@ export function mountLiveView(container: HTMLElement, controller: SessionControl
     input.value = ui.jumpValue;
     input.addEventListener('input', () => {
       ui.jumpValue = input.value;
+      // render()'s own captureFocus()/restoreFocus() (fix round 1, Critical
+      // 2) re-finds this same input by data-testid and restores both focus
+      // and the selection/cursor position — no manual refocus needed here.
       render();
-      const refocused = container.querySelector<HTMLInputElement>('[data-testid="jump-input"]');
-      refocused?.focus();
-      refocused?.setSelectionRange(refocused.value.length, refocused.value.length);
     });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -371,7 +464,7 @@ export function mountLiveView(container: HTMLElement, controller: SessionControl
       lastOverlaySeenAt = Date.now();
     }
   });
-  const bannerPoll = setInterval(() => render(), BANNER_POLL_MS);
+  const bannerPoll = setInterval(() => updateOverlayBanner(), BANNER_POLL_MS);
   document.addEventListener('keydown', onKeydown);
 
   render();

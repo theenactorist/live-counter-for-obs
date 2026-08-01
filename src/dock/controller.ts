@@ -75,6 +75,16 @@ export class SessionController {
   private heartbeatHandle: unknown = null;
   private holdHandle: unknown = null;
 
+  // Fix round 1 (Task 2.5 review, Critical 1): true once dispose() has run.
+  // A settings-save reconnect in main.ts discards the old client/storage/bus
+  // and builds a fresh stack in place (no page reload) — without a way to
+  // permanently silence the OLD controller instance, its heartbeat kept
+  // broadcasting on the (soon-to-be-closed) old bus forever, and any
+  // still-running AutoTimer kept self-dispatching ticks against the OLD
+  // storage, both racing the NEW controller as an undetectable "zombie"
+  // second writer.
+  private disposed = false;
+
   // Dedup flags: each failure mode is logged once when it starts happening,
   // then stays quiet on repeated failures, and resets the moment things
   // recover — so a persistently-throwing subscriber or a genuinely-down bus
@@ -201,12 +211,14 @@ export class SessionController {
   }
 
   private runDispatch(cmd: Command, isSelf: boolean): ApplyResult {
-    if (this.session === null) {
+    if (this.disposed || this.session === null) {
       this.storage.log('rejected', 'invalid-state');
-      // No active session to operate on. ApplyResult.session is typed as a
-      // non-null Session — there is no real session to hand back here, so
-      // this synthetic rejection documents the null-guarded case per the
-      // Task 2.4 contract rather than fabricating a fake Session shape.
+      // No active session to operate on — or this controller instance has
+      // been dispose()'d (fix round 1) and must behave, permanently, as if
+      // it had none. ApplyResult.session is typed as a non-null Session —
+      // there is no real session to hand back here, so this synthetic
+      // rejection documents the null-guarded case per the Task 2.4 contract
+      // rather than fabricating a fake Session shape.
       return { session: null as unknown as Session, accepted: false, rejection: 'invalid-state', effects: [] };
     }
 
@@ -352,11 +364,37 @@ export class SessionController {
 
   private startHeartbeat(): void {
     const beat = (): void => {
+      // Defense in depth alongside dispose()'s own scheduler.cancel() of the
+      // pending handle: if a beat() invocation is already in flight (e.g. the
+      // scheduler could not cancel in time), it must not broadcast again or
+      // re-arm the chain.
+      if (this.disposed) return;
       this.heartbeat++;
       void this.broadcast();
       this.heartbeatHandle = this.scheduler.schedule(HEARTBEAT_MS, beat);
     };
     this.heartbeatHandle = this.scheduler.schedule(HEARTBEAT_MS, beat);
+  }
+
+  // Fix round 1 (Task 2.5 review, Critical 1) — permanently tears down this
+  // controller instance: stops the AutoTimer (halting any in-flight
+  // automatic ticking), cancels a pending holdThenHide schedule, cancels the
+  // heartbeat's own pending re-arm (and the beat() guard above catches the
+  // race if cancel() couldn't reach it in time), and drops every subscriber.
+  // Idempotent — a second call is a safe no-op. After dispose(), dispatch()
+  // returns the same synthetic invalid-state rejection as a no-session
+  // controller (see runDispatch): a disposed controller must never persist
+  // or broadcast again, no matter what is dispatched to it.
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.timer.stop();
+    this.cancelHold();
+    if (this.heartbeatHandle !== null) {
+      this.scheduler.cancel(this.heartbeatHandle);
+      this.heartbeatHandle = null;
+    }
+    this.subscribers.clear();
   }
 
   private async broadcast(): Promise<void> {

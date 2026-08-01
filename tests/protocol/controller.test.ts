@@ -723,3 +723,84 @@ describe('SessionController — broadcast() resilience', () => {
     });
   });
 });
+
+// Fix round 1 (Task 2.5 review, Critical 1): dispose() must permanently
+// silence a controller instance — no further heartbeat, no further automatic
+// ticking, no further persist/broadcast on dispatch — so main.ts's
+// settings-save reconnect (discard the old client/storage/bus, build a fresh
+// stack in place, no page reload) never leaves a "zombie" second writer
+// running against storage/bus that are about to be torn down.
+describe('SessionController — dispose()', () => {
+  it('stops the heartbeat: no further scheduler entries, no further broadcasts', async () => {
+    const { bus, scheduler, controller } = await setup();
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    await controller.init(); // heartbeat 0 broadcast, chain armed (1 pending entry)
+    expect(scheduler.pendingCount()).toBe(1);
+
+    controller.dispose();
+
+    expect(scheduler.pendingCount()).toBe(0); // the pending heartbeat re-arm was cancelled
+    sendSpy.mockClear();
+    scheduler.fireNext(); // no-op: nothing left in the queue
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops the AutoTimer: an automatic session no longer ticks after dispose', async () => {
+    const { rt, timer, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+    );
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+    expect(timer.running).toBe(true);
+
+    controller.dispose();
+    expect(timer.running).toBe(false);
+
+    const valueAtDispose = controller.getState().session?.currentValue;
+    rt.advanceTo(5_000); // several ticks' worth of time — none should fire
+    expect(controller.getState().session?.currentValue).toBe(valueAtDispose);
+  });
+
+  it('cancels a pending holdThenHide schedule', async () => {
+    const { scheduler, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 5 } },
+      styleFixture(),
+      null,
+    );
+    controller.dispatch({ type: 'increment', nonce: 'n1' }); // completes, hold scheduled
+    expect(scheduler.pendingCount()).toBe(1);
+
+    controller.dispose();
+    expect(scheduler.pendingCount()).toBe(0);
+  });
+
+  it('dispatch() after dispose returns the synthetic invalid-state rejection and never persists/broadcasts', async () => {
+    const { storage, bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+
+    controller.dispose();
+
+    const saveSpy = vi.spyOn(storage, 'saveSession');
+    const sendSpy = vi.spyOn(bus, 'send');
+    const result = controller.dispatch({ type: 'increment', nonce: 'n1' });
+
+    expect(result.accepted).toBe(false);
+    expect(result.rejection).toBe('invalid-state');
+    expect(result.session).toBeNull();
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent — a second dispose() call is a safe no-op', async () => {
+    const { scheduler, controller } = await setup();
+    await controller.init();
+
+    controller.dispose();
+    expect(() => controller.dispose()).not.toThrow();
+    expect(scheduler.pendingCount()).toBe(0);
+  });
+});

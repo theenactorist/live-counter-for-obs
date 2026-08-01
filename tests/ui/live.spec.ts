@@ -18,11 +18,19 @@ interface StartCfg {
   intervalSeconds?: number;
 }
 
-async function openDock(page: Page, opts: { port: number; devhook?: boolean }): Promise<void> {
+async function openDock(
+  page: Page,
+  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number },
+): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
+  if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+async function readValue(page: Page): Promise<number> {
+  return Number(await page.getByTestId('current-value').textContent());
 }
 
 /** Waits for the devhook seam to exist, then starts a session through it. */
@@ -199,15 +207,23 @@ test.describe('dock Live view', () => {
       await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
 
       await page.getByTestId('auto-start').click();
-      await page.waitForTimeout(1100);
-      const grown = Number(await page.getByTestId('current-value').textContent());
-      expect(grown).toBeGreaterThan(0);
+      // expect.poll self-terminates as soon as the value grows, instead of a
+      // fixed guess at how long "a few ticks" takes.
+      await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(0);
 
       await page.getByTestId('auto-pause').click();
-      const paused = await page.getByTestId('current-value').textContent();
-      await page.waitForTimeout(500);
-      const stillPaused = await page.getByTestId('current-value').textContent();
-      expect(stillPaused).toBe(paused);
+      const paused = await readValue(page);
+
+      // expect.poll can express "eventually true," not "stays true for a
+      // whole window" — an already-true toBe(paused) would resolve on its
+      // first attempt without observing anything. To prove pause actually
+      // halts ticking (not just "hasn't ticked *yet*"), sample repeatedly
+      // across a window well past one 0.25s tick interval and assert every
+      // sample still matches.
+      for (let i = 0; i < 5; i++) {
+        await page.waitForTimeout(120);
+        expect(await readValue(page)).toBe(paused);
+      }
     } finally {
       await mock.close();
     }
@@ -321,7 +337,9 @@ test.describe('dock Live view', () => {
     }
   });
 
-  test('300x800 viewport: no horizontal scroll, primary controls visible and >=44px tall', async ({ page }) => {
+  test('300x800 viewport: no horizontal scroll, primary controls visible and >=44px in both dimensions', async ({
+    page,
+  }) => {
     const mock = await startMockObs();
     try {
       await page.setViewportSize({ width: 300, height: 800 });
@@ -338,6 +356,7 @@ test.describe('dock Live view', () => {
         const box = await locator.boundingBox();
         expect(box).not.toBeNull();
         expect(box!.height).toBeGreaterThanOrEqual(44);
+        expect(box!.width).toBeGreaterThanOrEqual(44);
       }
     } finally {
       await mock.close();
@@ -358,6 +377,156 @@ test.describe('dock Live view', () => {
       await page.keyboard.press('+');
 
       await expect(page.getByTestId('current-value')).toHaveText('1');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Fix round 1 (coordinator review) -----------------------------------
+
+  test('ws goes down mid-session: counting continues offline, banner-ws appears, value survives a reload', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    const port = mock.port;
+
+    await openDock(page, { port });
+    await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+    await mock.close(); // server goes away mid-session — nothing further to tear down.
+
+    const plus = page.getByTestId('btn-plus');
+    await plus.click();
+    await plus.click();
+    await expect(page.getByTestId('current-value')).toHaveText('2');
+
+    // Default settings carry an empty password, so the first-run banner
+    // fires once the client fails to (re)identify within its 3s grace
+    // window — the *reason* here is a truly dead server rather than a
+    // not-yet-entered password, but the visible symptom is the same banner.
+    await expect(page.getByTestId('banner-ws')).toBeVisible({ timeout: 5000 });
+
+    // Reload against the SAME (still-dead) port: the value must come back
+    // from localStorage, not from the (unreachable) server.
+    await openDock(page, { port, devhook: false });
+    await expect(page.getByTestId('current-value')).toHaveText('2');
+  });
+
+  test('banner-overlay appears once the silence threshold elapses with an active session', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, overlaySilenceMs: 500 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      await expect(page.getByTestId('banner-overlay')).toHaveCount(0); // not yet past the (shrunk) threshold
+      await expect(page.getByTestId('banner-overlay')).toBeVisible({ timeout: 2000 }); // now past it
+      await expect(page.getByTestId('banner-overlay')).toContainText('Overlay not rendering');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('banner-overlay never appears without an active session, even past the silence threshold', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, overlaySilenceMs: 300, devhook: false });
+      await page.waitForTimeout(600); // well past the threshold, but no session was ever started
+      await expect(page.getByTestId('banner-overlay')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('typing in jump-input survives the idle overlay-silence poll (no counter mutation, focus retained)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 100, mode: 'manual' });
+
+      await page.getByTestId('btn-jump').click();
+      const input = page.getByTestId('jump-input');
+      await input.focus();
+
+      await page.waitForTimeout(1300); // idle through at least one 1s overlay-silence poll tick
+
+      await input.pressSequentially('5');
+      await expect(input).toHaveValue('5');
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // unaffected
+
+      const activeTestId = await page.evaluate(() => document.activeElement?.getAttribute('data-testid'));
+      expect(activeTestId).toBe('jump-input');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('typing in jump-input survives automatic ticks mid-run (focus + value preserved)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+
+      await page.getByTestId('btn-jump').click();
+      const input = page.getByTestId('jump-input');
+      await input.focus();
+
+      // Ticks land every 0.25s; typing with >300ms between keystrokes
+      // guarantees at least one tick-triggered render() happens while the
+      // input is focused mid-entry.
+      await input.pressSequentially('42', { delay: 350 });
+
+      await expect(input).toHaveValue('42');
+      await expect(page.getByTestId('jump-preview')).toContainText('→ 42');
+
+      const activeTestId = await page.evaluate(() => document.activeElement?.getAttribute('data-testid'));
+      expect(activeTestId).toBe('jump-input');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('settings save mid-session (automatic, running): reconnect leaves the value stable, no zombie ticking survives a further reload', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+
+      // Let it tick a couple of times before reconnecting.
+      await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(0);
+
+      // Re-save settings with the SAME port: forces main.ts's boot() to
+      // dispose() the old controller, close() the old client, and build a
+      // fresh stack in place (no navigation).
+      await page.getByTestId('settings-port').fill(String(mock.port));
+      await page.getByTestId('settings-save').click();
+
+      // The reconnected controller's own init() restores an
+      // automatic+running session as paused (Task 2.4 rule) — it will not
+      // tick again on its own. A lingering, undisposed OLD controller's
+      // AutoTimer would keep ticking in the background and keep overwriting
+      // localStorage — invisible in THIS page's DOM (which now renders the
+      // NEW controller's in-memory state), so sample the value across
+      // ~1.5s first...
+      const afterReconnect = await readValue(page);
+      for (let i = 0; i < 5; i++) {
+        await page.waitForTimeout(300);
+        expect(await readValue(page)).toBe(afterReconnect);
+      }
+
+      // ...then reload once more and confirm the persisted value still
+      // matches: a zombie old controller ticking in the background for
+      // those 1.5s would have kept writing an ever-larger value to
+      // localStorage, which this reload would now pick up instead.
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('current-value')).toHaveText(String(afterReconnect));
     } finally {
       await mock.close();
     }
