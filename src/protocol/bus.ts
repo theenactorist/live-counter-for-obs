@@ -37,7 +37,10 @@ function isBusMessage(x: unknown): x is BusMessage {
   return true;
 }
 
-function generateNonce(): string {
+// Exported so any other module that needs a guarded, envelope-consistent
+// nonce (e.g. dock/controller.ts's internal self-dispatches) reuses this one
+// implementation instead of calling crypto.randomUUID() directly.
+export function generateNonce(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
   // Fallback for environments without crypto.randomUUID (kept purely

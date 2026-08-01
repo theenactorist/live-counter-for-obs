@@ -8,6 +8,7 @@ import type { Session, Command, ApplyResult, Effect, StyleConfig } from '../engi
 import { applyCommand, createSession, NonceWindow, type SessionConfig } from '../engine/counter.js';
 import type { AutoTimer, TimerHooks } from './timer.js';
 import type { Bus } from '../protocol/bus.js';
+import { generateNonce } from '../protocol/bus.js';
 import type { DockStorage, OverlaySnapshot } from '../protocol/persistence.js';
 
 export interface Scheduler {
@@ -47,10 +48,6 @@ const LABELS: Record<Command['type'], string> = {
   endSession: 'End',
 };
 
-function selfNonce(): string {
-  return crypto.randomUUID();
-}
-
 export class SessionController {
   private readonly storage: DockStorage;
   private readonly bus: Bus;
@@ -78,6 +75,13 @@ export class SessionController {
   private heartbeatHandle: unknown = null;
   private holdHandle: unknown = null;
 
+  // Dedup flags: each failure mode is logged once when it starts happening,
+  // then stays quiet on repeated failures, and resets the moment things
+  // recover — so a persistently-throwing subscriber or a genuinely-down bus
+  // can never flood the (bounded, 500-entry) log ring buffer.
+  private notifyFailureLogged = false;
+  private broadcastFailureLogged = false;
+
   constructor(deps: { storage: DockStorage; bus: Bus; timer: AutoTimer; scheduler: Scheduler; nowMs?: () => number }) {
     this.storage = deps.storage;
     this.bus = deps.bus;
@@ -97,32 +101,68 @@ export class SessionController {
     };
   }
 
+  // Iterates a SNAPSHOT array of the subscribers, not the live Set: a
+  // subscriber unsubscribing itself (or another, not-yet-visited one) mid
+  // fan-out must not affect who else fires this round. Each subscriber runs
+  // inside its own try/catch — a throwing subscriber (e.g. a Task 2.5
+  // DOM-rendering one hitting a render bug) must never suppress delivery to
+  // the rest, and — critically, since notify() runs inside dispatch(), which
+  // onTick calls synchronously from inside AutoTimer.fire() — must never
+  // propagate out and skip AutoTimer's re-arm, which would silently kill
+  // automatic counting for the rest of the service.
   private notify(): void {
     const state = this.getState();
-    for (const fn of this.subscribers) fn(state);
+    let anyFailure = false;
+    for (const fn of [...this.subscribers]) {
+      try {
+        fn(state);
+      } catch (err) {
+        anyFailure = true;
+        if (!this.notifyFailureLogged) {
+          this.notifyFailureLogged = true;
+          this.storage.log('subscriber-error', err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+    if (!anyFailure) this.notifyFailureLogged = false;
   }
 
   async init(): Promise<void> {
     const outcome = await this.storage.loadSession();
-    this.snapshot = this.storage.loadSnapshot();
 
-    let session = outcome.value;
-    this.recovered = session !== null;
+    // Clobber guard: storage.loadSession() is async, and a caller can call
+    // startSession() (or, in principle, another init()) while this await is
+    // still pending — e.g. the dock renders immediately and the operator
+    // clicks "start new session" before the storage round-trip resolves. A
+    // session that already exists by the time the load resolves WON'T be
+    // overwritten by whatever was on disk before it was created; the live
+    // session always wins.
+    if (this.session === null) {
+      this.snapshot = this.storage.loadSnapshot();
 
-    // A stored automatic session that was `running` when the dock last
-    // closed cannot resume ticking silently on load — restore it as
-    // `paused` instead, WITHOUT running it through applyCommand/tick (that
-    // would consume a phantom interval of elapsed wall-clock time). Persist
-    // the corrected shape back immediately so a second reload sees `paused`
-    // too, not `running` again.
-    if (session !== null && session.mode === 'automatic' && session.status === 'running') {
-      session = { ...session, status: 'paused', revision: session.revision + 1, updatedAt: new Date(this.nowMs()).toISOString() };
-      this.storage.saveSession(session);
+      let session = outcome.value;
+      this.recovered = session !== null;
+
+      // A stored automatic session that was `running` when the dock last
+      // closed cannot resume ticking silently on load — restore it as
+      // `paused` instead, WITHOUT running it through applyCommand/tick (that
+      // would consume a phantom interval of elapsed wall-clock time). Persist
+      // the corrected shape back immediately so a second reload sees `paused`
+      // too, not `running` again.
+      if (session !== null && session.mode === 'automatic' && session.status === 'running') {
+        session = { ...session, status: 'paused', revision: session.revision + 1, updatedAt: new Date(this.nowMs()).toISOString() };
+        this.storage.saveSession(session);
+      }
+
+      this.session = session;
+
+      if (outcome.warning !== null) {
+        this.storage.log('session-load', outcome.warning);
+      }
     }
 
-    this.session = session;
-    this.notify();
     await this.broadcast();
+    this.notify();
     this.startHeartbeat();
   }
 
@@ -134,12 +174,33 @@ export class SessionController {
     this.template = template;
     this.recovered = false;
     this.lastAction = null;
+    // A snapshot left over from a previous session's keepOverlay:true
+    // endSession must not keep haunting a brand new session.
+    this.snapshot = null;
+    this.storage.saveSnapshot(null);
     this.storage.saveSession(this.session);
-    this.notify();
     void this.broadcast();
+    this.notify();
   }
 
   dispatch(cmd: Command): ApplyResult {
+    return this.runDispatch(cmd, false);
+  }
+
+  // Internal self-dispatch path used by the timer hooks and the
+  // holdThenHide schedule (tick, the pause a rejected tick or a sleep gap
+  // triggers, and completionHide). Two differences from an operator
+  // dispatch(): (1) it can never collide with the NonceWindow — every
+  // self-nonce is a fresh generateNonce(), so there is nothing to replay and
+  // burning a window slot on it is pure waste; (2) it must NEVER overwrite
+  // `lastAction` — that field exists purely to flash the OPERATOR's own last
+  // action, and a `tick` firing once a second would otherwise blow away a
+  // manual `+1`'s flash almost immediately.
+  private selfDispatch(cmd: Command): ApplyResult {
+    return this.runDispatch(cmd, true);
+  }
+
+  private runDispatch(cmd: Command, isSelf: boolean): ApplyResult {
     if (this.session === null) {
       this.storage.log('rejected', 'invalid-state');
       // No active session to operate on. ApplyResult.session is typed as a
@@ -149,11 +210,13 @@ export class SessionController {
       return { session: null as unknown as Session, accepted: false, rejection: 'invalid-state', effects: [] };
     }
 
-    if (this.nonceWindow.has(cmd.nonce)) {
-      this.storage.log('rejected', 'duplicate-nonce');
-      return { session: this.session, accepted: false, rejection: 'duplicate-nonce', effects: [] };
+    if (!isSelf) {
+      if (this.nonceWindow.has(cmd.nonce)) {
+        this.storage.log('rejected', 'duplicate-nonce');
+        return { session: this.session, accepted: false, rejection: 'duplicate-nonce', effects: [] };
+      }
+      this.nonceWindow.add(cmd.nonce);
     }
-    this.nonceWindow.add(cmd.nonce);
 
     const prevInterval = this.session.intervalSeconds;
     const result = applyCommand(this.session, cmd, this.nowMs());
@@ -170,11 +233,13 @@ export class SessionController {
     this.wireTimer(cmd, result, prevInterval);
     this.maybeCancelHold();
 
-    this.lastAction = { label: LABELS[cmd.type], value };
+    if (!isSelf) {
+      this.lastAction = { label: LABELS[cmd.type], value };
+    }
 
     this.storage.saveSession(this.session);
-    this.notify();
     void this.broadcast();
+    this.notify();
 
     return result;
   }
@@ -195,13 +260,21 @@ export class SessionController {
   }
 
   private scheduleHoldThenHide(seconds: number): void {
+    // Defense in depth: under the current applyCommand invariants a fresh
+    // 'completed' effect is never processed while a prior hold handle is
+    // still live (any exit from complete cancels it first via
+    // maybeCancelHold, and a single dispatch can't both exit and re-enter
+    // complete) — but cancel any existing handle before scheduling anyway,
+    // so this method can never leak/double-schedule even if that invariant
+    // is ever violated by a future change.
+    this.cancelHold();
     this.holdHandle = this.scheduler.schedule(seconds * 1000, () => {
       this.holdHandle = null;
       // Only fire if still complete — an intervening dispatch may already
       // have exited complete (and cancelled this handle), but guard anyway
       // in case the scheduler cannot cancel in time.
       if (this.session !== null && this.session.status === 'complete') {
-        this.dispatch({ type: 'completionHide', nonce: selfNonce() });
+        this.selfDispatch({ type: 'completionHide', nonce: generateNonce() });
       }
     });
   }
@@ -264,15 +337,15 @@ export class SessionController {
   private timerHooks(): TimerHooks {
     return {
       onTick: () => {
-        const r = this.dispatch({ type: 'tick', nonce: selfNonce() });
+        const r = this.selfDispatch({ type: 'tick', nonce: generateNonce() });
         if (!r.accepted) {
-          this.dispatch({ type: 'pause', nonce: selfNonce() });
+          this.selfDispatch({ type: 'pause', nonce: generateNonce() });
         }
       },
       onSleepGap: () => {
         // AutoTimer has already stopped itself on a sleep gap; this only
         // brings the session's own status in line (running -> paused).
-        this.dispatch({ type: 'pause', nonce: selfNonce() });
+        this.selfDispatch({ type: 'pause', nonce: generateNonce() });
       },
     };
   }
@@ -295,11 +368,19 @@ export class SessionController {
         template: this.template, // Task 2.6 re-derives from preset after a reload
         heartbeat: this.heartbeat,
       });
-    } catch {
+      this.broadcastFailureLogged = false;
+    } catch (err) {
       // Best-effort broadcast: a transient bus failure (OBS momentarily
       // unreachable, socket mid-reconnect) must never crash dispatch(),
       // startSession(), init(), or the heartbeat loop — same fire-and-forget
-      // discipline as DockStorage's mirror writes (persistence.ts).
+      // discipline as DockStorage's mirror writes (persistence.ts). Logged
+      // only on the first failure of a run (flag resets on the next success)
+      // so a sustained outage doesn't flood the log ring buffer with one
+      // entry per dispatch/heartbeat.
+      if (!this.broadcastFailureLogged) {
+        this.broadcastFailureLogged = true;
+        this.storage.log('broadcast-failed', err instanceof Error ? err.message : String(err));
+      }
     }
   }
 }

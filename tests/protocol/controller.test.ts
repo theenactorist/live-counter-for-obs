@@ -340,6 +340,30 @@ describe('SessionController — timer wiring', () => {
     controller.dispatch({ type: 'setMode', mode: 'manual', nonce: 'n4' });
     expect(timer.running).toBe(false);
   });
+
+  it('onSleepGap makes the controller dispatch pause: session paused, timer stopped', async () => {
+    const { rt, timer, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+    );
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+    expect(timer.running).toBe(true);
+
+    // Simulate a system-sleep gap: jump the clock far enough that the next
+    // fire sees gap > max(2 x interval, 2000) — same technique as
+    // tests/engine/timer.test.ts's sleep-gap tests.
+    rt.now = 61_000;
+    rt.queue.forEach((e) => {
+      e.at = Math.max(e.at, rt.now);
+    });
+    rt.advanceTo(61_001);
+
+    const state = controller.getState();
+    expect(state.session?.status).toBe('paused');
+    expect(timer.running).toBe(false);
+  });
 });
 
 describe('SessionController — holdThenHide completion', () => {
@@ -442,6 +466,19 @@ describe('SessionController — endSession', () => {
     expect(controller.getState().snapshot).toBeNull();
     expect(storage.loadSnapshot()).toBeNull();
   });
+
+  it('startSession clears any stale overlay snapshot left over from a previous ended session', async () => {
+    const { storage, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-a');
+    controller.dispatch({ type: 'increment', nonce: 'n1' });
+    controller.dispatch({ type: 'endSession', keepOverlay: true, nonce: 'n2' });
+    expect(controller.getState().snapshot).not.toBeNull(); // sanity: a snapshot really is there
+
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-b');
+
+    expect(controller.getState().snapshot).toBeNull();
+    expect(storage.loadSnapshot()).toBeNull();
+  });
 });
 
 describe('SessionController — init()', () => {
@@ -491,6 +528,78 @@ describe('SessionController — init()', () => {
     const heartbeats = sendSpy.mock.calls.map(([, payload]) => (payload as { heartbeat: number }).heartbeat);
     expect(heartbeats).toEqual([0, 1, 2]);
   });
+
+  it('a session started while init() is still awaiting the load survives — init() must not clobber it', async () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const stored = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    local.setItem(KEY_SESSION, serializeSession(stored));
+
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const initPromise = controller.init(); // storage.loadSession() kicks off, not yet resolved
+    controller.startSession({ startValue: 0, finishValue: 20, mode: 'manual' }, styleFixture(), null); // wins the race
+    await initPromise;
+
+    const state = controller.getState();
+    expect(state.session?.finishValue).toBe(20); // the started session, not the stored one
+    expect(state.recovered).toBe(false);
+  });
+
+  it('logs a corrupt-quarantined session-load warning', async () => {
+    const local = new MapStorage();
+    local.setItem(KEY_SESSION, 'not valid json {{{');
+    const storage = new DockStorage(local, null);
+
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const logSpy = vi.spyOn(storage, 'log');
+    await controller.init();
+
+    expect(logSpy).toHaveBeenCalledWith('session-load', 'corrupt-quarantined');
+  });
+
+  it('logs a mirror-used session-load warning', async () => {
+    const local = new MapStorage();
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const storage = new DockStorage(local, client); // mirror enabled via the same client
+
+    const base = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000); // revision 0
+    local.setItem(KEY_SESSION, serializeSession(base));
+    const newer = applyCommand(base, { type: 'increment', nonce: 'seed-1' }, 1100).session; // revision 1
+    await client.request('SetPersistentData', {
+      realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+      slotName: 'live-counter/session',
+      slotValue: newer,
+    });
+
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const logSpy = vi.spyOn(storage, 'log');
+    await controller.init();
+
+    expect(logSpy).toHaveBeenCalledWith('session-load', 'mirror-used');
+  });
 });
 
 describe('SessionController — lastAction', () => {
@@ -504,5 +613,113 @@ describe('SessionController — lastAction', () => {
     const rejected = controller.dispatch({ type: 'increment', nonce: 'n1' }); // duplicate nonce -> rejected
     expect(rejected.accepted).toBe(false);
     expect(controller.getState().lastAction).toEqual({ label: '+1', value: 1 });
+  });
+
+  it('self-dispatched commands (tick, and the pause/completionHide they can trigger) never overwrite lastAction', async () => {
+    const { rt, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+    );
+
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+    controller.dispatch({ type: 'increment', nonce: 'n2' }); // manual operator bump while running
+    expect(controller.getState().lastAction).toEqual({ label: '+1', value: 1 });
+
+    rt.advanceTo(3_100); // several self-dispatched ticks fire
+
+    expect(controller.getState().session?.currentValue).toBeGreaterThan(1); // ticks did move the value
+    expect(controller.getState().lastAction).toEqual({ label: '+1', value: 1 }); // untouched by ticks
+  });
+});
+
+describe('SessionController — notify() resilience', () => {
+  it('a throwing subscriber does not suppress the broadcast, does not kill later ticks, other subscribers still fire, and the failure is logged only once while it persists', async () => {
+    const { rt, bus, storage, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 10, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+    );
+
+    const otherCalls: unknown[] = [];
+    controller.subscribe(() => {
+      throw new Error('boom');
+    });
+    controller.subscribe((s) => otherCalls.push(s));
+
+    // Attach the log spy before the FIRST notify() round that will hit the
+    // throwing subscriber, so the dedup-to-one-log-entry assertion below
+    // isn't fooled by an earlier round (e.g. this dispatch(start) itself)
+    // already having tripped the "logged once" flag before the spy existed.
+    const logSpy = vi.spyOn(storage, 'log');
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+
+    const sendSpy = vi.spyOn(bus, 'send');
+
+    rt.advanceTo(1_100); // tick 1: the throwing subscriber fires and must not break anything
+    expect(controller.getState().session?.currentValue).toBe(1);
+    expect(sendSpy).toHaveBeenCalled(); // broadcast still happened despite the throw
+    expect(otherCalls.length).toBeGreaterThan(0); // the other subscriber still ran
+
+    rt.advanceTo(2_200); // tick 2: proves the timer/AutoTimer chain survived tick 1's throw
+    expect(controller.getState().session?.currentValue).toBe(2);
+
+    const subscriberErrorLogs = logSpy.mock.calls.filter(([event]) => event === 'subscriber-error');
+    expect(subscriberErrorLogs).toHaveLength(1); // logged once, not once per notify round
+  });
+
+  it('a subscriber that unsubscribes itself mid-notify does not break delivery to the remaining subscribers', async () => {
+    const { controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null);
+
+    const order: string[] = [];
+    let unsubA: () => void = () => {};
+    unsubA = controller.subscribe(() => {
+      order.push('a');
+      unsubA();
+    });
+    controller.subscribe(() => order.push('b'));
+
+    controller.dispatch({ type: 'increment', nonce: 'n1' });
+    controller.dispatch({ type: 'increment', nonce: 'n2' });
+
+    expect(order).toEqual(['a', 'b', 'b']); // 'a' unsubscribed itself after its first call
+  });
+});
+
+describe('SessionController — broadcast() resilience', () => {
+  it('broadcast failures log broadcast-failed only once until a subsequent success (flag resets), and dispatch always returns correctly with no unhandled rejection', async () => {
+    const { storage, bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null);
+
+    const logSpy = vi.spyOn(storage, 'log');
+    const sendSpy = vi.spyOn(bus, 'send');
+    sendSpy.mockRejectedValueOnce(new Error('boom-1'));
+    sendSpy.mockRejectedValueOnce(new Error('boom-2'));
+
+    const r1 = controller.dispatch({ type: 'increment', nonce: 'n1' }); // broadcast rejects: 1st failure -> logged
+    expect(r1.accepted).toBe(true);
+    const r2 = controller.dispatch({ type: 'increment', nonce: 'n2' }); // broadcast rejects again: already logged
+    expect(r2.accepted).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.filter(([event]) => event === 'broadcast-failed')).toHaveLength(1);
+    });
+
+    const r3 = controller.dispatch({ type: 'increment', nonce: 'n3' }); // real send succeeds -> resets the flag
+    expect(r3.accepted).toBe(true);
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(3);
+    });
+
+    sendSpy.mockRejectedValueOnce(new Error('boom-3'));
+    const r4 = controller.dispatch({ type: 'increment', nonce: 'n4' }); // fails again -> logged again (flag reset)
+    expect(r4.accepted).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.filter(([event]) => event === 'broadcast-failed')).toHaveLength(2);
+    });
   });
 });
