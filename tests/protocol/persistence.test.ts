@@ -27,6 +27,21 @@ class MapStorage implements StorageLike {
   }
 }
 
+// Simulates a storage backend whose writes always fail (quota exceeded,
+// disabled in a private-browsing context, etc.) — reads still work against
+// whatever was there before (nothing, in these tests).
+class ThrowingStorage implements StorageLike {
+  getItem(_k: string): string | null {
+    return null;
+  }
+  setItem(_k: string, _v: string): void {
+    throw new Error('QuotaExceededError: storage quota exceeded');
+  }
+  removeItem(_k: string): void {
+    throw new Error('QuotaExceededError: storage quota exceeded');
+  }
+}
+
 function waitForIdentified(c: ObsWsClient): Promise<void> {
   return new Promise((resolve) => {
     const unsub = c.on('identified', () => {
@@ -227,6 +242,49 @@ describe('DockStorage — session', () => {
     expect(outcome.value).toEqual(session);
   });
 
+  it('mirror present but structurally invalid, local valid -> local wins, no warning', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage();
+    const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    local.setItem(KEY_SESSION, serializeSession(session));
+
+    await client.request('SetPersistentData', {
+      realm: REALM,
+      slotName: SLOT_SESSION,
+      slotValue: { not: 'a session at all' },
+    });
+
+    const storage = new DockStorage(local, client);
+    const outcome = await storage.loadSession();
+
+    expect(outcome).toEqual({ value: session, warning: null });
+  });
+
+  it('mirror value with an unknown/future schemaVersion is routed through the engine loader and treated as absent', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage();
+    const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    local.setItem(KEY_SESSION, serializeSession(session));
+
+    // schemaVersion 99 is ahead of SESSION_SCHEMA_VERSION (1) -> the engine
+    // loader's migration chain rejects it with reason 'unknown-version',
+    // exactly as it would for a local record — proving the mirror is routed
+    // through the same pipeline, not a bare structural check.
+    const futureShaped = { ...session, schemaVersion: 99 };
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: futureShaped });
+
+    const storage = new DockStorage(local, client);
+    const outcome = await storage.loadSession();
+
+    expect(outcome).toEqual({ value: session, warning: null });
+  });
+
   it('saveSession(null) removes the local key and mirrors null', async () => {
     mock = await startMockObs();
     const client = await connectedClient(mock.url);
@@ -344,5 +402,79 @@ describe('DockStorage — log', () => {
     storage.log('after-corruption');
     expect(storage.readLog()).toHaveLength(1);
     expect(storage.readLog()[0]).toMatch(/ after-corruption$/);
+  });
+});
+
+describe('DockStorage — write failures never throw', () => {
+  it('saveSession does not throw when the underlying write fails, and reports it via onWriteError', () => {
+    const local = new ThrowingStorage();
+    const errors: Array<{ key: string; err: unknown }> = [];
+    const storage = new DockStorage(local, null, (key, err) => errors.push({ key, err }));
+    const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+
+    expect(() => storage.saveSession(session)).not.toThrow();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.key).toBe(KEY_SESSION);
+  });
+
+  it('savePresets, saveSnapshot, and saveSettings all swallow write failures the same way', () => {
+    const local = new ThrowingStorage();
+    const errors: string[] = [];
+    const storage = new DockStorage(local, null, (key) => errors.push(key));
+
+    expect(() => storage.savePresets([presetFixture()])).not.toThrow();
+    expect(() => storage.saveSnapshot({ template: null, value: 1, style: styleFixture(), schemaVersion: 1 })).not.toThrow();
+    expect(() => storage.saveSettings({ wsPort: 4455, wsPassword: '', schemaVersion: 1 })).not.toThrow();
+
+    expect(errors).toEqual([KEY_PRESETS, 'lc.snapshot.v1', 'lc.settings.v1']);
+  });
+
+  it('log() never throws when persistence fails, and readLog() still returns the entry from the in-memory fallback', () => {
+    const local = new ThrowingStorage();
+    const errors: Array<{ key: string; err: unknown }> = [];
+    const storage = new DockStorage(local, null, (key, err) => errors.push({ key, err }));
+
+    expect(() => storage.log('started')).not.toThrow();
+
+    const log = storage.readLog();
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatch(/ started$/);
+    expect(errors.some((e) => e.key === 'lc.log.v1')).toBe(true);
+
+    // The fallback keeps working across repeated calls, not just the first.
+    expect(() => storage.log('again')).not.toThrow();
+    expect(storage.readLog()).toHaveLength(2);
+  });
+
+  it('a throwing onWriteError callback does not propagate out of the write it was reporting on', () => {
+    const local = new ThrowingStorage();
+    const storage = new DockStorage(local, null, () => {
+      throw new Error('handler itself is broken');
+    });
+    const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+
+    expect(() => storage.saveSession(session)).not.toThrow();
+    expect(() => storage.log('still fine')).not.toThrow();
+  });
+
+  it('a corrupt local record whose quarantine write also fails still reports corrupt-quarantined, without throwing', async () => {
+    const local = new ThrowingStorage();
+    // Force a "corrupt" read: getItem always returns null on ThrowingStorage,
+    // so simulate corruption by subclassing just enough to return a raw
+    // string while keeping writes throwing.
+    const corruptButThrowing: StorageLike = {
+      getItem: (k) => (k === KEY_SESSION ? '{not valid json' : null),
+      setItem: local.setItem.bind(local),
+      removeItem: local.removeItem.bind(local),
+    };
+    const errors: string[] = [];
+    const storage = new DockStorage(corruptButThrowing, null, (key) => errors.push(key));
+
+    await expect(storage.loadSession()).resolves.toEqual({ value: null, warning: 'corrupt-quarantined' });
+    // Both the quarantine write and the primary-key removal failed, but
+    // neither threw, and both were reported.
+    expect(errors.some((k) => k.startsWith('lc.quarantine.'))).toBe(true);
+    expect(errors).toContain(KEY_SESSION);
   });
 });

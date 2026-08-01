@@ -5,7 +5,6 @@
 // rather than deleted outright.
 import type { ObsWsClient } from './obsws-client.js';
 import type { Session, Preset, StyleConfig } from '../engine/types.js';
-import { isSession, isPreset } from '../engine/types.js';
 import {
   loadSession as engineLoadSession,
   serializeSession,
@@ -84,10 +83,49 @@ function quarantineSuffix(): string {
 export class DockStorage {
   private readonly local: StorageLike;
   private readonly client: ObsWsClient | null;
+  private readonly onWriteError: ((key: string, err: unknown) => void) | undefined;
+  // Lazily-populated in-memory mirror of the log ring buffer. Once populated
+  // (by the first log()/readLog() call) it becomes the source of truth for
+  // readLog(), independent of whether the underlying persisted write is
+  // currently succeeding — so a StorageLike that starts throwing (quota
+  // exceeded, private-browsing lockout, etc.) never loses recent entries.
+  private memoryLog: string[] | null = null;
 
-  constructor(local: StorageLike, client: ObsWsClient | null) {
+  constructor(local: StorageLike, client: ObsWsClient | null, onWriteError?: (key: string, err: unknown) => void) {
     this.local = local;
     this.client = client;
+    this.onWriteError = onWriteError;
+  }
+
+  // Every write in this class routes through here (or safeRemove) so a
+  // throwing StorageLike (quota exceeded, disabled storage, etc.) can never
+  // propagate out of a DockStorage method. Failures are reported to the
+  // optional constructor callback instead of being silently swallowed; the
+  // callback itself is guarded so a throwing handler can't cascade back into
+  // the write it was reporting on.
+  private safeSet(key: string, value: string): void {
+    try {
+      this.local.setItem(key, value);
+    } catch (err) {
+      this.reportWriteError(key, err);
+    }
+  }
+
+  private safeRemove(key: string): void {
+    try {
+      this.local.removeItem(key);
+    } catch (err) {
+      this.reportWriteError(key, err);
+    }
+  }
+
+  private reportWriteError(key: string, err: unknown): void {
+    if (!this.onWriteError) return;
+    try {
+      this.onWriteError(key, err);
+    } catch {
+      // A throwing error handler must never cascade.
+    }
   }
 
   // Shared load pipeline for session/presets: read + validate/migrate the
@@ -97,7 +135,6 @@ export class DockStorage {
     localKey: string,
     mirrorSlot: string,
     parseLocal: (raw: string | null) => LoadResult<T>,
-    isValidMirror: (x: unknown) => x is T,
     mirrorWins: (local: T, mirror: T) => boolean,
   ): Promise<LoadOutcome<T>> {
     const raw = this.local.getItem(localKey);
@@ -110,8 +147,8 @@ export class DockStorage {
         localValue = result.value;
       } else {
         corrupted = true;
-        this.local.setItem(`lc.quarantine.${quarantineSuffix()}`, raw);
-        this.local.removeItem(localKey);
+        this.safeSet(`lc.quarantine.${quarantineSuffix()}`, raw);
+        this.safeRemove(localKey);
       }
     }
 
@@ -123,8 +160,16 @@ export class DockStorage {
           slotName: mirrorSlot,
         });
         const slotValue = resp.slotValue;
-        if (slotValue !== null && slotValue !== undefined && isValidMirror(slotValue)) {
-          mirrorValue = slotValue;
+        if (slotValue !== null && slotValue !== undefined) {
+          // Route the mirror payload through the SAME engine loader used for
+          // localStorage — re-serializing the already-parsed value back to a
+          // JSON string and handing it to `parseLocal` — rather than a bare
+          // structural check. This means a future schema bump migrates a
+          // mirrored v1 record exactly like a local one; a value the loader
+          // rejects (corrupt, wrong shape, or an unknown/future
+          // schemaVersion) is treated as if the mirror were simply empty.
+          const migrated = parseLocal(JSON.stringify(slotValue));
+          if (migrated.ok) mirrorValue = migrated.value;
         }
       } catch {
         // Mirror failures (server unreachable, dropped mid-flight, etc.) must
@@ -160,16 +205,15 @@ export class DockStorage {
       KEY_SESSION,
       MIRROR_SLOT_SESSION,
       engineLoadSession,
-      isSession,
       (local, mirror) => mirror.revision > local.revision,
     );
   }
 
   saveSession(s: Session | null): void {
     if (s === null) {
-      this.local.removeItem(KEY_SESSION);
+      this.safeRemove(KEY_SESSION);
     } else {
-      this.local.setItem(KEY_SESSION, serializeSession(s));
+      this.safeSet(KEY_SESSION, serializeSession(s));
     }
     this.mirrorSet(MIRROR_SLOT_SESSION, s);
   }
@@ -179,7 +223,6 @@ export class DockStorage {
       KEY_PRESETS,
       MIRROR_SLOT_PRESETS,
       engineLoadPresets,
-      (x): x is Preset[] => Array.isArray(x) && x.every(isPreset),
       // Presets carry no per-record revision counter to compare — local
       // always wins when both sides have a valid value; the mirror is only
       // used as a fallback when localStorage has nothing usable.
@@ -188,7 +231,7 @@ export class DockStorage {
   }
 
   savePresets(p: Preset[]): void {
-    this.local.setItem(KEY_PRESETS, serializePresets(p));
+    this.safeSet(KEY_PRESETS, serializePresets(p));
     this.mirrorSet(MIRROR_SLOT_PRESETS, p);
   }
 
@@ -205,9 +248,9 @@ export class DockStorage {
 
   saveSnapshot(s: OverlaySnapshot | null): void {
     if (s === null) {
-      this.local.removeItem(KEY_SNAPSHOT);
+      this.safeRemove(KEY_SNAPSHOT);
     } else {
-      this.local.setItem(KEY_SNAPSHOT, JSON.stringify(s));
+      this.safeSet(KEY_SNAPSHOT, JSON.stringify(s));
     }
   }
 
@@ -223,7 +266,7 @@ export class DockStorage {
   }
 
   saveSettings(s: DockSettings): void {
-    this.local.setItem(KEY_SETTINGS, JSON.stringify(s));
+    this.safeSet(KEY_SETTINGS, JSON.stringify(s));
   }
 
   private readLogRaw(): string[] {
@@ -239,13 +282,21 @@ export class DockStorage {
   }
 
   log(event: string, detail?: string): void {
-    const entries = this.readLogRaw();
-    entries.push(`${new Date().toISOString()} ${event}${detail ? ' — ' + detail : ''}`);
+    if (this.memoryLog === null) {
+      this.memoryLog = this.readLogRaw();
+    }
+    const line = `${new Date().toISOString()} ${event}${detail ? ' — ' + detail : ''}`;
+    const entries = [...this.memoryLog, line];
     const trimmed = entries.length > LOG_MAX_ENTRIES ? entries.slice(entries.length - LOG_MAX_ENTRIES) : entries;
-    this.local.setItem(KEY_LOG, JSON.stringify(trimmed));
+    // Update the in-memory copy regardless of whether persistence below
+    // succeeds — this IS the fallback ring buffer readLog() relies on when
+    // the underlying store is failing.
+    this.memoryLog = trimmed;
+    this.safeSet(KEY_LOG, JSON.stringify(trimmed));
   }
 
   readLog(): string[] {
+    if (this.memoryLog !== null) return this.memoryLog;
     return this.readLogRaw();
   }
 }

@@ -70,7 +70,15 @@ export class Bus {
     return this.client.onEvent((eventType, eventData) => {
       if (eventType !== 'CustomEvent') return;
       if (!isBusMessage(eventData)) return;
-      if (eventData.source === this.source) return; // drop own-source echoes
+      // Drop own-source echoes: obs-websocket's BroadcastCustomEvent fans out
+      // to every identified client including the sender, so without this
+      // check a Bus would "hear" its own sends come back. Note this is a
+      // same-instance filter only — two independently-constructed Bus
+      // instances that happen to share a `source` tag (e.g. two dock tabs
+      // both passing 'dock') will see each other's messages as echoes and
+      // silently drop them too; the protocol assumes a single operator per
+      // source, not multiple concurrent writers of the same source.
+      if (eventData.source === this.source) return;
       fn(eventData);
     });
   }
