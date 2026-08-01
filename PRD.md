@@ -123,7 +123,7 @@ Two orthogonal session fields:
 - `mode ∈ {manual, automatic}` — switchable mid-session from the Live view; the preset's mode is only the starting value.
 - `status ∈ {idle, running, paused, complete}` — `running`/`paused` describe **only the automatic timer**. Manual count commands (+1, −1, Undo, Jump) are accepted in any status except where a boundary forbids the specific movement. In manual mode, status is `idle` until completion.
 
-**Session record** (persisted after every change): presetId?, startValue, finishValue, currentValue, direction (`up`/`down`), mode, status, intervalSeconds, overlayVisible, undoStack (bounded, most recent last), completionConfig, schemaVersion, revision (monotonic integer), updatedAt.
+**Session record** (persisted after every change): presetId?, startValue, finishValue, currentValue, direction (`up`/`down`), mode, status, intervalSeconds, overlayVisible, hiddenByCompletion (true only while a hide/hold-then-hide completion is the reason the overlay is hidden — distinguishes completion-hide from operator-hide), undoStack (bounded, most recent last), completionConfig, schemaVersion, revision (monotonic integer), updatedAt. Persisted `status` is authoritative on reload — never re-derived from value/direction (status is path-dependent by design).
 
 **Preset record:** id, title (required), description?, startValue, finishValue, mode, intervalSeconds, template?, style, animation (type, target, durationMs), completion, schemaVersion, createdAt, updatedAt. A preset never stores live progress.
 
@@ -155,7 +155,8 @@ Only one active session exists at a time.
 
 - The **active boundary** is the boundary in the current direction of travel. Reaching it — by tick, ±1, or Jump — sets `status: complete` and fires the completion behaviour. Reaching the *opposite* boundary merely disables further movement that way; it never completes.
 - Behaviours: **Hold** (default), **Hide**, **Hold-then-hide (N seconds)**. Hiding is **render-level** in the overlay (works without obs-websocket write access and can animate out); it never toggles the OBS source.
-- Any valid count-changing action away from the boundary exits `complete` (manual → `idle`, automatic → `paused`) and cancels a pending hold-then-hide timer; if completion had hidden the overlay, it re-shows.
+- The engine itself performs the hide for kind **Hide** in the same transition that completes; **Hold-then-hide** hides via a dock-issued `completionHide` command after the configured seconds. Both set `hiddenByCompletion`.
+- Any valid count-changing action away from the boundary exits `complete` (manual → `idle`, automatic → `paused`) and cancels a pending hold-then-hide timer; the overlay re-shows **iff `hiddenByCompletion` is set** (an operator-hidden overlay is never force-shown). Operator Show/Hide always clears the flag.
 
 ### 8.6 Progress display
 
@@ -217,7 +218,7 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 1. **Reliability:** no count command silently lost or double-applied; the dock processes commands serially against a single state owner; a seeded 1,000-action randomized soak (mix of all commands, bursty timing, injected page reloads and websocket reconnects, oracle = replaying the seed through the pure engine) passes with no out-of-range value, no lost/duplicated command, and dock/overlay convergence.
 2. **Responsiveness:** command-to-overlay update ≤ 100 ms on the same machine (excluding configured animation time); dock acknowledges each command immediately from the authoritative state.
 3. **Performance:** overlay animation work stays on the compositor; running the heaviest animation at the fastest interval for 60 s in a 1080p60 project adds no OBS render-lag frame skips.
-4. **Security/privacy:** localhost websocket only; authentication on, password stored only in the dock's local storage; all operator text escaped; no internet-loaded assets; no telemetry.
+4. **Security/privacy:** localhost websocket only; authentication on. The password is stored in the dock's local storage and embedded as a query parameter in the overlay URL that the dock's setup screen generates (the overlay must authenticate too but has no input UI; that URL lives in OBS's scene collection on the same local disk where OBS itself stores the websocket password in plaintext — same trust domain, verified in Phase 0). All operator text escaped; no internet-loaded assets; no telemetry.
 5. **Compatibility:** OBS current stable (32.x) and previous major (31.x); macOS (Apple Silicon dev machine) and Windows x64 (validated on the church machine or a Windows VM during Phase 4).
 6. **Accessibility:** keyboard accessible dock; status never colour-only; WCAG 2.2 AA contrast; dock respects `prefers-reduced-motion` (overlay animation is content and is operator-chosen).
 
