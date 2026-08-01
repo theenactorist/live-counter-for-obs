@@ -63,11 +63,16 @@ export class SessionController {
   private recovered = false;
 
   // style/template are NOT part of Session — they live only as controller
-  // instance state, set by startSession() and broadcast on every 'state'
-  // message. They do not survive a reload: init() has no way to recover them
-  // (locked storage keys hold only session/snapshot/presets/settings/log), so
-  // they stay null after a recovery until Task 2.6 lands presets and the dock
-  // re-derives them from the loaded preset via session.presetId.
+  // instance state, set by startSession() (or later re-derived via
+  // adoptPresentation(), below) and broadcast on every 'state' message. They
+  // do not survive a reload on their own: init() has no way to recover them
+  // (locked storage keys hold only session/snapshot/presets/settings/log).
+  // Task 2.6 closes that gap from the OUTSIDE instead: main.ts awaits
+  // init(), reads the restored session's presetId, looks the preset up in
+  // storage, and — if found — calls adoptPresentation() with that preset's
+  // style/template. A session recovered with no presetId (an ad hoc session
+  // never saved as a preset) or whose preset has since been deleted is never
+  // adopted, and correctly stays number-only (style/template null).
   private style: StyleConfig | null = null;
   private template: string | null = null;
 
@@ -193,6 +198,24 @@ export class SessionController {
     this.notify();
   }
 
+  // Task 2.6 — the other half of the style/template recovery story (see the
+  // class-level comment on `style`/`template` above): re-derives this
+  // controller instance's presentation from a preset main.ts looked up after
+  // init() restored a session carrying that preset's id, and broadcasts it
+  // so the overlay (and any other bus listener) picks it up. Deliberately
+  // does NOT touch `session` itself — the session was already correctly
+  // restored by init(); only the controller-instance-only style/template
+  // state was missing. Guarded by `disposed` for the same reason every other
+  // mutating method is: a settings-save reconnect that races this call must
+  // never have an old, torn-down controller instance broadcast again.
+  adoptPresentation(style: StyleConfig, template: string | null): void {
+    if (this.disposed) return;
+    this.style = style;
+    this.template = template;
+    void this.broadcast();
+    this.notify();
+  }
+
   dispatch(cmd: Command): ApplyResult {
     return this.runDispatch(cmd, false);
   }
@@ -309,11 +332,13 @@ export class SessionController {
   private finishSession(keepOverlay: boolean): void {
     const endedValue = this.session?.currentValue ?? 0;
     let snapshot: OverlaySnapshot | null = null;
-    // Known gap (Task 2.6 resolves it): style is only ever known while this
-    // controller instance has run startSession() itself. If there is no
-    // style to render with — e.g. a session recovered from storage and
-    // ended without ever calling startSession() this boot — there is
-    // nothing usable to snapshot, so treat it the same as keepOverlay:false.
+    // `style` is known whenever this controller instance has run
+    // startSession() itself OR had it re-derived via adoptPresentation()
+    // (Task 2.6, e.g. after a recovered session's preset was looked up in
+    // main.ts). If neither ever happened — an ad hoc session recovered from
+    // storage with no presetId, or one whose preset has since been deleted —
+    // there is nothing usable to snapshot, so treat it the same as
+    // keepOverlay:false.
     if (keepOverlay && this.style !== null) {
       snapshot = { template: this.template, value: endedValue, style: this.style, schemaVersion: 1 };
     }

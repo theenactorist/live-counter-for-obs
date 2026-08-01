@@ -198,6 +198,102 @@
         gap: 0.5rem;
         align-items: center;
       }
+      /* Task 2.6 — Setup + Presets views */
+      .form-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        margin-bottom: 0.6rem;
+      }
+      .form-label {
+        font-size: 0.8rem;
+        color: #a0a0a0;
+      }
+      .form-row input[type='text'],
+      .form-row input[type='number'],
+      .form-row input[type='search'],
+      .form-row select {
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.4rem 0.5rem;
+        min-height: 40px;
+        font-size: 1rem;
+        max-width: 100%;
+      }
+      .form-row input[type='color'] {
+        min-height: 40px;
+        width: 4rem;
+        padding: 0.15rem;
+        background: #0f0f0f;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+      }
+      .field-error {
+        color: #ff9a9a;
+        font-size: 0.85rem;
+      }
+      .field-hint {
+        color: #a0a0a0;
+        font-size: 0.85rem;
+        margin-bottom: 0.6rem;
+      }
+      .range-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .range-value {
+        font-size: 0.85rem;
+        color: #a0a0a0;
+        min-width: 4.5rem;
+      }
+      .setup-preview-wrap {
+        background: #0f0f0f;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 1rem;
+        margin-bottom: 0.75rem;
+      }
+      .setup-preview {
+        font-variant-numeric: tabular-nums;
+        margin-bottom: 0.6rem;
+        word-break: break-word;
+      }
+      .list-header {
+        margin-bottom: 0.75rem;
+      }
+      .list-header input {
+        width: 100%;
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.4rem 0.5rem;
+        min-height: 40px;
+      }
+      .list-row {
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 0.75rem;
+        margin-bottom: 0.6rem;
+      }
+      .list-row-title {
+        font-weight: 700;
+        font-size: 1.05rem;
+      }
+      .list-row-desc {
+        color: #b0b0b0;
+        font-size: 0.9rem;
+        margin: 0.15rem 0;
+      }
+      .list-row-meta {
+        color: #808080;
+        font-size: 0.8rem;
+        margin-bottom: 0.5rem;
+      }
     </style>
   </head>
   <body>
@@ -220,8 +316,8 @@
           <button data-testid="tab-setup">Setup</button>
           <button data-testid="tab-live" class="active">Live</button>
         </div>
-        <div data-testid="pane-presets" class="pane" hidden>Presets — coming in Task 2.6</div>
-        <div data-testid="pane-setup" class="pane" hidden>Setup — coming in Task 2.6</div>
+        <div data-testid="pane-presets" class="pane" hidden></div>
+        <div data-testid="pane-setup" class="pane" hidden></div>
         <div data-testid="pane-live" class="pane"></div>
       </div>
     </div>

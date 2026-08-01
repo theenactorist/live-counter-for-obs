@@ -724,6 +724,44 @@ describe('SessionController — broadcast() resilience', () => {
   });
 });
 
+describe('SessionController — adoptPresentation()', () => {
+  it('sets style/template and broadcasts them, without touching the session', async () => {
+    const { bus, controller } = await setup();
+    const local = new MapStorage();
+    const storage2 = new DockStorage(local, null);
+    // Simulate a fresh boot that recovered a session with no style/template
+    // of its own (init() ran against storage2's stored session, presetId
+    // set) — here we just seed the controller's own session directly via
+    // startSession with a *different* style, then overwrite it via
+    // adoptPresentation to prove the method — not startSession — is what
+    // changed the broadcast payload.
+    void storage2; // storage2 unused beyond documenting the recovery scenario in prose
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'old-{count}');
+    const sessionBefore = controller.getState().session;
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    const newStyle = { ...styleFixture(), numberColor: '#00ff00' };
+    controller.adoptPresentation(newStyle, 'new-{count}');
+
+    expect(controller.getState().session).toBe(sessionBefore); // untouched
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const payload = sendSpy.mock.calls[0]![1] as { style: unknown; template: unknown };
+    expect(payload.style).toEqual(newStyle);
+    expect(payload.template).toBe('new-{count}');
+  });
+
+  it('is a no-op after dispose() — no broadcast, no state change', async () => {
+    const { bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null);
+    controller.dispose();
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    controller.adoptPresentation(styleFixture(), 'tpl');
+
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
 // Fix round 1 (Task 2.5 review, Critical 1): dispose() must permanently
 // silence a controller instance — no further heartbeat, no further automatic
 // ticking, no further persist/broadcast on dispatch — so main.ts's

@@ -1,12 +1,14 @@
 import '../styles/fonts.css';
 
 /**
- * Task 2.5: real dock shell. Boots the full stack (ObsWsClient -> DockStorage
- * -> Bus -> AutoTimer -> Scheduler -> SessionController), owns the three-tab
- * shell (Presets/Setup/Live — Presets and Setup are placeholder panes until
- * Task 2.6), the first-run "not connected" banner, and the minimal settings
- * row that lets an operator enter the OBS WebSocket password without a full
- * Settings UI (Task 2.8 replaces this with the real thing).
+ * Task 2.5/2.6: real dock shell. Boots the full stack (ObsWsClient ->
+ * DockStorage -> Bus -> AutoTimer -> Scheduler -> SessionController), owns
+ * the three-tab shell (Presets/Setup/Live, all real views as of Task 2.6),
+ * the first-run "not connected" banner, the minimal settings row that lets
+ * an operator enter the OBS WebSocket password without a full Settings UI
+ * (Task 2.8 replaces this with the real thing), and — after `init()`
+ * restores a session — re-deriving that session's style/template from its
+ * preset (see the `adoptPresentation` call in `boot()`).
  */
 import { ObsWsClient } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
@@ -14,6 +16,8 @@ import { DockStorage, type DockSettings } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
 import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
+import { mountSetupView, type SetupViewHandle } from './views/setup.js';
+import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig } from '../engine/types.js';
 
@@ -26,10 +30,11 @@ const WS_BANNER_GRACE_MS = 3000;
 const WS_BANNER_POLL_MS = 500;
 const BANNER_WS_TEXT = 'Not connected to OBS — Tools → WebSocket Server Settings, then enter the password in Settings';
 
-// Dev-hook-only default style: Task 2.6 lands the real Setup form that
-// collects this from the operator; until then, `?devhook` needs SOME
-// StyleConfig to hand `SessionController.startSession()` (a required,
-// non-nullable argument) so tests can start a session without the Setup view.
+// Dev-hook-only default style: `?devhook`'s startSession() shortcut still
+// needs SOME StyleConfig to hand `SessionController.startSession()` (a
+// required, non-nullable argument) for tests that start a session without
+// driving the real Setup form — the real form (Task 2.6) builds its own
+// StyleConfig from the operator's chosen fields instead of this constant.
 const DEV_DEFAULT_STYLE: StyleConfig = {
   fontFamily: 'Inter',
   fontWeight: 700,
@@ -88,23 +93,37 @@ function queryShell(): Shell {
   };
 }
 
-function wireTabs(shell: Shell): void {
-  const tabs: Array<{ btn: HTMLButtonElement; pane: HTMLElement }> = [
-    { btn: shell.tabButtons.presets, pane: shell.panes.presets },
-    { btn: shell.tabButtons.setup, pane: shell.panes.setup },
-    { btn: shell.tabButtons.live, pane: shell.panes.live },
+type TabName = 'presets' | 'setup' | 'live';
+
+interface TabController {
+  activate(tab: TabName): void;
+}
+
+// Returns an `activate()` any caller can use to switch tabs programmatically
+// (Task 2.6: Setup's "Start session" and Presets' "Load"/"Start" need this to
+// jump the operator to Live or Setup after acting) — not just the tab click
+// handlers wired below. `onActivate` fires on every activation (including the
+// initial one), letting main.ts refresh the Presets view's list whenever that
+// tab becomes visible, without Presets needing a live subscription to Setup.
+function wireTabs(shell: Shell, onActivate?: (tab: TabName) => void): TabController {
+  const tabs: Array<{ name: TabName; btn: HTMLButtonElement; pane: HTMLElement }> = [
+    { name: 'presets', btn: shell.tabButtons.presets, pane: shell.panes.presets },
+    { name: 'setup', btn: shell.tabButtons.setup, pane: shell.panes.setup },
+    { name: 'live', btn: shell.tabButtons.live, pane: shell.panes.live },
   ];
-  function activate(active: HTMLButtonElement): void {
-    for (const { btn, pane } of tabs) {
-      const isActive = btn === active;
-      btn.classList.toggle('active', isActive);
-      pane.hidden = !isActive;
+  function activate(name: TabName): void {
+    for (const t of tabs) {
+      const isActive = t.name === name;
+      t.btn.classList.toggle('active', isActive);
+      t.pane.hidden = !isActive;
     }
+    onActivate?.(name);
   }
-  for (const { btn } of tabs) {
-    btn.addEventListener('click', () => activate(btn));
+  for (const t of tabs) {
+    t.btn.addEventListener('click', () => activate(t.name));
   }
-  activate(shell.tabButtons.live); // Live is default-active.
+  activate('live'); // Live is default-active.
+  return { activate };
 }
 
 function main(): void {
@@ -112,7 +131,14 @@ function main(): void {
   if (!root) return;
 
   const shell = queryShell();
-  wireTabs(shell);
+  // presetsHandle is assigned inside boot() (below) but referenced here via
+  // closure — refresh() re-pulls the preset list from storage whenever the
+  // Presets tab becomes active, so edits saved from Setup (a sibling view,
+  // no direct subscription between the two) show up without extra plumbing.
+  let presetsHandle: PresetsViewHandle | null = null;
+  const tabs = wireTabs(shell, (name) => {
+    if (name === 'presets') presetsHandle?.refresh();
+  });
 
   const params = new URLSearchParams(location.search);
   const devhook = params.has('devhook');
@@ -140,6 +166,9 @@ function main(): void {
   let bus: Bus;
   let controller: SessionController;
   let liveHandle: LiveViewHandle | null = null;
+  let setupHandle: SetupViewHandle | null = null;
+  // presetsHandle itself is declared above (in scope for the wireTabs()
+  // onActivate callback); boot() only assigns it.
   let wsBannerPoll: ReturnType<typeof setInterval> | null = null;
   let disconnectedSince: number | null = null;
 
@@ -168,6 +197,14 @@ function main(): void {
     if (liveHandle) {
       liveHandle.destroy();
       liveHandle = null;
+    }
+    if (setupHandle) {
+      setupHandle.destroy();
+      setupHandle = null;
+    }
+    if (presetsHandle) {
+      presetsHandle.destroy();
+      presetsHandle = null;
     }
     if (wsBannerPoll !== null) {
       clearInterval(wsBannerPoll);
@@ -230,14 +267,63 @@ function main(): void {
     const liveOpts = overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {};
     liveHandle = mountLiveView(shell.panes.live, controller, bus, liveOpts);
 
-    void controller.init();
+    setupHandle = mountSetupView(shell.panes.setup, {
+      controller,
+      storage,
+      onSessionStarted: () => tabs.activate('live'),
+    });
+    presetsHandle = mountPresetsView(shell.panes.presets, {
+      controller,
+      storage,
+      onLoadPreset: (preset) => {
+        setupHandle?.loadPreset(preset);
+        tabs.activate('setup');
+      },
+      onSessionStarted: () => tabs.activate('live'),
+    });
+
+    // Local snapshots of THIS boot() call's controller/storage: the outer
+    // `controller`/`storage` bindings are reassigned by a later boot() call
+    // (settings-save reconnect) — without capturing them here, a slow
+    // loadPresets() round-trip below could resolve after such a reconnect
+    // and call adoptPresentation() on the wrong (newer) controller instance.
+    // adoptPresentation() itself also no-ops once dispose()'d, so this is
+    // belt-and-suspenders, not the only guard.
+    const bootedController = controller;
+    const bootedStorage = storage;
+    // Task 2.6 — closes the Task 2.4 style/template recovery gap: init()
+    // restores the SESSION from storage on its own, but style/template are
+    // controller-instance-only state with no storage key of their own (see
+    // controller.ts's class-level comment). Once init() resolves, if the
+    // restored session carries a presetId, look that preset up and hand its
+    // style/template to adoptPresentation() so the broadcast (and the
+    // overlay) picks it up. No presetId (an ad hoc session) or a since-
+    // deleted preset both correctly fall through to doing nothing — the
+    // session stays number-only, per the brief.
+    void bootedController
+      .init()
+      .then(async () => {
+        const session = bootedController.getState().session;
+        if (session === null || session.presetId === null) return;
+        const outcome = await bootedStorage.loadPresets();
+        const preset = (outcome.value ?? []).find((p) => p.id === session.presetId);
+        if (preset) bootedController.adoptPresentation(preset.style, preset.template);
+      })
+      .catch(() => {
+        // Best-effort re-derivation only: init() and loadPresets() are both
+        // designed to never throw, but a session that never gets its
+        // style/template re-derived is still fully usable (number-only) —
+        // this must never become an unhandled rejection or block boot().
+      });
     client.connect();
 
     if (devhook) {
-      // Test-only seam: Task 2.6 replaces this with the real Setup flow,
-      // which will call controller.startSession() from an actual form. Until
-      // then, Playwright specs need a way to create a session without that
-      // UI existing yet.
+      // Test seam (kept from Task 2.5): lets Playwright start a session
+      // without driving the real Setup form — still used throughout
+      // tests/ui/live.spec.ts, wherever going through the full form would
+      // just add noise to a test that isn't about the form itself. Task 2.6
+      // landed the real flow (mountSetupView/mountPresetsView above); this
+      // hook is a deliberately-retained shortcut, not a stub.
       (window as unknown as { __lc: unknown }).__lc = {
         controller,
         startSession: (cfg: SessionConfig, style?: StyleConfig, template?: string | null) =>
