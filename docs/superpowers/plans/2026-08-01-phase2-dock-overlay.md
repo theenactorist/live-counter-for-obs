@@ -197,9 +197,19 @@ export class SessionController {
 
 - [ ] RED → implement → GREEN → commit `feat(dock): diagnostics + settings + phase gate integration test`
 
+### Task 2.9: Preset export/import (scope addition, user-requested 2026-08-01 — PRD §8.7 + AC 21)
+
+**Files:** Modify `src/dock/views/presets.ts`; append to `tests/ui/presets-setup.spec.ts`.
+
+**Contract:** `presets-export` button → builds `{ app: 'live-counter', kind: 'preset-export', v: 1, exportedAt, presets }` from a FRESH `storage.loadPresets()` → `navigator.clipboard.writeText` → `export-confirm` feedback ("N presets copied"). `presets-import` reveals `import-textarea` + `import-apply` + `import-cancel`; apply: `JSON.parse` (failure → `import-error` naming the problem, nothing written) → envelope check (app/kind/v) → every preset validated through the engine pipeline (serialize the array and run it through `loadPresets`-equivalent validation with migrations) → **all-or-nothing** → each import gets a fresh `crypto.randomUUID()` id → title collision with an existing preset appends " (imported)" → merge against a fresh `loadPresets()` fetch (never clobber concurrent edits) → `savePresets` → list refresh + `import-confirm` ("N presets imported"). Clipboard is the transport (works in OBS CEF docks; no file-picker dependency).
+
+**Mandatory tests:** export puts a valid envelope on the clipboard (clipboard permissions granted in Playwright); round-trip — export, wipe `lc.presets.v1` via page.evaluate, paste + apply → all rows restored with settings (AC 21); malformed JSON → inline error, storage untouched; envelope containing one invalid preset → all-or-nothing rejection; title collision → "(imported)" suffix; imported ids differ from originals.
+
+- [ ] Spec first (RED) → implement → GREEN (all suites) → commit `feat(dock): preset export/import via clipboard`
+
 ---
 
-## Phase gate checklist (after Task 2.8)
+## Phase gate checklist (after Task 2.9)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)

@@ -168,6 +168,7 @@ The dock continuously shows: current value (dominant), `X of Y` (Y = configured 
 - **End session** opens one confirmation with two explicit actions: **End & keep overlay visible** / **End & hide overlay**. "Keep visible" stores a frozen final-render snapshot (template + value + style) outside the session; the overlay serves it across reloads until hidden or a new session starts. Ending clears active progress; it never deletes presets.
 - Loading a preset mid-session prompts: **Restart at new start value** or **Keep current value** (clamped into the new range with a visible warning if outside).
 - Presets: create, save, load, update, duplicate, delete (with confirmation). Stale-edit conflicts (preset changed since loaded) require explicit overwrite confirmation.
+- **Export/import (added to scope 2026-08-01):** Export copies all presets as a JSON text block to the clipboard; import accepts a pasted block. Imports validate every preset through the schema/migration pipeline and are all-or-nothing on any failure; imported presets get fresh ids and never overwrite existing ones (title collisions gain an "(imported)" suffix). This is the supported way to move preset setups between computers.
 
 ### 8.8 Display text
 
@@ -244,6 +245,7 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 18. Hotkey +1 fires while OBS focus is on the main window (dock unfocused) → count increments exactly once (nonce dedup verified under repeat).
 19. Dock closed during automatic run → overlay shows "control panel closed" hint within 6 s and holds the last value; dock reopened → session Paused at that value.
 20. Storage quota exhausted (fault injection) → session continues in memory with a visible warning; no crash; event log records it.
+21. Export copies a JSON block containing all presets; on a fresh profile, importing that block restores every preset with all settings intact (per AC 15); importing malformed JSON or a block containing any invalid preset changes nothing and shows an inline error.
 
 ## 12. Test plan
 
