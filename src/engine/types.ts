@@ -16,13 +16,20 @@ export interface Session {
   startValue: number; finishValue: number; currentValue: number;
   direction: Direction; mode: Mode; status: Status;
   intervalSeconds: number; overlayVisible: boolean;
+  // True only when the ENGINE (not the operator) is the reason the overlay is
+  // currently invisible: either a kind:'hide' completion entry, or an accepted
+  // `completionHide` command under kind:'holdThenHide'. Operator `showOverlay`/
+  // `hideOverlay` always clear it back to false, even when overlayVisible does
+  // not otherwise change (§8.5/§8.11 — see counter.ts's exitComplete doc
+  // comment for why this replaces the old completion-kind-based re-show gate).
+  hiddenByCompletion: boolean;
   undoStack: UndoEntry[]; completion: CompletionConfig; updatedAt: string;
 }
 
 export type Command =
   | { type: 'increment' | 'decrement' | 'undo' | 'reverse' | 'reset'
       | 'start' | 'pause' | 'resume' | 'faster' | 'slower'
-      | 'showOverlay' | 'hideOverlay' | 'tick'; nonce: string }
+      | 'showOverlay' | 'hideOverlay' | 'tick' | 'completionHide'; nonce: string }
   | { type: 'jump'; value: number; nonce: string }
   | { type: 'setMode'; mode: Mode; nonce: string }
   | { type: 'endSession'; keepOverlay: boolean; nonce: string };
@@ -189,7 +196,8 @@ export function isSession(x: unknown): x is Session {
 
   const {
     schemaVersion, revision, presetId, startValue, finishValue, currentValue,
-    direction, mode, status, intervalSeconds, overlayVisible, undoStack, completion, updatedAt,
+    direction, mode, status, intervalSeconds, overlayVisible, hiddenByCompletion,
+    undoStack, completion, updatedAt,
   } = x;
 
   if (!isNonNegativeInteger(schemaVersion)) return false;
@@ -203,6 +211,7 @@ export function isSession(x: unknown): x is Session {
   if (!isOneOf(status, STATUSES)) return false;
   if (!isPositiveFiniteNumber(intervalSeconds)) return false;
   if (typeof overlayVisible !== 'boolean') return false;
+  if (typeof hiddenByCompletion !== 'boolean') return false;
   if (!Array.isArray(undoStack) || !undoStack.every(isUndoEntry)) return false;
   if (!isCompletionConfig(completion)) return false;
   if (typeof updatedAt !== 'string') return false;

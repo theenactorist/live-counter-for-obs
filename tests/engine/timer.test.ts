@@ -237,3 +237,50 @@ describe('AutoTimer — sleep-gap threshold is max(2 x interval, 2 s)', () => {
     expect(t.running).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 2.0 change 5: stop() must clear `firing` so `running` reads false
+// immediately — including when stop() is called from inside onTick, where
+// `firing` is still true for the remainder of the hook's execution. Without
+// this, `running` stays (wrongly) true until the hook returns, and a
+// setIntervalSeconds() called right after stop() (also from inside the hook)
+// takes the "already running" re-arm branch instead of the "not running"
+// branch, leaving an orphaned handle behind.
+// ---------------------------------------------------------------------------
+
+describe('AutoTimer — stop() clears `firing` immediately (Task 2.0 change 5)', () => {
+  it('stop() called from inside onTick makes running read false before the hook returns', () => {
+    const rt = new FakeRuntime();
+    let runningInsideHook: boolean | undefined;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(1, {
+      onTick: () => {
+        t.stop();
+        runningInsideHook = t.running;
+      },
+      onSleepGap: () => {
+        throw new Error('unexpected sleep gap');
+      },
+    });
+    rt.advanceTo(1_100);
+    expect(runningInsideHook).toBe(false);
+    expect(t.running).toBe(false);
+  });
+
+  it('stop() then setIntervalSeconds() from inside onTick leaves the timer stopped with no handle', () => {
+    const rt = new FakeRuntime();
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(1, {
+      onTick: () => {
+        t.stop();
+        t.setIntervalSeconds(0.5);
+      },
+      onSleepGap: () => {
+        throw new Error('unexpected sleep gap');
+      },
+    });
+    rt.advanceTo(1_100);
+    expect(t.running).toBe(false);
+    expect(rt.queue.length).toBe(0);
+  });
+});

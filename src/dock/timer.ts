@@ -51,6 +51,15 @@ export class AutoTimer {
     this.gen++;
     if (this.handle !== null) this.cancel(this.handle);
     this.handle = null;
+    // Clears `running` immediately even when stop() is called re-entrantly
+    // from inside onTick (where `firing` is still true for the remainder of
+    // the hook). The hook's own `finally` block sets `firing = false` again
+    // once it returns — harmless, since this is already false by then — but
+    // without clearing it HERE, `running` stays wrongly true for the rest of
+    // the hook's execution, and a setIntervalSeconds() called right after
+    // stop() (also from inside the hook) would take the "already running"
+    // re-arm branch instead of "not running", leaving an orphaned handle.
+    this.firing = false;
   }
 
   setIntervalSeconds(s: number): void {

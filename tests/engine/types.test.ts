@@ -63,6 +63,7 @@ describe('isSession', () => {
     schemaVersion: 1, revision: 0, presetId: null, startValue: 0, finishValue: 50,
     currentValue: 0, direction: 'up', mode: 'manual', status: 'idle', intervalSeconds: 1,
     overlayVisible: false, undoStack: [], completion: { kind: 'hold' }, updatedAt: '2026-08-01T00:00:00.000Z',
+    hiddenByCompletion: false,
   };
   it('accepts a valid session', () => { expect(isSession(good)).toBe(true); });
   it('rejects wrong enums, missing fields, out-of-range values', () => {
@@ -150,6 +151,23 @@ describe('isSession', () => {
     expect(() => isSession({ ...good, completion: null })).not.toThrow();
     expect(isSession({ ...good, completion: null })).toBe(false);
     expect(isSession({ ...good, completion: 'hold' })).toBe(false);
+  });
+
+  // --- Task 2.0 change 1: hiddenByCompletion (dock hide-ownership flag) ---
+
+  it('accepts hiddenByCompletion true', () => {
+    expect(isSession({ ...good, hiddenByCompletion: true })).toBe(true);
+  });
+
+  it('rejects a non-boolean hiddenByCompletion', () => {
+    expect(isSession({ ...good, hiddenByCompletion: 'no' })).toBe(false);
+    expect(isSession({ ...good, hiddenByCompletion: 1 })).toBe(false);
+    expect(isSession({ ...good, hiddenByCompletion: null })).toBe(false);
+  });
+
+  it('rejects a session missing hiddenByCompletion', () => {
+    const { hiddenByCompletion, ...missing } = good;
+    expect(isSession(missing)).toBe(false);
   });
 });
 

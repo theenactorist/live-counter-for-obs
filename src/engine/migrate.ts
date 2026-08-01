@@ -143,7 +143,11 @@ function mulberry32(seed: number): () => number {
 
 // Fixed command menu covering every Command type (same spirit as the
 // property-test arbitrary): 13 bare commands + jump (value in [-5, 60]) +
-// setMode (both modes), chosen uniformly.
+// setMode (both modes), chosen uniformly. `endSession` and `completionHide`
+// are deliberately excluded from this menu: both are dock-internal lifecycle
+// commands (session teardown / dock-owned completion hide) rather than part
+// of the count-changing core loop this replay oracle exercises, so including
+// them would churn the deterministic sequence without adding coverage here.
 const BARE_COMMAND_TYPES = [
   'increment', 'decrement', 'undo', 'reverse', 'reset',
   'start', 'pause', 'resume', 'faster', 'slower',
