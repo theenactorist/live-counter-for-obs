@@ -572,7 +572,7 @@ test.describe('overlay renderer', () => {
     }
   });
 
-  test('null-style coalescing latches off after the first resolution — later broadcasts paint immediately (review fix: Important 2)', async ({
+  test('deleted-preset session: once cached "unstyled", later broadcasts for the SAME preset paint immediately (review fix round 1/2)', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -590,13 +590,13 @@ test.describe('overlay renderer', () => {
           heartbeat: 1,
         } satisfies StatePayload);
 
-        // Resolves via the coalesce-timeout fallback (no styled follow-up).
+        // Resolves via the coalesce-timeout fallback (no styled follow-up)
+        // — this preset gets cached 'unstyled'.
         await expect(page.getByTestId('overlay-number')).toHaveText('20', { timeout: 1000 });
 
-        // From here on, coalescing must be latched off: two rapid,
-        // back-to-back null-style broadcasts for the SAME (still
-        // preset-backed) session must each paint immediately — neither
-        // silently dropped nor held back 150ms.
+        // From here on, this SAME preset must never re-buffer: two rapid,
+        // back-to-back null-style broadcasts for it must each paint
+        // immediately — neither silently dropped nor held back 150ms.
         await bus.send('state', {
           session: { ...presetSession, currentValue: 21 },
           snapshot: null,
@@ -616,6 +616,180 @@ test.describe('overlay renderer', () => {
           heartbeat: 3,
         } satisfies StatePayload);
         await expect(page.getByTestId('overlay-number')).toHaveText('22', { timeout: 50 });
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('reconnect regression: a null-style frame for an ALREADY-cached preset resolves from cache immediately, no default-style flash (review fix round 2, reviewer repro)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        const presetSession = sessionFixture({ currentValue: 40, presetId: 'preset-reconnect' });
+        await bus.send('state', {
+          session: presetSession,
+          snapshot: null,
+          style: styleFixture({ numberColor: '#ff00ff' }),
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('40');
+        const colorAfterInitialStyle = await page.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(colorAfterInitialStyle).toBe('rgb(255, 0, 255)');
+
+        // Track every repaint's color from this point forward — proves the
+        // reconnect frame below never even transiently shows
+        // DEFAULT_STYLE's white before settling on the cached magenta (a
+        // global "resolved once, ignore forever" latch would have skipped
+        // coalescing for this frame entirely and painted DEFAULT_STYLE
+        // directly, which is exactly the regression this test guards).
+        await page.evaluate(() => {
+          const w = window as unknown as { __paintColors: string[] };
+          w.__paintColors = [];
+          const root = document.querySelector('[data-testid="overlay-root"]')!;
+          const observer = new MutationObserver(() => {
+            const numberEl = document.querySelector('[data-testid="overlay-number"]');
+            if (numberEl && numberEl.textContent) {
+              w.__paintColors.push(getComputedStyle(numberEl).color);
+            }
+          });
+          observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true });
+        });
+
+        // Simulates a dock reload/reconnect: init() re-broadcasts
+        // style:null for the SAME still-active session/presetId — this
+        // fires on EVERY boot, not just the first.
+        await bus.send('state', {
+          session: { ...presetSession, currentValue: 41 },
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+
+        // No 150ms buffering delay — resolves from cache almost immediately.
+        await expect(page.getByTestId('overlay-number')).toHaveText('41', { timeout: 50 });
+
+        const colorAfterReconnectFrame = await page.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(colorAfterReconnectFrame).toBe('rgb(255, 0, 255)'); // still magenta, never DEFAULT_STYLE white
+
+        const colors = await page.evaluate(() => (window as unknown as { __paintColors: string[] }).__paintColors);
+        expect(colors.length).toBeGreaterThan(0);
+        for (const c of colors) {
+          expect(c).toBe('rgb(255, 0, 255)'); // every repaint since stayed magenta, no intermediate flash
+        }
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('a hide arriving while a coalesce buffer is pending resolves immediately and cancels the buffer (review fix round 2)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        const presetSession = sessionFixture({ currentValue: 50, presetId: 'preset-hide-while-buffering', overlayVisible: true });
+
+        // Never-before-seen preset, null-style -> enters the buffer (cache miss).
+        await bus.send('state', {
+          session: presetSession,
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-content')).toHaveCount(0); // still inside the ~150ms window
+
+        // A hide arrives WHILE the buffer is pending — must resolve
+        // immediately (not wait out the buffer) and cancel it outright.
+        await bus.send('state', {
+          session: { ...presetSession, overlayVisible: false },
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-content')).toHaveCount(0);
+
+        // The real proof: wait well past what would have been the ORIGINAL
+        // buffer's ~150ms timeout. If the buffer had NOT been cancelled, its
+        // stale (pre-hide, visible) payload would fire via setTimeout and
+        // incorrectly reveal the number again — it must not.
+        await page.waitForTimeout(300);
+        await expect(page.getByTestId('overlay-content')).toHaveCount(0);
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test("a null-style frame for a DIFFERENT unknown preset buffers — never borrows another preset's cached style (review fix round 2)", async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        // Preset A gets styled (green) and cached.
+        const sessionA = sessionFixture({ currentValue: 60, presetId: 'preset-a' });
+        await bus.send('state', {
+          session: sessionA,
+          snapshot: null,
+          style: styleFixture({ numberColor: '#00ff00' }),
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('60');
+        const greenColor = await page.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(greenColor).toBe('rgb(0, 255, 0)');
+
+        // A DIFFERENT, never-before-seen preset broadcasts null-style —
+        // must buffer (cache miss for 'preset-b'), NOT immediately borrow
+        // preset A's cached green style.
+        const sessionB = sessionFixture({ currentValue: 70, presetId: 'preset-b' });
+        await bus.send('state', {
+          session: sessionB,
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+
+        // Still inside preset B's buffer window: the DISPLAYED value must
+        // still read A's (60), proving B did not paint immediately (which
+        // borrowing A's cache would have done).
+        await expect(page.getByTestId('overlay-number')).toHaveText('60');
+        await page.waitForTimeout(50);
+        await expect(page.getByTestId('overlay-number')).toHaveText('60');
+
+        // After preset B's own ~150ms window elapses with no styled
+        // follow-up, it paints number-only using the DEFAULT style — never
+        // A's green.
+        await expect(page.getByTestId('overlay-number')).toHaveText('70', { timeout: 1000 });
+        const colorAfterFallback = await page.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(colorAfterFallback).not.toBe('rgb(0, 255, 0)');
       } finally {
         close();
       }

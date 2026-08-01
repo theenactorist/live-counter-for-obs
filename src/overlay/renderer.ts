@@ -8,20 +8,34 @@
 //    level hide, distinct from the engine's own hiddenByCompletion).
 //  - session === null && snapshot !== null -> render the frozen snapshot
 //    (end-session "keep overlay" flow). Both null -> render nothing.
-//  - Broadcast coalescing (ledger note from Task 2.6): a preset-backed
-//    session (presetId !== null) whose broadcast carries style === null is
-//    init()'s pre-adoptPresentation frame — delay painting up to
-//    `coalesceMs` (150ms default) for a styled follow-up. A null-style frame
-//    for a preset-backed session must NEVER paint if a styled one arrives
-//    within the window; with no follow-up, paint number-only once the window
-//    elapses. This buffering LATCHES OFF permanently the first time it
-//    resolves (styled follow-up OR the timeout fallback) — review fix round
-//    1: a recovered session whose preset was later deleted keeps
-//    broadcasting `style: null` forever (adoptPresentation never runs
-//    again), and without the latch every subsequent broadcast for the rest
-//    of the page's life — including hides and rapid operator dispatches —
-//    would keep re-entering the 150ms buffer, silently dropping whichever
-//    one arrived first each time two landed within the window.
+//  - Broadcast coalescing (ledger note from Task 2.6) via a PER-PRESET
+//    presentation cache (review fix round 2 — replaces round 1's global
+//    latch, which caused a verified regression: see below): a styled frame
+//    for a preset-backed session (style !== null && session.presetId !==
+//    null) both paints immediately AND caches {style, template, animation}
+//    under that presetId. A null-style frame for a preset-backed session
+//    (init()'s pre-adoptPresentation broadcast, on EVERY boot/reconnect —
+//    not just the first) consults the cache for that SAME presetId:
+//      - hit with a cached presentation -> paint immediately USING the
+//        cached presentation (no flash, no buffer) — this is what a global
+//        "resolved once, ignore forever" latch got wrong: a dock
+//        reload/reconnect mid-session re-runs init(), re-broadcasting
+//        style:null for a session whose presetId was ALREADY resolved
+//        long ago; a global latch would skip coalescing entirely and paint
+//        that null-style frame's DEFAULT_STYLE straight onto the stream
+//        instead of holding the correct (cached) style.
+//      - hit with 'unstyled' (a prior buffer already timed out for this
+//        exact preset, e.g. its preset was later deleted) -> paint
+//        number-only immediately, no re-buffering.
+//      - miss (never resolved before for this preset — first boot) ->
+//        buffer up to `coalesceMs` (150ms default) awaiting a styled
+//        follow-up; on timeout, paint number-only and cache 'unstyled' for
+//        that presetId so this preset never re-buffers again.
+//    An ad hoc session (no presetId) with a null style paints immediately,
+//    uncached (nothing to key a cache entry on). Hides/ends
+//    (session.overlayVisible === false, or session === null) are NEVER
+//    buffered — they always resolve immediately and cancel any pending
+//    buffer, regardless of style/presetId.
 //  - Renders are keyed on message ARRIVAL, not on the heartbeat counter
 //    (heartbeat repeats/increments independently of content — never dedup a
 //    render just because heartbeat looks "the same shape" as last time).
@@ -63,6 +77,19 @@ export interface MountOverlayRendererOptions {
 export interface OverlayRendererHandle {
   destroy(): void;
 }
+
+// Review fix round 2 — per-preset presentation cache (replaces round 1's
+// global coalescing latch; see the module doc comment above for why a
+// global "resolved once" latch was wrong). `'unstyled'` records that a
+// buffer already timed out for this preset with no styled follow-up ever
+// showing up (e.g. its preset was deleted) — distinct from "no entry yet",
+// which still gets the normal first-boot buffer.
+interface CachedPresentation {
+  style: StyleConfig;
+  template: string | null;
+  animation: AnimationConfig | null;
+}
+type PresentationCacheEntry = CachedPresentation | 'unstyled';
 
 const DEFAULT_WATCHDOG_MS = 6000;
 const DEFAULT_COALESCE_MS = 150;
@@ -169,10 +196,10 @@ export function mountOverlayRenderer(
 
   let lastPaintedValue: number | null = null;
 
-  // Review fix round 1 — Important 2: the null-style coalescing buffer must
-  // latch off permanently once resolved (see the module doc comment above),
-  // rather than re-triggering on every future null-style+presetId message.
-  let coalescingActive = true;
+  // Review fix round 2: per-preset presentation cache, keyed by
+  // Session.presetId. See the module doc comment above and the
+  // CachedPresentation/PresentationCacheEntry types for the full contract.
+  const presentationCache = new Map<string, PresentationCacheEntry>();
 
   let numberAnim: Animation | null = null;
   let beforeAnim: Animation | null = null;
@@ -376,49 +403,98 @@ export function mountOverlayRenderer(
     paint(payload);
   }
 
+  // Cancels any pending coalesce buffer and paints `payload` right now.
+  // Shared by every "resolve immediately" path below.
+  function resolveImmediately(payload: StatePayload): void {
+    if (coalesceTimer !== null) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = null;
+      coalescedPayload = null;
+    }
+    paintOrBuffer(payload);
+  }
+
   function handleIncoming(payload: StatePayload): void {
     // Arrival-based, per the brief: ANY 'state' message clears the hint,
     // whether or not it ends up coalesced/deferred below.
     hideHint();
 
-    // Broadcast coalescing (Task 2.6 ledger note): a preset-backed session's
-    // null-style frame (init(), before adoptPresentation resolves) must
-    // never paint on its own if a styled follow-up lands within the window.
-    // Review fix round 1 (Important 2): gated on `coalescingActive`, which
-    // latches permanently false the first time this resolves (either
-    // branch below) — see the module doc comment for why an un-latched
-    // version silently buffers/drops every future broadcast forever for a
-    // session whose preset was deleted.
-    const isNullStylePresetFrame =
-      coalescingActive && payload.session !== null && payload.session.presetId !== null && payload.style === null;
+    const session = payload.session;
 
-    if (isNullStylePresetFrame) {
-      coalescedPayload = payload;
-      if (coalesceTimer === null) {
-        coalesceTimer = setTimeout(() => {
-          coalesceTimer = null;
-          const pending = coalescedPayload;
-          coalescedPayload = null;
-          coalescingActive = false;
-          if (pending) paintOrBuffer(pending);
-          // Review fix round 1 (Important 3): this deferred paint is just
-          // as much an "arrival" as any direct one — the watchdog must
-          // re-arm from here too, mirroring the fonts.ready path above,
-          // or a session whose ONLY broadcast ever is this one null-style
-          // frame would never get a watchdog armed at all.
-          rearmWatchdog();
-        }, coalesceMs);
-      }
-    } else {
-      if (coalesceTimer !== null) {
-        clearTimeout(coalesceTimer);
-        coalesceTimer = null;
-        coalescedPayload = null;
-      }
-      coalescingActive = false;
-      paintOrBuffer(payload);
+    // Hides/ends are NEVER buffered (review fix round 2) — a hidden or
+    // ended session always resolves immediately and cancels any pending
+    // buffer, regardless of what its style/presetId happen to be.
+    if (session === null || session.overlayVisible === false) {
+      resolveImmediately(payload);
+      rearmWatchdog();
+      return;
     }
 
+    // A styled frame for a preset-backed session both paints now AND
+    // caches its presentation under that presetId — this is what lets a
+    // LATER null-style frame for the SAME preset (e.g. init()'s
+    // pre-adoptPresentation broadcast on a dock reload/reconnect, which
+    // fires every time, not just the first) resolve from cache instead of
+    // re-buffering or flashing a default style.
+    if (payload.style !== null && session.presetId !== null) {
+      presentationCache.set(session.presetId, {
+        style: payload.style,
+        template: payload.template,
+        animation: payload.animation,
+      });
+      resolveImmediately(payload);
+      rearmWatchdog();
+      return;
+    }
+
+    // A null-style frame for a preset-backed session: consult the cache
+    // for this SAME presetId before deciding whether to buffer.
+    if (payload.style === null && session.presetId !== null) {
+      const cached = presentationCache.get(session.presetId);
+
+      if (cached === undefined) {
+        // Never resolved before for this preset — the first-boot race
+        // between init()'s broadcast and adoptPresentation(). Buffer
+        // briefly for a styled follow-up, same as before.
+        coalescedPayload = payload;
+        if (coalesceTimer === null) {
+          coalesceTimer = setTimeout(() => {
+            coalesceTimer = null;
+            const pending = coalescedPayload;
+            coalescedPayload = null;
+            if (pending && pending.session !== null && pending.session.presetId !== null) {
+              presentationCache.set(pending.session.presetId, 'unstyled');
+              paintOrBuffer(pending);
+            }
+            // Review fix round 1 (Important 3): this deferred paint is
+            // just as much an "arrival" as any direct one — the watchdog
+            // must re-arm from here too, mirroring the fonts.ready path
+            // above, or a session whose ONLY broadcast ever is this one
+            // null-style frame would never get a watchdog armed at all.
+            rearmWatchdog();
+          }, coalesceMs);
+        }
+        rearmWatchdog();
+        return;
+      }
+
+      // Cache hit: 'unstyled' paints the null-style payload as-is
+      // (number-only); an actual cached presentation is substituted in for
+      // this payload's null style/template/animation so the audience never
+      // sees a default-style flash while the real presentation is already
+      // known.
+      resolveImmediately(
+        cached === 'unstyled'
+          ? payload
+          : { ...payload, style: cached.style, template: cached.template, animation: cached.animation },
+      );
+      rearmWatchdog();
+      return;
+    }
+
+    // Ad hoc session (no presetId) — nothing to cache against, paints
+    // immediately exactly as before.
+    resolveImmediately(payload);
     rearmWatchdog();
   }
 
