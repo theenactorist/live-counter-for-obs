@@ -1,6 +1,6 @@
 # Product Requirements Document: Live Counter for OBS
 
-**Status:** v1.1 — approved architecture, pending Phase 0 feasibility gate
+**Status:** v1.1 — Phase 0 feasibility gate **passed** 2026-08-01 (see `docs/phase0-results.md`); architecture confirmed
 **Supersedes:** v1.0 (`~/Downloads/obs-live-counter-prd.md`)
 **Platforms:** Windows and macOS (OBS 31+; developed against OBS 32.1.2)
 **Deployment context:** Private use — the owner's church livestream. Not a public release.
@@ -62,7 +62,7 @@ Three artifacts, all loaded by OBS itself:
 
 **Message bus and storage — OBS's own machinery:**
 
-- All components connect to the machine-local **obs-websocket server** (bundled with OBS 5.x protocol). Pages communicate via `BroadcastCustomEvent`; the Lua bridge injects commands the same way (via the obs-websocket request API reached through OBS's proc-handler bridge).
+- All components connect to the machine-local **obs-websocket server** (bundled with OBS, 5.x protocol). Pages communicate via `BroadcastCustomEvent`. The Lua bridge injects commands through the **settings channel** validated in Phase 0: it writes command JSON (with a nonce) into a dedicated hidden text input's settings, which obs-websocket relays to the pages as `InputSettingsChanged` events. (The proc-handler route into the obs-websocket request API fails Lua's type check, and no official `obs_websocket_call_request` script binding exists in OBS 32's Lua environment — both verified in Phase 0.)
 - **Persistence:** after every state change, the dock writes the session and presets to `localStorage` (synchronous, survives OBS restarts in the CEF profile) and mirrors them to obs-websocket **persistent data** (second copy, readable by any client). Both records carry a `schemaVersion`.
 - **OBS status** (source in Program, Studio Mode, scene lists) comes from obs-websocket requests/events, plus the overlay's own `window.obsstudio` events, which work with zero configuration.
 
@@ -72,7 +72,7 @@ Three artifacts, all loaded by OBS itself:
 - **Dock closed or unloaded:** the state owner is gone; the overlay keeps rendering the last state and shows a subtle "control panel closed" hint if the dock's heartbeat (a periodic state broadcast every 2 s) stops for more than 6 s. An automatic run does not tick while the dock is unloaded; on reload the dock restores the session **Paused** (auto mode) or ready (manual mode) from storage.
 - **Overlay disconnected:** counting continues unimpeded. The dock shows a non-blocking banner ("Overlay not rendering — count continues; audience may not see updates"), suppressed when the disconnect is operator-initiated (Hide, completion-hide) or OBS reports the source hidden. No control lockout.
 
-**Feasibility gate (Phase 0):** this architecture depends on four mechanisms that must be verified on the development machine before Phase 1: (a) Custom Browser Docks load `file://` URLs; (b) two pages can exchange `BroadcastCustomEvent` messages; (c) obs-websocket persistent data and page `localStorage` survive an OBS restart; (d) a Lua script can reach the obs-websocket request API via the proc-handler bridge (fallback bridge: the script updates a hidden text source's settings and pages react to `InputSettingsChanged`). The probe artifacts already exist in `feasibility/`. **If (a) or (b) fails, the fallback architecture is the v1.0 helper-app design** (local Go controller, tray app, served pages) and this PRD's §6 reverts to it; all behavioural requirements in §8–§14 are architecture-independent and survive either outcome.
+**Feasibility gate (Phase 0) — PASSED 2026-08-01** on OBS 32.2.1 / obs-websocket 5.7.4 (full evidence: `docs/phase0-results.md`): (a) Custom Browser Docks load `file://` URLs ✓; (b) pages exchange `BroadcastCustomEvent` messages ✓; (c) both `localStorage` and obs-websocket persistent data survive an OBS restart ✓; (d) the Lua hotkey bridge works via the settings channel ✓ (the proc-handler route and the hoped-for official script binding both proved unavailable — the settings channel is the locked mechanism). The v1.0 helper-app fallback architecture is retired. Bonus confirmations: `window.obsstudio` is present in dock and source pages, and `file://` pages are secure contexts with `crypto.subtle` (websocket auth needs no JS-crypto fallback).
 
 ## 7. Core user flows
 

@@ -1,10 +1,10 @@
--- Claude feasibility probe: can an OBS Lua script (a) register a native OBS hotkey,
--- (b) reach obs-websocket's request API via the proc-handler bridge, and
--- (c) drive a settings-change fallback channel that pages can observe?
+-- Claude feasibility probe v2: (a) native OBS hotkey registration,
+-- (b) official obs-websocket script binding obs_websocket_call_request (5.1+),
+-- (c) settings-change fallback channel via a text source.
 local obs = obslua
 
 local RESULT_PATH = "/Users/olumide/Documents/Vibe coding/OBS Plugin/feasibility/lua-results.json"
-local results = { script_loaded = true, hotkey_registered = false, proc_bridge = "untested", fallback_settings = "untested", ticks = 0 }
+local results = { hotkey_registered = false, ws_call_request = "untested", fallback_settings = "untested" }
 local hotkey_id = nil
 local tick_count = 0
 
@@ -14,35 +14,34 @@ local function write_results()
   local f = io.open(RESULT_PATH, "w")
   if f then
     f:write(string.format(
-      '{"script_loaded":true,"hotkey_registered":%s,"proc_bridge":"%s","fallback_settings":"%s","ticks":%d}',
-      tostring(results.hotkey_registered), esc(results.proc_bridge), esc(results.fallback_settings), tick_count))
+      '{"script_loaded":true,"hotkey_registered":%s,"ws_call_request":"%s","fallback_settings":"%s","ticks":%d}',
+      tostring(results.hotkey_registered), esc(results.ws_call_request), esc(results.fallback_settings), tick_count))
     f:close()
   end
 end
 
-local function try_proc_bridge()
-  local ok, err = pcall(function()
-    local ph = obs.obs_get_proc_handler()
-    local cd = obs.calldata_create()
-    local found = obs.proc_handler_call(ph, "obs_websocket_api_get_ph", cd)
-    if not found then obs.calldata_destroy(cd); error("obs_websocket_api_get_ph not found") end
-    local ws_ph = obs.calldata_ptr(cd, "ph")
-    if ws_ph == nil then obs.calldata_destroy(cd); error("ws ph is null") end
-    local cd2 = obs.calldata_create()
-    obs.calldata_set_string(cd2, "request_type", "BroadcastCustomEvent")
-    obs.calldata_set_string(cd2, "request_data", '{"eventData":{"source":"lua-bridge","msg":"hello-from-lua"}}')
-    local called = obs.proc_handler_call(ws_ph, "call_request", cd2)
-    obs.calldata_destroy(cd2)
-    obs.calldata_destroy(cd)
-    if not called then error("call_request proc failed") end
-  end)
-  if ok then
-    results.proc_bridge = "ok"
-  else
-    if results.proc_bridge == "untested" or results.proc_bridge:find("^fail") == nil then
-      results.proc_bridge = "fail: " .. esc(err)
-    end
+local function try_ws_call_request()
+  -- Official binding: injected as a GLOBAL into the Lua script environment by obs-websocket 5.1+
+  local fn = rawget(_G, "obs_websocket_call_request") or obs.obs_websocket_call_request
+  if type(fn) ~= "function" then
+    results.ws_call_request = "missing"
+    return
   end
+  local ok, ret = pcall(fn, "BroadcastCustomEvent",
+    { eventData = { source = "lua-bridge", msg = "hello-from-lua", tick = tick_count } })
+  if not ok then
+    results.ws_call_request = "fail: " .. esc(ret)
+    return
+  end
+  -- ret is a table like { status = true/..., ... } depending on binding version; record shape
+  local shape = type(ret)
+  if shape == "table" then
+    local keys = {}
+    for k, _ in pairs(ret) do keys[#keys + 1] = tostring(k) end
+    shape = "table{" .. table.concat(keys, ",") .. "}"
+    if ret.status ~= nil then shape = shape .. " status=" .. tostring(ret.status) end
+  end
+  results.ws_call_request = "ok ret=" .. esc(shape)
 end
 
 local function try_fallback_channel()
@@ -62,15 +61,15 @@ local function try_fallback_channel()
 end
 
 local function on_hotkey(pressed)
-  if pressed then try_proc_bridge() end
+  if pressed then try_ws_call_request() end
 end
 
 local function tick()
   tick_count = tick_count + 1
-  try_proc_bridge()
+  try_ws_call_request()
   try_fallback_channel()
   write_results()
-  if tick_count >= 15 then obs.timer_remove(tick) end
+  if tick_count >= 40 then obs.timer_remove(tick) end
 end
 
 function script_load(settings)
