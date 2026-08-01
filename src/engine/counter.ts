@@ -82,6 +82,13 @@ function reject(s: Session, rejection: RejectReason): ApplyResult {
   return { session: s, accepted: false, rejection, effects: [] };
 }
 
+// Centralizes the accepted-no-op path: same session reference, no effects,
+// but still `accepted: true` (distinct from `reject` — the command was valid,
+// it just produced no change).
+function noop(s: Session): ApplyResult {
+  return { session: s, accepted: true, effects: [] };
+}
+
 function move(s: Session, delta: 1 | -1, nowMs: number): ApplyResult {
   const { lo, hi } = rangeOf(s);
   const next = s.currentValue + delta;
@@ -95,18 +102,55 @@ function move(s: Session, delta: 1 | -1, nowMs: number): ApplyResult {
   return accept(s, { currentValue: next, undoStack }, nowMs, [{ kind: 'animate' }]);
 }
 
+function jump(s: Session, value: number, nowMs: number): ApplyResult {
+  const { lo, hi } = rangeOf(s);
+  if (!Number.isInteger(value) || value < lo || value > hi) return reject(s, 'invalid-value');
+  if (value === s.currentValue) return noop(s);
+
+  const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
+  const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
+
+  // Completion handling (landing on activeBoundary) arrives in Task 1.6; for now a
+  // jump that lands exactly on a boundary still just moves.
+  return accept(s, { currentValue: value, undoStack }, nowMs, [{ kind: 'animate' }]);
+}
+
+function reverse(s: Session, nowMs: number): ApplyResult {
+  const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
+  const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
+  const nextDirection = s.direction === 'up' ? 'down' : 'up';
+
+  // Value is unchanged, so no animate effect.
+  return accept(s, { direction: nextDirection, undoStack }, nowMs, []);
+}
+
+function reset(s: Session, nowMs: number): ApplyResult {
+  const direction = initialDirection(s.startValue, s.finishValue);
+  const valueChanged = s.currentValue !== s.startValue;
+
+  if (!valueChanged && s.direction === direction && s.undoStack.length === 0) {
+    return noop(s);
+  }
+
+  const effects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+  return accept(s, { currentValue: s.startValue, direction, undoStack: [] }, nowMs, effects);
+}
+
 export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResult {
   switch (cmd.type) {
     case 'increment':
       return move(s, 1, nowMs);
     case 'decrement':
       return move(s, -1, nowMs);
-
-    // --- Not yet implemented. Tasks 1.4-1.6 replace these branches one at a time. ---
     case 'jump':
-    case 'undo':
+      return jump(s, cmd.value, nowMs);
     case 'reverse':
+      return reverse(s, nowMs);
     case 'reset':
+      return reset(s, nowMs);
+
+    // --- Not yet implemented. Tasks 1.5-1.6 replace these branches one at a time. ---
+    case 'undo':
     case 'start':
     case 'pause':
     case 'resume':
