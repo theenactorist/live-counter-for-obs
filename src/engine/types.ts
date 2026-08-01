@@ -54,7 +54,10 @@ export interface Preset {
 }
 
 // ---------------------------------------------------------------------------
-// Internal structural-check helpers (implementation detail, not exported).
+// Internal structural-check helpers (implementation detail, not exported,
+// except isCompletionConfig — exported so other engine modules, e.g.
+// counter.ts's createSession, can reuse the exact same completion-shape rule
+// isSession/isPreset enforce, instead of maintaining a second copy of it).
 // Validators below are plain hand-written checks — no external library.
 // ---------------------------------------------------------------------------
 
@@ -97,7 +100,7 @@ function isUndoEntry(x: unknown): x is UndoEntry {
   return isValidCountValue(value) && isOneOf(direction, DIRECTIONS);
 }
 
-function isCompletionConfig(x: unknown): x is CompletionConfig {
+export function isCompletionConfig(x: unknown): x is CompletionConfig {
   if (!isPlainObject(x)) return false;
   const { kind, seconds } = x;
   if (!isOneOf(kind, COMPLETION_KINDS)) return false;

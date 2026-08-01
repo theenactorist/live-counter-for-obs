@@ -2,7 +2,7 @@ import type {
   Session, Command, ApplyResult, Effect, Mode, CompletionConfig, RejectReason, UndoEntry,
 } from './types.js';
 import {
-  rangeOf, initialDirection, isValidCountValue,
+  rangeOf, initialDirection, isValidCountValue, isCompletionConfig,
   UNDO_DEPTH, SPEED_LEVELS, MAX_VALUE, SESSION_SCHEMA_VERSION,
 } from './types.js';
 
@@ -13,21 +13,6 @@ export interface SessionConfig {
   mode: Mode;
   intervalSeconds?: number;
   completion?: CompletionConfig;
-}
-
-const DEFAULT_COMPLETION: CompletionConfig = { kind: 'hold' };
-
-// Mirrors types.ts's private isCompletionConfig structural check (kept local to this
-// module since types.ts's version isn't exported and Task 1.3 only owns counter.ts).
-function isValidCompletionConfig(x: unknown): x is CompletionConfig {
-  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false;
-  const { kind, seconds } = x as Record<string, unknown>;
-  if (kind !== 'hold' && kind !== 'hide' && kind !== 'holdThenHide') return false;
-  if (kind === 'holdThenHide') {
-    return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0;
-  }
-  if (seconds !== undefined) return typeof seconds === 'number' && Number.isFinite(seconds);
-  return true;
 }
 
 export function createSession(cfg: SessionConfig, nowMs: number): Session {
@@ -48,8 +33,11 @@ export function createSession(cfg: SessionConfig, nowMs: number): Session {
     );
   }
 
-  const completion: CompletionConfig = cfg.completion ?? DEFAULT_COMPLETION;
-  if (!isValidCompletionConfig(completion)) {
+  // Shallow-copy into a fresh object (never store the caller's object, or the shared
+  // default, by reference) so later mutation of the source object can't alias into the
+  // session — keeps the same copy-on-write discipline as the rest of createSession.
+  const completion: CompletionConfig = { ...(cfg.completion ?? { kind: 'hold' }) };
+  if (!isCompletionConfig(completion)) {
     throw new Error(`createSession: invalid completion config: ${JSON.stringify(completion)}`);
   }
 
