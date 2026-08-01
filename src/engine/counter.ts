@@ -124,6 +124,17 @@ function reverse(s: Session, nowMs: number): ApplyResult {
   return accept(s, { direction: nextDirection, undoStack }, nowMs, []);
 }
 
+function undo(s: Session, nowMs: number): ApplyResult {
+  if (s.undoStack.length === 0) return reject(s, 'invalid-state');
+
+  const entry = s.undoStack[s.undoStack.length - 1]!;
+  const undoStack = s.undoStack.slice(0, -1);
+  const valueChanged = entry.value !== s.currentValue;
+
+  const effects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+  return accept(s, { currentValue: entry.value, direction: entry.direction, undoStack }, nowMs, effects);
+}
+
 function reset(s: Session, nowMs: number): ApplyResult {
   const direction = initialDirection(s.startValue, s.finishValue);
   const valueChanged = s.currentValue !== s.startValue;
@@ -148,9 +159,10 @@ export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResu
       return reverse(s, nowMs);
     case 'reset':
       return reset(s, nowMs);
-
-    // --- Not yet implemented. Tasks 1.5-1.6 replace these branches one at a time. ---
     case 'undo':
+      return undo(s, nowMs);
+
+    // --- Not yet implemented. Task 1.6 replaces these branches one at a time. ---
     case 'start':
     case 'pause':
     case 'resume':
