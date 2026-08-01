@@ -123,11 +123,23 @@ interface CompletionResolution {
 // hidden overlay there is operator-initiated, PRD AC 1 / §8.11). Under
 // `hide`/`holdThenHide` the proxy mis-fired when the operator hid the overlay
 // BEFORE completion: exiting would force it back on over the operator's
-// wishes. The flag is set ONLY by engine-owned hides — the kind:'hide' entry
-// transition (resolveCompletion below) and the `completionHide` command
-// (applyCommand) — and is always cleared back to false by operator
-// `showOverlay`/`hideOverlay` (setOverlay below), so it exactly answers "did
-// completion, not the operator, hide this?" with no residual case left.
+// wishes.
+//
+// The flag is written ONLY by the two engine-owned hide sites — the
+// kind:'hide' entry transition (resolveCompletion below) and the
+// `completionHide` command (applyCommand) — and cleared back to false by
+// operator `showOverlay`/`hideOverlay` (setOverlay below) and by
+// `endSession`. But "engine-owned hide site" does not by itself mean
+// ownership: per the controller's ownership-transition ruling, both sites
+// only CLAIM ownership (write `true`) on a genuine visible -> hidden
+// transition — `hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible`.
+// If the overlay was already hidden (by the operator, before this hide site
+// ran), that hide is a no-op on the visuals and must not steal ownership out
+// from under the operator's prior `hideOverlay`; the flag simply carries
+// forward whatever it already was (false, in that case). So the flag exactly
+// answers "is completion the reason this is currently hidden?", tracking WHO
+// most recently caused a real hidden transition, not merely which code path
+// last ran.
 function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
   if (s.status !== 'complete') {
     return { status: s.status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects };
@@ -151,12 +163,18 @@ function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
 // the session wasn't already `complete`).
 //
 // Task 2.0 change 3: under completion kind 'hide', ENTRY itself hides the
-// overlay — the engine, not a later dock-issued command, owns this transition
-// end to end, so `hiddenByCompletion` is set unconditionally (superseding
-// whatever hid/showed it before) and the `overlay` effect is appended AFTER
-// `completed`, giving effect order [animate, completed, overlay]. `hold` and
-// `holdThenHide` do not hide on entry — `holdThenHide` hides only via the
-// dock-issued `completionHide` command once its hold timer elapses.
+// overlay. `overlayVisible` is unconditionally set to false and the `overlay`
+// effect is unconditionally appended AFTER `completed` (effect order
+// [animate, completed, overlay]) — even when the overlay was already hidden,
+// a redundant `overlay:false` is harmless. Ownership of the hide
+// (`hiddenByCompletion`) is NOT unconditional, though: it's claimed only on a
+// genuine visible -> hidden transition, `s.hiddenByCompletion ||
+// s.overlayVisible` (see the doc comment above `exitComplete`). If the
+// operator had already hidden the overlay before this entry ran, ownership
+// stays with the operator (flag stays false) so a later exit does not
+// force-show over their prior `hideOverlay`. `hold` and `holdThenHide` do not
+// hide on entry — `holdThenHide` hides only via the dock-issued
+// `completionHide` command once its hold timer elapses.
 function resolveCompletion(
   s: Session, newValue: number, newDirection: Direction, effects: Effect[],
 ): CompletionResolution {
@@ -167,7 +185,7 @@ function resolveCompletion(
       return {
         status: 'complete',
         overlayVisible: false,
-        hiddenByCompletion: true,
+        hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible,
         effects: [...completedEffects, { kind: 'overlay', visible: false }],
       };
     }
@@ -339,13 +357,33 @@ function setOverlay(s: Session, visible: boolean, nowMs: number): ApplyResult {
 // this command to do. Not a count-changing command: no undo entry, no
 // animate effect — just the overlay hide plus the flag, like any other
 // engine-owned hide.
+//
+// Ownership follows the same visible -> hidden transition rule as the
+// kind:'hide' entry: `s.hiddenByCompletion || s.overlayVisible`. If the
+// overlay is ALREADY hidden-and-owned by a prior completionHide (or a
+// kind:'hide' entry), this is a true accepted no-op — same session
+// reference, no effects, no revision bump — so a dock that retries the
+// command (e.g. after a dropped ack) doesn't churn revisions. If it's hidden
+// but NOT owned (the operator hid it first), the command still accepts —
+// nothing visible changes, so a redundant `overlay:false` is harmless — but
+// it does not steal ownership: the flag stays false, same as the entry rule.
 function completionHide(s: Session, nowMs: number): ApplyResult {
   if (s.status !== 'complete' || s.completion.kind !== 'holdThenHide') return reject(s, 'invalid-state');
-  return accept(s, { overlayVisible: false, hiddenByCompletion: true }, nowMs, [{ kind: 'overlay', visible: false }]);
+  if (!s.overlayVisible && s.hiddenByCompletion) return noop(s);
+  return accept(
+    s,
+    { overlayVisible: false, hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible },
+    nowMs,
+    [{ kind: 'overlay', visible: false }],
+  );
 }
 
+// endSession clears `hiddenByCompletion` on teardown (§8.x lifecycle
+// hygiene): the session is about to be discarded or reset by the caller, and
+// leaving a stale "completion owns this hide" flag set would misinform
+// whatever reads the session next (e.g. a fresh start reusing session shape).
 function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResult {
-  return accept(s, { status: 'idle' }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
+  return accept(s, { status: 'idle', hiddenByCompletion: false }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
 }
 
 export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResult {
