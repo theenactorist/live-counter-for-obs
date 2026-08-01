@@ -174,6 +174,41 @@ describe('completion — regressions from Task 1.6 review', () => {
     expect(r.session.status).toBe('running');
   });
 
+  it('exiting complete under completion kind hold never force-shows an operator-hidden overlay', () => {
+    // `hold` never hides anything (PRD AC 1), so an overlay that is hidden while
+    // complete was hidden by the operator (§8.11) — the exit must leave it hidden.
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual' }, T0);
+    expect(s.completion).toEqual({ kind: 'hold' });
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete at 2
+    expect(s.status).toBe('complete');
+    s = { ...s, overlayVisible: false };                                    // operator hid it
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(false);
+    expect(r.effects).toEqual([{ kind: 'animate' }]);
+  });
+
+  it('direction-only undo landing on a boundary value does not enter complete', () => {
+    // Completion ENTRY requires the command to actually change the value onto the
+    // boundary; restoring only the direction must leave the status where it was.
+    let s = mk();                                                             // 0 -> 50 manual
+    for (let i = 0; i < 50; i++) s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    expect(s.currentValue).toBe(50);
+    expect(s.status).toBe('complete');
+
+    s = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0).session;     // exits complete, pushes {50,'up'}
+    expect(s.status).toBe('idle');
+    const statusBefore = s.status;
+
+    const r = applyCommand(s, { type: 'undo', nonce: nonce() }, T0);          // value unchanged, direction restored
+    expect(r.session.currentValue).toBe(50);
+    expect(r.session.direction).toBe('up');
+    expect(r.session.status).toBe(statusBefore);
+    expect(r.session.status).not.toBe('complete');
+    expect(r.effects).toEqual([]);
+  });
+
   it('setMode manual -> automatic while complete switches mode but keeps status complete', () => {
     let s = mk();
     s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50

@@ -115,3 +115,125 @@ describe('AutoTimer', () => {
     expect(ticks).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final-review regressions: re-entrancy (a hook that calls back into the
+// timer — the Phase 2 dock's pause-on-rejection and completion paths do
+// exactly this), plain stop() coverage, and the sleep threshold's
+// `2 x intervalMs` term (masked at 1 s/count, where it equals the 2 s floor).
+// ---------------------------------------------------------------------------
+
+describe('AutoTimer — re-entrancy from onTick', () => {
+  it('stop() called from inside onTick really stops: exactly one tick, running false', () => {
+    const rt = new FakeRuntime();
+    let ticks = 0;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(1, {
+      onTick: () => {
+        ticks++;
+        t.stop();
+      },
+      onSleepGap: () => {
+        throw new Error('unexpected sleep gap');
+      },
+    });
+    rt.advanceTo(10_000);
+    expect(ticks).toBe(1);
+    expect(t.running).toBe(false);
+    expect(rt.queue.length).toBe(0);
+  });
+
+  it('setIntervalSeconds() called from inside onTick re-times cleanly with no orphan handle', () => {
+    const rt = new FakeRuntime();
+    const at: number[] = [];
+    let changed = false;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(1, {
+      onTick: () => {
+        at.push(rt.now);
+        if (!changed) {
+          changed = true;
+          t.setIntervalSeconds(0.5);
+        }
+        expect(rt.queue.length).toBeLessThanOrEqual(1); // never two live chains
+      },
+      onSleepGap: () => {
+        throw new Error('unexpected sleep gap');
+      },
+    });
+    rt.advanceTo(3_000);
+    expect(t.running).toBe(true);
+    expect(rt.queue.length).toBe(1); // exactly one pending handle, no orphan
+    expect(at.length).toBe(5);       // ~1000, then 500 ms cadence
+    for (let i = 2; i < at.length; i++) {
+      expect(at[i]! - at[i - 1]!).toBeLessThanOrEqual(520);
+    }
+  });
+});
+
+describe('AutoTimer — stop()', () => {
+  it('stop() cancels the pending tick: queue drains, running false, no further ticks', () => {
+    const rt = new FakeRuntime();
+    let ticks = 0;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(1, {
+      onTick: () => ticks++,
+      onSleepGap: () => {
+        throw new Error('unexpected sleep gap');
+      },
+    });
+    rt.advanceTo(1_100);
+    expect(ticks).toBe(1);
+
+    t.stop();
+    expect(t.running).toBe(false);
+    expect(rt.queue.length).toBe(0);
+
+    rt.advanceTo(10_000);
+    expect(ticks).toBe(1);
+  });
+});
+
+describe('AutoTimer — sleep-gap threshold is max(2 x interval, 2 s)', () => {
+  it('at 5 s/count a ~3 s-late fire is a normal tick (below the 10 s threshold)', () => {
+    const rt = new FakeRuntime();
+    let ticks = 0;
+    let gaps = 0;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(5, {
+      onTick: () => ticks++,
+      onSleepGap: () => {
+        gaps++;
+      },
+    });
+    rt.now = 8_000; // fire ~3 s late: gap 8000 - 5000 = 3000 < max(10000, 2000)
+    rt.queue.forEach(e => {
+      e.at = Math.max(e.at, rt.now);
+    });
+    rt.advanceTo(8_001);
+    expect(gaps).toBe(0);
+    expect(ticks).toBe(1);
+    expect(t.running).toBe(true);
+  });
+
+  it('at 5 s/count an ~11 s-late fire triggers onSleepGap (above the 10 s threshold)', () => {
+    const rt = new FakeRuntime();
+    let ticks = 0;
+    let gap = 0;
+    const t = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    t.start(5, {
+      onTick: () => ticks++,
+      onSleepGap: (g) => {
+        gap = g;
+      },
+    });
+    rt.now = 16_000; // gap 16000 - 5000 = 11000 > max(10000, 2000)
+    rt.queue.forEach(e => {
+      e.at = Math.max(e.at, rt.now);
+    });
+    rt.advanceTo(16_001);
+    expect(ticks).toBe(0);
+    expect(gap).toBeGreaterThan(10_000);
+    expect(t.running).toBe(false);
+  });
+});

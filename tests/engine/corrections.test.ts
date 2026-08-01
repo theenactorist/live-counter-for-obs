@@ -19,6 +19,12 @@ describe('jump', () => {
     expect(r).toMatchObject({ accepted: false, rejection: 'invalid-value' });
     expect(r.session).toBe(s);
   });
+  it('jump below a NON-ZERO lower bound is invalid-value; state untouched', () => {
+    const s = createSession({ startValue: 10, finishValue: 50, mode: 'manual' }, T0);
+    const r = applyCommand(s, { type: 'jump', value: 9, nonce: nonce() }, T0);
+    expect(r).toMatchObject({ accepted: false, rejection: 'invalid-value' });
+    expect(r.session).toBe(s);
+  });
   it('jump to current value is an accepted no-op', () => {
     const s = mk();
     const r = applyCommand(s, { type: 'jump', value: 0, nonce: nonce() }, T0);

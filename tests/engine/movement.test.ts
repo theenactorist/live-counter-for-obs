@@ -47,6 +47,24 @@ describe('movement', () => {
     expect(s.undoStack.length).toBe(20);
     expect(s.undoStack[0]).toEqual({ value: 4, direction: 'up' });   // entries 0..3 evicted
   });
+  it('decrement at a NON-ZERO lower bound is rejected out-of-range without change', () => {
+    const s = createSession({ startValue: 10, finishValue: 50, mode: 'manual' }, T0);
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('out-of-range');
+    expect(r.session).toBe(s);            // same reference
+    expect(r.effects).toEqual([]);
+  });
+  it('tick below a NON-ZERO lower bound is rejected out-of-range; status stays running', () => {
+    let s = createSession({ startValue: 10, finishValue: 50, mode: 'automatic' }, T0);
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0).session; // direction down, still at 10
+    const r = applyCommand(s, { type: 'tick', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('out-of-range');
+    expect(r.session).toBe(s);            // same reference
+    expect(r.session.status).toBe('running');
+  });
   it('does not mutate the input session', () => {
     const s = Object.freeze(mk());
     expect(() => applyCommand(s, { type: 'increment', nonce: nonce() }, T0)).not.toThrow();

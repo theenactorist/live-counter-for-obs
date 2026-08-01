@@ -53,6 +53,13 @@ describe('migrate — session', () => {
     expect(r).toEqual({ ok: false, reason: 'corrupt' });
   });
 
+  it('schemaVersion BELOW current with no registered migration is invalid, not a silent load', () => {
+    const s = createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, T0);
+    const raw = JSON.stringify({ ...s, schemaVersion: 0 });
+    const r = loadSession(raw);
+    expect(r).toEqual({ ok: false, reason: 'invalid' });
+  });
+
   it('parseable but structurally invalid (bad status) is invalid', () => {
     const s = createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, T0);
     const raw = JSON.stringify({ ...s, status: 'zombie' });
@@ -83,6 +90,17 @@ describe('migrate — presets', () => {
   it('null is corrupt', () => {
     const r = loadPresets(null);
     expect(r).toEqual({ ok: false, reason: 'corrupt' });
+  });
+
+  it('schemaVersion BELOW current with no registered migration is invalid, not a silent load', () => {
+    const raw = JSON.stringify([{ ...mkPreset(), schemaVersion: 0 }]);
+    const r = loadPresets(raw);
+    expect(r).toEqual({ ok: false, reason: 'invalid' });
+  });
+
+  it('parseable JSON that is not an array is invalid, not corrupt', () => {
+    expect(loadPresets('{"a":1}')).toEqual({ ok: false, reason: 'invalid' });
+    expect(loadPresets('42')).toEqual({ ok: false, reason: 'invalid' });
   });
 
   it('one bad preset invalidates the whole load', () => {

@@ -6,6 +6,11 @@ import { createSession, applyCommand } from './counter.js';
 // Versioned persistence (PRD Phase 1 gate). Rules:
 //   - `null` or unparseable JSON            -> { ok: false, reason: 'corrupt' }
 //   - parsed, but `schemaVersion` > current -> { ok: false, reason: 'unknown-version' }
+//   - parsed but wrong shape for the key
+//     (e.g. presets that are not an array)  -> { ok: false, reason: 'invalid' }
+//   - parsed, but still below the current
+//     `schemaVersion` after migrations run
+//     (missing migration step)              -> { ok: false, reason: 'invalid' }
 //   - parsed, version current-or-lower, but
 //     failing isSession/isPreset after any
 //     migrations have run                   -> { ok: false, reason: 'invalid' }
@@ -45,15 +50,22 @@ function tryParse(raw: string | null): ParseResult {
 }
 
 // Runs the from-version migration chain over a single item (a session, or one
-// preset from a presets array). Returns the migrated shape, or an
-// 'unknown-version' reason if the item's own schemaVersion is ahead of what
-// this build knows how to load. Missing schemaVersion is left for the
-// caller's isSession/isPreset check to reject as 'invalid'.
+// preset from a presets array). Returns the migrated shape, or:
+//   - 'unknown-version' if the item's schemaVersion is ahead of this build;
+//   - 'invalid' if, after the chain has run, the item is still not stamped at
+//     the current version — i.e. a migration step is missing or failed to
+//     re-stamp. isSession/isPreset canNOT catch that: they only require
+//     schemaVersion to be a non-negative integer, never compare it to the
+//     current version, so without this check a v(n-1) record would load
+//     silently and be operated on with v(n) semantics. Refusing is PRD
+//     §8.13's "newer code reads all older schema versions or refuses
+//     non-destructively". A missing schemaVersion lands here too, with the
+//     same 'invalid' reason the validators would have produced.
 function migrateItem(
   item: unknown,
   currentVersion: number,
   migrations: Migrations,
-): { migrated: unknown; reason?: 'unknown-version' } {
+): { migrated: unknown; reason?: 'unknown-version' | 'invalid' } {
   const version = extractVersion(item);
   if (version !== undefined && version > currentVersion) {
     return { migrated: item, reason: 'unknown-version' };
@@ -63,10 +75,12 @@ function migrateItem(
   let v = version ?? currentVersion;
   while (v < currentVersion) {
     const step = migrations[v];
-    if (!step) break; // no migration registered for this version; isValid will reject below
+    if (!step) break; // no migration registered for this version — rejected just below
     migrated = step(migrated);
     v += 1;
   }
+
+  if (extractVersion(migrated) !== currentVersion) return { migrated, reason: 'invalid' };
   return { migrated };
 }
 
@@ -92,7 +106,10 @@ export function loadPresets(raw: string | null): LoadResult<Preset[]> {
   const parseResult = tryParse(raw);
   if ('corrupt' in parseResult) return { ok: false, reason: 'corrupt' };
   const { parsed } = parseResult;
-  if (!Array.isArray(parsed)) return { ok: false, reason: 'corrupt' };
+  // Parseable but not a presets array: readable data of the wrong shape, which
+  // is 'invalid' — 'corrupt' is reserved for bytes that cannot be parsed at all
+  // (the two reasons drive different operator warnings, PRD §8.13).
+  if (!Array.isArray(parsed)) return { ok: false, reason: 'invalid' };
 
   const migratedItems: unknown[] = [];
   for (const item of parsed) {

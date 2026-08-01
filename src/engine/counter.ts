@@ -96,7 +96,9 @@ function noop(s: Session): ApplyResult {
 // locked semantics scope boundary-entry checks to increment/decrement/jump/
 // tick/undo, so a direction flip or a return-to-start that happens to sit on
 // what is now the active boundary does NOT (re-)trigger completion. They call
-// `exitComplete` directly instead of the full `resolveCompletion` check.
+// `exitComplete` directly instead of the full `resolveCompletion` check — and
+// so does an undo that restores only the direction (`valueChanged === false`),
+// which is a direction flip by another name.
 // ---------------------------------------------------------------------------
 
 interface CompletionResolution {
@@ -111,12 +113,24 @@ interface CompletionResolution {
 // appending an `overlay` effect after whatever effects the caller already
 // collected. No-op (status/overlay unchanged) when the session wasn't
 // `complete`.
+//
+// The engine does not record WHY the overlay is hidden, so `overlayVisible ===
+// false` is only a proxy for "the dock's completed handler hid it". The proxy
+// is exact under `hold`, which never hides (PRD AC 1): a hidden overlay there
+// is always operator-initiated (§8.11 Hide overlay), so `hold` must never
+// force it back on air. Hence the `kind !== 'hold'` guard below.
+//
+// PHASE 2 RESIDUAL: under `hide`/`holdThenHide` the proxy still mis-fires when
+// the operator hid the overlay BEFORE completion. Closing that needs a
+// `hiddenByCompletion` flag set by the dock when it applies the hide — a
+// Session schema change (Session + SESSION_SCHEMA_VERSION + isSession +
+// migrate.ts), deferred to Phase 2 when the dock's hide mechanics land.
 function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
   if (s.status !== 'complete') {
     return { status: s.status, overlayVisible: s.overlayVisible, effects };
   }
   const status: Status = s.mode === 'automatic' ? 'paused' : 'idle';
-  if (!s.overlayVisible) {
+  if (!s.overlayVisible && s.completion.kind !== 'hold') {
     return { status, overlayVisible: true, effects: [...effects, { kind: 'overlay', visible: true }] };
   }
   return { status, overlayVisible: s.overlayVisible, effects };
@@ -184,8 +198,16 @@ function undo(s: Session, nowMs: number): ApplyResult {
   const undoStack = s.undoStack.slice(0, -1);
   const valueChanged = entry.value !== s.currentValue;
 
+  // Completion ENTRY requires the command to actually move the count onto the
+  // boundary ("any accepted count-changing command"). A direction-only undo —
+  // restoring the direction an earlier `reverse` flipped, with the value
+  // already sitting on what is now the active boundary — changes nothing on
+  // air, so it must not enter `complete` or fire the completion behaviour.
+  // Like `reverse`, it can only ever *exit*.
   const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
-  const { status, overlayVisible, effects } = resolveCompletion(s, entry.value, entry.direction, baseEffects);
+  const { status, overlayVisible, effects } = valueChanged
+    ? resolveCompletion(s, entry.value, entry.direction, baseEffects)
+    : exitComplete(s, baseEffects);
   return accept(
     s,
     { currentValue: entry.value, direction: entry.direction, undoStack, status, overlayVisible },
