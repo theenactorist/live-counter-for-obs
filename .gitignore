@@ -4,3 +4,5 @@ dist/
 feasibility/client-results.json
 feasibility/lua-results.json
 coverage/
+test-results/
+playwright-report/

@@ -1,0 +1,47 @@
+/* Shared font-face declarations for dock + overlay entries.
+ * Font binaries live in assets/fonts/ (copied from @fontsource/inter and
+ * @fontsource/oswald, latin subset only). Referenced here so both Vite
+ * entries pull them into their self-contained singlefile bundle.
+ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('../../assets/fonts/inter-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../../assets/fonts/inter-latin-700-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Oswald';
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url('../../assets/fonts/oswald-latin-500-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Oswald';
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url('../../assets/fonts/oswald-latin-700-normal.woff2') format('woff2');
+}
+
+/* Base UI typeface. Applying it here (rather than leaving the @font-face
+ * declarations unused) is what actually triggers the browser to fetch/decode
+ * the font — an @font-face rule alone is not requested until something on
+ * the page needs it. Oswald is reserved for the large counter display,
+ * wired up when that view lands. */
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
