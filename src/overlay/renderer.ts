@@ -14,7 +14,14 @@
 //    `coalesceMs` (150ms default) for a styled follow-up. A null-style frame
 //    for a preset-backed session must NEVER paint if a styled one arrives
 //    within the window; with no follow-up, paint number-only once the window
-//    elapses.
+//    elapses. This buffering LATCHES OFF permanently the first time it
+//    resolves (styled follow-up OR the timeout fallback) — review fix round
+//    1: a recovered session whose preset was later deleted keeps
+//    broadcasting `style: null` forever (adoptPresentation never runs
+//    again), and without the latch every subsequent broadcast for the rest
+//    of the page's life — including hides and rapid operator dispatches —
+//    would keep re-entering the 150ms buffer, silently dropping whichever
+//    one arrived first each time two landed within the window.
 //  - Renders are keyed on message ARRIVAL, not on the heartbeat counter
 //    (heartbeat repeats/increments independently of content — never dedup a
 //    render just because heartbeat looks "the same shape" as last time).
@@ -23,9 +30,12 @@
 //    an unstyled/system-font flash before the bundled font swaps in.
 //  - Heartbeat watchdog: >6s (configurable) with no 'state' message at all
 //    shows `[data-testid=panel-closed-hint]` while leaving the last painted
-//    value on screen; any further message clears it. Only arms once
-//    something has actually been rendered (nothing to protect/hide-behind
-//    otherwise).
+//    value on screen; any further message clears it. Gated at FIRE time on
+//    content actually being attached (review fix round 1: gating on "has
+//    ever rendered" instead let the hint composite over a deliberately
+//    empty overlay — e.g. after overlayVisible:false or an
+//    endSession(keepOverlay:false) — which is never correct; nothing is
+//    ever visible to "protect" once the content is gone).
 //  - Animation triggers on VALUE CHANGE only, never on every broadcast (a
 //    heartbeat re-broadcast of an unchanged value must not re-animate).
 import type { Bus, BusMessage } from '../protocol/bus.js';
@@ -133,9 +143,23 @@ export function mountOverlayRenderer(
   afterEl.dataset.testid = 'overlay-text-after';
   contentRoot.append(beforeEl, numberEl, afterEl);
 
+  // Minors: small, low-opacity, fixed-corner, subtle gray — must never
+  // compete visually with the counter itself, and must sit outside
+  // `contentRoot`'s own flex alignment (below) so it always stays put in a
+  // corner regardless of the operator's alignH/alignV choice.
   const hintEl = document.createElement('div');
   hintEl.dataset.testid = 'panel-closed-hint';
-  hintEl.textContent = 'Panel disconnected';
+  hintEl.textContent = 'Control panel closed';
+  hintEl.style.position = 'absolute';
+  hintEl.style.right = '12px';
+  hintEl.style.bottom = '12px';
+  hintEl.style.padding = '4px 8px';
+  hintEl.style.fontFamily = 'Inter, system-ui, sans-serif';
+  hintEl.style.fontSize = '12px';
+  hintEl.style.color = 'rgba(255, 255, 255, 0.55)';
+  hintEl.style.backgroundColor = 'rgba(0, 0, 0, 0.35)';
+  hintEl.style.borderRadius = '4px';
+  hintEl.style.pointerEvents = 'none';
 
   let contentAttached = false;
   let hintAttached = false;
@@ -144,7 +168,11 @@ export function mountOverlayRenderer(
   let latestPayload: StatePayload | null = null;
 
   let lastPaintedValue: number | null = null;
-  let hasRenderedValue = false;
+
+  // Review fix round 1 — Important 2: the null-style coalescing buffer must
+  // latch off permanently once resolved (see the module doc comment above),
+  // rather than re-triggering on every future null-style+presetId message.
+  let coalescingActive = true;
 
   let numberAnim: Animation | null = null;
   let beforeAnim: Animation | null = null;
@@ -159,6 +187,19 @@ export function mountOverlayRenderer(
   // absent) so the container still exists for the bus subscription/paint
   // pipeline to target; only its visibility is gated.
   container.style.visibility = 'hidden';
+  // Review fix round 1 — Important 1: alignH/alignV were previously inert
+  // (only applied to contentRoot, whose own box just shrinks to fit its
+  // content, so alignment had nothing to move it within). `container` (the
+  // full-viewport overlay-root) is the actual positioning context: fixed to
+  // the OBS browser-source viewport, flexing its single child (contentRoot)
+  // to wherever alignH/alignV say. `hintEl` is `position: absolute` above,
+  // deliberately outside this flex flow, so it always stays in its own
+  // corner regardless of alignment.
+  container.style.position = 'fixed';
+  container.style.inset = '0';
+  container.style.display = 'flex';
+  container.style.justifyContent = 'center';
+  container.style.alignItems = 'center';
 
   void document.fonts.ready.then(() => {
     fontsReady = true;
@@ -174,6 +215,20 @@ export function mountOverlayRenderer(
     }
   }
 
+  // Minor: cancels any in-flight WAAPI animation targeting these elements —
+  // an animation left running on a just-detached (or about-to-be-cleared)
+  // element serves no purpose and should not linger.
+  function cancelAllAnimations(): void {
+    numberAnim?.cancel();
+    beforeAnim?.cancel();
+    afterAnim?.cancel();
+    bothAnim?.cancel();
+    numberAnim = null;
+    beforeAnim = null;
+    afterAnim = null;
+    bothAnim = null;
+  }
+
   function hideContent(): void {
     if (contentAttached) {
       contentRoot.remove();
@@ -182,6 +237,7 @@ export function mountOverlayRenderer(
     beforeEl.textContent = '';
     numberEl.textContent = '';
     afterEl.textContent = '';
+    cancelAllAnimations();
   }
 
   function showHint(): void {
@@ -206,24 +262,33 @@ export function mountOverlayRenderer(
   }
 
   // Re-arms on every bus arrival (never on a fixed clock) — silence is
-  // measured strictly from the last message, per the brief. Only actually
-  // schedules once something has been rendered at least once: with nothing
-  // ever shown there is no "last value" the hint would be protecting, and no
-  // reason to alarm an operator who simply hasn't started a session yet.
+  // measured strictly from the last message, per the brief. Review fix
+  // round 1 (Important 4): whether the hint is allowed to actually show is
+  // now decided at FIRE time via `contentAttached` (inside showHint's
+  // caller below), not at arm time — a session that was showing when this
+  // timer was scheduled can legitimately become hidden/empty before it
+  // fires, and the hint must not composite over a deliberately empty frame.
   function rearmWatchdog(): void {
     clearWatchdog();
-    if (!hasRenderedValue) return;
-    watchdogTimer = setTimeout(showHint, watchdogMs);
+    watchdogTimer = setTimeout(() => {
+      if (contentAttached) showHint();
+    }, watchdogMs);
   }
 
   function applyStyle(style: StyleConfig | null): void {
     const s = style ?? DEFAULT_STYLE;
 
+    // Review fix round 1 (Important 1): alignH/alignV position the whole
+    // counter within the full viewport via `container` (set up at mount,
+    // above) — contentRoot itself just lays its own number/text spans out
+    // in a row.
+    container.style.justifyContent = s.alignH === 'left' ? 'flex-start' : s.alignH === 'right' ? 'flex-end' : 'center';
+    container.style.alignItems = s.alignV === 'top' ? 'flex-start' : s.alignV === 'bottom' ? 'flex-end' : 'center';
+
     contentRoot.style.fontFamily = s.fontFamily;
     contentRoot.style.fontWeight = String(s.fontWeight);
     contentRoot.style.display = 'inline-flex';
-    contentRoot.style.alignItems = s.alignV === 'top' ? 'flex-start' : s.alignV === 'bottom' ? 'flex-end' : 'center';
-    contentRoot.style.justifyContent = s.alignH === 'left' ? 'flex-start' : s.alignH === 'right' ? 'flex-end' : 'center';
+    contentRoot.style.alignItems = 'baseline';
     contentRoot.style.padding = `${s.paddingPx}px`;
     contentRoot.style.backgroundColor = s.background ? s.background.color : '';
 
@@ -273,7 +338,6 @@ export function mountOverlayRenderer(
     const changed = lastPaintedValue !== null && lastPaintedValue !== session.currentValue;
     if (changed) triggerAnimation(animation);
     lastPaintedValue = session.currentValue;
-    hasRenderedValue = true;
   }
 
   function renderSnapshot(snapshot: OverlaySnapshot): void {
@@ -284,7 +348,6 @@ export function mountOverlayRenderer(
     afterEl.textContent = after;
     showContent();
     lastPaintedValue = snapshot.value;
-    hasRenderedValue = true;
   }
 
   function paint(payload: StatePayload): void {
@@ -321,7 +384,13 @@ export function mountOverlayRenderer(
     // Broadcast coalescing (Task 2.6 ledger note): a preset-backed session's
     // null-style frame (init(), before adoptPresentation resolves) must
     // never paint on its own if a styled follow-up lands within the window.
-    const isNullStylePresetFrame = payload.session !== null && payload.session.presetId !== null && payload.style === null;
+    // Review fix round 1 (Important 2): gated on `coalescingActive`, which
+    // latches permanently false the first time this resolves (either
+    // branch below) — see the module doc comment for why an un-latched
+    // version silently buffers/drops every future broadcast forever for a
+    // session whose preset was deleted.
+    const isNullStylePresetFrame =
+      coalescingActive && payload.session !== null && payload.session.presetId !== null && payload.style === null;
 
     if (isNullStylePresetFrame) {
       coalescedPayload = payload;
@@ -330,7 +399,14 @@ export function mountOverlayRenderer(
           coalesceTimer = null;
           const pending = coalescedPayload;
           coalescedPayload = null;
+          coalescingActive = false;
           if (pending) paintOrBuffer(pending);
+          // Review fix round 1 (Important 3): this deferred paint is just
+          // as much an "arrival" as any direct one — the watchdog must
+          // re-arm from here too, mirroring the fonts.ready path above,
+          // or a session whose ONLY broadcast ever is this one null-style
+          // frame would never get a watchdog armed at all.
+          rearmWatchdog();
         }, coalesceMs);
       }
     } else {
@@ -339,6 +415,7 @@ export function mountOverlayRenderer(
         coalesceTimer = null;
         coalescedPayload = null;
       }
+      coalescingActive = false;
       paintOrBuffer(payload);
     }
 
@@ -357,6 +434,7 @@ export function mountOverlayRenderer(
       unsubscribe();
       clearWatchdog();
       if (coalesceTimer !== null) clearTimeout(coalesceTimer);
+      cancelAllAnimations();
     },
   };
 }

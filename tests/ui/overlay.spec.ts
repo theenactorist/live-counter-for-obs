@@ -147,8 +147,14 @@ test.describe('overlay renderer', () => {
 
         await expect(page.getByTestId('overlay-number')).toHaveText('3');
 
-        const fontsReady = await page.evaluate(() => document.fonts.check('16px Inter'));
-        expect(fontsReady).toBe(true);
+        // Checks the WEIGHT the number is actually rendered with
+        // (styleFixture()'s fontWeight: 700) — the unused default weight
+        // (400, implicit in a bare "16px Inter" check) is never requested by
+        // this page at all (nothing renders at that weight), so checking it
+        // instead would be asserting on a font resource with no reason to
+        // ever load, which is exactly what made an earlier version of this
+        // assertion intermittently flaky.
+        await expect.poll(() => page.evaluate(() => document.fonts.check('bold 16px Inter'))).toBe(true);
 
         const overlayRootVisible = await page.getByTestId('overlay-root').evaluate((el) => getComputedStyle(el).visibility);
         expect(overlayRootVisible).toBe('visible');
@@ -508,6 +514,232 @@ test.describe('overlay renderer', () => {
 
         // After ~150ms with no styled follow-up, paints number-only.
         await expect(page.getByTestId('overlay-number')).toHaveText('11', { timeout: 1000 });
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Review fix round 1 (4 Important findings) --------------------------
+
+  test('alignH/alignV actually position the counter within the viewport (review fix: Important 1)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await page.setViewportSize({ width: 1000, height: 600 });
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        await bus.send('state', {
+          session: sessionFixture({ currentValue: 5 }),
+          snapshot: null,
+          style: styleFixture({ alignH: 'center', alignV: 'middle' }),
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('5');
+
+        const centeredBox = await page.getByTestId('overlay-content').boundingBox();
+        expect(centeredBox).not.toBeNull();
+        const centerX = centeredBox!.x + centeredBox!.width / 2;
+        const centerY = centeredBox!.y + centeredBox!.height / 2;
+        // Centered within a reasonable tolerance of the 1000x600 viewport's midpoint.
+        expect(Math.abs(centerX - 500)).toBeLessThan(80);
+        expect(Math.abs(centerY - 300)).toBeLessThan(80);
+
+        await bus.send('state', {
+          session: sessionFixture({ currentValue: 6 }),
+          snapshot: null,
+          style: styleFixture({ alignH: 'left', alignV: 'top' }),
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('6');
+
+        const leftBox = await page.getByTestId('overlay-content').boundingBox();
+        expect(leftBox).not.toBeNull();
+        // Near the left edge, nowhere close to horizontally centered anymore.
+        expect(leftBox!.x).toBeLessThan(80);
+        expect(leftBox!.y).toBeLessThan(80);
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('null-style coalescing latches off after the first resolution — later broadcasts paint immediately (review fix: Important 2)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        const presetSession = sessionFixture({ currentValue: 20, presetId: 'preset-3' });
+        await bus.send('state', {
+          session: presetSession,
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+
+        // Resolves via the coalesce-timeout fallback (no styled follow-up).
+        await expect(page.getByTestId('overlay-number')).toHaveText('20', { timeout: 1000 });
+
+        // From here on, coalescing must be latched off: two rapid,
+        // back-to-back null-style broadcasts for the SAME (still
+        // preset-backed) session must each paint immediately — neither
+        // silently dropped nor held back 150ms.
+        await bus.send('state', {
+          session: { ...presetSession, currentValue: 21 },
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('21', { timeout: 50 });
+
+        await bus.send('state', {
+          session: { ...presetSession, currentValue: 22 },
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 3,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('22', { timeout: 50 });
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('a coalesce-timeout paint arms the watchdog too (review fix: Important 3)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port, { watchdogMs: '500' });
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        // The ONLY broadcast this overlay ever sees is a null-style
+        // preset-backed frame with no follow-up — the coalesce-timeout
+        // fallback paint (at ~150ms) must itself arm the watchdog; without
+        // that, silence after this single message would never surface the
+        // hint at all.
+        await bus.send('state', {
+          session: sessionFixture({ currentValue: 30, presetId: 'preset-4' }),
+          snapshot: null,
+          style: null,
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+
+        await expect(page.getByTestId('overlay-number')).toHaveText('30', { timeout: 1000 });
+        await expect(page.getByTestId('panel-closed-hint')).toBeVisible({ timeout: 2000 });
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('the watchdog hint never composites over a deliberately empty overlay (review fix: Important 4)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port, { watchdogMs: '500' });
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        const session = sessionFixture({ currentValue: 9, overlayVisible: true });
+        await bus.send('state', {
+          session,
+          snapshot: null,
+          style: styleFixture(),
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('9');
+
+        await bus.send('state', {
+          session: { ...session, overlayVisible: false },
+          snapshot: null,
+          style: styleFixture(),
+          template: null,
+          animation: null,
+          heartbeat: 2,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-content')).toHaveCount(0);
+
+        // Silence well past the (shrunk) watchdog threshold — the overlay is
+        // deliberately empty (operator hid it), so no hint should composite
+        // over nothing.
+        await page.waitForTimeout(1200);
+        await expect(page.getByTestId('panel-closed-hint')).toHaveCount(0);
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('hiding the overlay cancels any in-flight animation on the number element (cheap minor)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 5000 };
+        const session = sessionFixture({ currentValue: 1, overlayVisible: true });
+        await bus.send('state', {
+          session,
+          snapshot: null,
+          style: styleFixture(),
+          template: null,
+          animation: null,
+          heartbeat: 1,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('1');
+
+        // Value change with a long-running animation still in flight when we hide.
+        await bus.send('state', {
+          session: { ...session, currentValue: 2 },
+          snapshot: null,
+          style: styleFixture(),
+          template: null,
+          animation,
+          heartbeat: 2,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-number')).toHaveText('2');
+
+        const numberHandle = await page.getByTestId('overlay-number').elementHandle();
+        expect(numberHandle).not.toBeNull();
+        const runningBeforeHide = await numberHandle!.evaluate((el) => el.getAnimations().length);
+        expect(runningBeforeHide).toBeGreaterThan(0);
+
+        await bus.send('state', {
+          session: { ...session, currentValue: 2, overlayVisible: false },
+          snapshot: null,
+          style: styleFixture(),
+          template: null,
+          animation: null,
+          heartbeat: 3,
+        } satisfies StatePayload);
+        await expect(page.getByTestId('overlay-content')).toHaveCount(0);
+
+        const runningAfterHide = await numberHandle!.evaluate((el) => el.getAnimations().length);
+        expect(runningAfterHide).toBe(0);
       } finally {
         close();
       }

@@ -21,6 +21,17 @@ function renderOverlayRoot(): HTMLElement | null {
   return overlayRoot;
 }
 
+// Minor (review fix round 1): validated the same way the dock validates its
+// own settings-port field (src/dock/main.ts's settingsSave handler) —
+// integer in [1, 65535], anything else (missing, non-numeric, out of
+// range) falls back to the default rather than handing ObsWsClient a
+// nonsense URL.
+function parsePort(raw: string | null): number {
+  if (raw === null) return DEFAULT_PORT;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_PORT;
+}
+
 function main(): void {
   const overlayRoot = renderOverlayRoot();
   if (!overlayRoot) return;
@@ -30,8 +41,7 @@ function main(): void {
   // WebSocket Server Settings so the overlay connects to the same obs-
   // websocket instance the dock's SessionController broadcasts through.
   const params = new URLSearchParams(location.search);
-  const portParam = params.get('port');
-  const port = portParam !== null && Number.isFinite(Number(portParam)) ? Number(portParam) : DEFAULT_PORT;
+  const port = parsePort(params.get('port'));
   const pw = params.get('pw');
   // Test seam: lets Playwright shrink the heartbeat-watchdog threshold
   // instead of waiting out the real 6s default (mirrors the dock's own
