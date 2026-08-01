@@ -130,3 +130,57 @@ describe('completion — reverse never triggers entry', () => {
     expect(r.effects).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression tests carried from Task 1.6's review (folded into Task 1.9
+// scope per the ledger). Appended only — nothing above this point is
+// modified.
+// ---------------------------------------------------------------------------
+
+describe('completion — regressions from Task 1.6 review', () => {
+  it('undo exiting complete restores the pre-jump value, exits to idle, and re-shows an auto-hidden overlay', () => {
+    let s = createSession({ startValue: 0, finishValue: 50, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
+    expect(s.status).toBe('complete');
+    s = { ...s, overlayVisible: false };                                          // dock applied the hide
+    const r = applyCommand(s, { type: 'undo', nonce: nonce() }, T0);              // undoes the jump -> back to 0
+    expect(r.session.currentValue).toBe(0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.effects).toContainEqual({ kind: 'overlay', visible: true });
+  });
+
+  it('jump exiting complete: jumping off the boundary returns to idle (manual) with an animate effect', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
+    expect(s.status).toBe('complete');
+    const r = applyCommand(s, { type: 'jump', value: 25, nonce: nonce() }, T0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.currentValue).toBe(25);
+    expect(r.effects).toContainEqual({ kind: 'animate' });
+  });
+
+  it('tick at the un-movable position is rejected out-of-range exactly; status stays running', () => {
+    let s = createSession({ startValue: 0, finishValue: 50, mode: 'automatic' }, T0);
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;   // running, direction up, value 0
+    s = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0).session; // still running, direction down, value 0
+    expect(s.status).toBe('running');
+    expect(s.direction).toBe('down');
+    expect(s.currentValue).toBe(0);
+    const r = applyCommand(s, { type: 'tick', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('out-of-range');
+    expect(r.session).toBe(s);
+    expect(r.session.status).toBe('running');
+  });
+
+  it('setMode manual -> automatic while complete switches mode but keeps status complete', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
+    expect(s.status).toBe('complete');
+    const r = applyCommand(s, { type: 'setMode', mode: 'automatic', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.mode).toBe('automatic');
+    expect(r.session.status).toBe('complete');
+  });
+});
