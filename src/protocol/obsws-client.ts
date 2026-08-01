@@ -118,8 +118,15 @@ export class ObsWsClient {
 
   request(type: string, data: object = {}): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error(`cannot send request "${type}": not connected`));
+      // Gate on protocol state, not just socket readyState: the socket is
+      // OPEN (and would happily accept a send()) for the whole window
+      // between the TCP/WS handshake completing and Identified (op 2)
+      // arriving — on a real obs-websocket server a request sent in that
+      // window is simply never answered, so without this check the caller
+      // would silently ride the 8s timeout instead of getting an immediate,
+      // actionable error.
+      if (this._state !== 'identified' || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error(`cannot send request "${type}": not identified`));
         return;
       }
       const requestId = String(this.nextRequestId++);
@@ -171,9 +178,7 @@ export class ObsWsClient {
         void this.sendIdentify((msg as HelloMessage).d);
         break;
       case OP_IDENTIFIED:
-        this._state = 'identified';
-        this.backoffAttempt = 0;
-        this.emit('identified');
+        this.markIdentified();
         break;
       case OP_EVENT: {
         const d = (msg as EventMessage).d;
@@ -187,6 +192,12 @@ export class ObsWsClient {
       default:
         break;
     }
+  }
+
+  private markIdentified(): void {
+    this._state = 'identified';
+    this.backoffAttempt = 0;
+    this.emit('identified');
   }
 
   private handleRequestResponse(d: RequestResponseMessage['d']): void {
@@ -238,10 +249,40 @@ export class ObsWsClient {
     const [min, max] = this.backoffMs;
     const delay = Math.min(min * 2 ** this.backoffAttempt, max);
     this.backoffAttempt++;
+    this.onBackoffScheduled(delay);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
+  }
+
+  /**
+   * Test-only observation hook: no-op in production. Called with the exact
+   * delay passed to `setTimeout` each time a reconnect is scheduled, so a
+   * test subclass can assert the exponential-backoff progression/cap/reset
+   * deterministically (see tests/protocol/obsws-client.test.ts) without
+   * racing a real socket's async connect against a faked clock.
+   */
+  protected onBackoffScheduled(_delayMs: number): void {
+    // intentionally empty
+  }
+
+  /**
+   * Test-only seam: drives the exact same close-handling path a real
+   * socket's 'close' event invokes (backoff scheduling, pending-request
+   * rejection, auth-failed mapping), without requiring a real socket.
+   */
+  protected simulateClose(code: number): void {
+    this.handleClose(code);
+  }
+
+  /**
+   * Test-only seam: drives the exact same Identified-handling path a real
+   * op-2 server message invokes (state flip, backoff reset, listener
+   * emit), without requiring a real socket.
+   */
+  protected simulateIdentified(): void {
+    this.markIdentified();
   }
 }
 

@@ -23,6 +23,10 @@ export interface MockObs {
   dropAllClients(code?: number): void;
   /** Test hook: swallow the next incoming request (no op-7 response sent). */
   swallowNext(): void;
+  /** Test hook: hold back the next Identified (op 2) reply by `ms` after a valid Identify. */
+  delayIdentify(ms: number): void;
+  /** Test hook: hold back the next request's op-7 response by `ms` (to force out-of-order replies). */
+  delayNextResponse(ms: number): void;
   persistent: Map<string, unknown>;
   broadcasts: Array<{ from: number; eventData: unknown }>;
   close(): Promise<void>;
@@ -59,6 +63,8 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   const clientIds = new WeakMap<WsSocket, number>();
   let nextClientId = 1;
   let swallowNextFlag = false;
+  let identifyDelayMs = 0;
+  let nextResponseDelayMs = 0;
 
   function send(socket: WsSocket, op: number, d: Record<string, unknown>): void {
     socket.send(JSON.stringify({ op, d }));
@@ -104,7 +110,16 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
       }
     }
 
-    send(socket, OP_REQUEST_RESPONSE, { requestId, requestStatus: { result, code }, responseData });
+    const respond = (): void => {
+      send(socket, OP_REQUEST_RESPONSE, { requestId, requestStatus: { result, code }, responseData });
+    };
+    if (nextResponseDelayMs > 0) {
+      const delay = nextResponseDelayMs;
+      nextResponseDelayMs = 0;
+      setTimeout(respond, delay);
+    } else {
+      respond();
+    }
   }
 
   wss.on('connection', (socket) => {
@@ -138,8 +153,17 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
             return;
           }
         }
-        identifiedClients.add(socket);
-        send(socket, OP_IDENTIFIED, { negotiatedRpcVersion: 1 });
+        const sendIdentified = (): void => {
+          identifiedClients.add(socket);
+          send(socket, OP_IDENTIFIED, { negotiatedRpcVersion: 1 });
+        };
+        if (identifyDelayMs > 0) {
+          const delay = identifyDelayMs;
+          identifyDelayMs = 0;
+          setTimeout(sendIdentified, delay);
+        } else {
+          sendIdentified();
+        }
         return;
       }
 
@@ -174,6 +198,12 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     },
     swallowNext() {
       swallowNextFlag = true;
+    },
+    delayIdentify(ms) {
+      identifyDelayMs = ms;
+    },
+    delayNextResponse(ms) {
+      nextResponseDelayMs = ms;
     },
     persistent,
     broadcasts,

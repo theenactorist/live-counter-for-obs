@@ -77,7 +77,7 @@ describe('ObsWsClient', () => {
     expect(mock.clients()).toBe(0);
   });
 
-  it('resolves two interleaved requests to their own responses', async () => {
+  it('resolves two interleaved, out-of-order requests to their own responses', async () => {
     mock = await startMockObs();
     mock.persistent.set('scene1/otherSlot', 'seeded-value');
     client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
@@ -86,11 +86,20 @@ describe('ObsWsClient', () => {
     client.connect();
     await identified;
 
-    const [setRes, getRes] = await Promise.all([
-      client.request('SetPersistentData', { realm: 'scene1', slotName: 'mySlot', slotValue: 42 }),
-      client.request('GetPersistentData', { realm: 'scene1', slotName: 'otherSlot' }),
-    ]);
+    // Delay the FIRST request's response so the SECOND resolves first —
+    // proves correlation is keyed by requestId, not by response arrival
+    // order / array position (an adversarial, not just happy-path, check).
+    mock.delayNextResponse(100);
+    const setPromise = client.request('SetPersistentData', { realm: 'scene1', slotName: 'mySlot', slotValue: 42 });
+    const getPromise = client.request('GetPersistentData', { realm: 'scene1', slotName: 'otherSlot' });
 
+    const resolutionOrder: string[] = [];
+    void setPromise.then(() => resolutionOrder.push('set'));
+    void getPromise.then(() => resolutionOrder.push('get'));
+
+    const [setRes, getRes] = await Promise.all([setPromise, getPromise]);
+
+    expect(resolutionOrder).toEqual(['get', 'set']);
     expect(setRes).toEqual({});
     expect(getRes).toEqual({ slotValue: 'seeded-value' });
 
@@ -130,6 +139,25 @@ describe('ObsWsClient', () => {
     }
   });
 
+  it('rejects request() immediately when not yet identified, instead of hanging to the timeout', async () => {
+    mock = await startMockObs();
+    mock.delayIdentify(500); // hold Identified back well past the socket's real OPEN
+    client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
+
+    client.connect();
+    // Real, short wait: enough for the socket to open and Hello/Identify to
+    // round-trip on localhost, but well inside the mock's artificial
+    // Identified delay — so the socket is genuinely OPEN while `state` is
+    // still 'connecting'. This is exactly the window a readyState-only gate
+    // would miss.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(client.state).not.toBe('identified');
+
+    await expect(client.request('GetPersistentData', { realm: 'r', slotName: 's' })).rejects.toThrow(
+      /not identified/,
+    );
+  });
+
   it('routes injected events to onEvent subscribers', async () => {
     mock = await startMockObs();
     client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
@@ -165,6 +193,78 @@ describe('ObsWsClient', () => {
 
     expect(client.state).toBe('identified');
     expect(mock.clients()).toBe(1);
+  });
+
+  // Probes the exponential-backoff scheduling (progression / cap / reset)
+  // through the exact production code path (handleClose -> scheduleReconnect
+  // -> onBackoffScheduled, and the Identified path that resets the
+  // counter), via the protected test seams `simulateClose`/`simulateIdentified`
+  // and the `onBackoffScheduled` hook. `connect()` is overridden to a no-op
+  // counter instead of opening a real socket: mixing a real reconnect
+  // socket with a faked clock at the default [1000, 10000] backoff is
+  // racy (advancing fake time doesn't deterministically let a real
+  // localhost TCP round-trip settle in between), so this test isolates the
+  // backoff math itself, deterministically, under fake timers. The
+  // reconnect *mechanism* (a dropped socket really does come back and
+  // re-identify) is separately covered, with real sockets and real timers,
+  // by the "reconnects with backoff after dropAllClients()" test above.
+  class BackoffProbeClient extends ObsWsClient {
+    readonly delays: number[] = [];
+    connectAttempts = 0;
+
+    protected override onBackoffScheduled(delayMs: number): void {
+      this.delays.push(delayMs);
+    }
+
+    override connect(): void {
+      this.connectAttempts++;
+    }
+
+    triggerClose(code: number): void {
+      this.simulateClose(code);
+    }
+
+    triggerIdentified(): void {
+      this.simulateIdentified();
+    }
+  }
+
+  it('grows reconnect backoff exponentially, caps at max, and resets after a successful identify', async () => {
+    const probe = new BackoffProbeClient({
+      url: 'ws://unused.invalid',
+      eventSubscriptions: 0,
+      backoffMs: [1000, 10000],
+    });
+    client = probe;
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const expectedDelays = [1000, 2000, 4000, 8000, 10000, 10000]; // min, x2, x2, x2, capped, still capped
+      for (let i = 0; i < expectedDelays.length; i++) {
+        const expectedDelay = expectedDelays[i] as number;
+        probe.triggerClose(1006);
+        expect(probe.delays[i]).toBe(expectedDelay);
+        expect(probe.state).toBe('connecting');
+
+        // Not yet due.
+        await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+        expect(probe.connectAttempts).toBe(i);
+        // Due now.
+        await vi.advanceTimersByTimeAsync(1);
+        expect(probe.connectAttempts).toBe(i + 1);
+      }
+
+      // Simulate that (synthetic) reconnect attempt succeeding.
+      probe.triggerIdentified();
+      expect(probe.state).toBe('identified');
+
+      // The next failure after a successful identify restarts at min, not
+      // from wherever the pre-reset counter left off.
+      probe.triggerClose(1006);
+      expect(probe.delays.at(-1)).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('close() stops reconnecting, sets state closed, and rejects pending requests', async () => {
