@@ -1,8 +1,8 @@
 import type {
-  Session, Command, ApplyResult, Effect, Mode, CompletionConfig, RejectReason, UndoEntry,
+  Session, Command, ApplyResult, Effect, Mode, Status, Direction, CompletionConfig, RejectReason, UndoEntry,
 } from './types.js';
 import {
-  rangeOf, initialDirection, isValidCountValue, isCompletionConfig,
+  rangeOf, activeBoundary, initialDirection, isValidCountValue, isCompletionConfig,
   UNDO_DEPTH, SPEED_LEVELS, MAX_VALUE, SESSION_SCHEMA_VERSION,
 } from './types.js';
 
@@ -89,6 +89,58 @@ function noop(s: Session): ApplyResult {
   return { session: s, accepted: true, effects: [] };
 }
 
+// ---------------------------------------------------------------------------
+// Completion (PRD §8.5) — shared by every command that changes `currentValue`
+// and is subject to completion entry: move (increment/decrement), jump,
+// undo, and tick. `reverse` and `reset` only ever *exit* `complete` — the
+// locked semantics scope boundary-entry checks to increment/decrement/jump/
+// tick/undo, so a direction flip or a return-to-start that happens to sit on
+// what is now the active boundary does NOT (re-)trigger completion. They call
+// `exitComplete` directly instead of the full `resolveCompletion` check.
+// ---------------------------------------------------------------------------
+
+interface CompletionResolution {
+  status: Status;
+  overlayVisible: boolean;
+  effects: Effect[];
+}
+
+// Applies the "exit complete" transition (PRD §8.5: "Any valid count-changing
+// action away from the boundary exits complete"): manual -> idle, automatic
+// -> paused, and — if completion had hidden the overlay — re-shows it,
+// appending an `overlay` effect after whatever effects the caller already
+// collected. No-op (status/overlay unchanged) when the session wasn't
+// `complete`.
+function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
+  if (s.status !== 'complete') {
+    return { status: s.status, overlayVisible: s.overlayVisible, effects };
+  }
+  const status: Status = s.mode === 'automatic' ? 'paused' : 'idle';
+  if (!s.overlayVisible) {
+    return { status, overlayVisible: true, effects: [...effects, { kind: 'overlay', visible: true }] };
+  }
+  return { status, overlayVisible: s.overlayVisible, effects };
+}
+
+// Full completion resolution for commands that can both enter and exit
+// `complete`: if `newValue` lands exactly on the active boundary for
+// `newDirection`, enters `complete` and appends a `completed` effect after
+// the caller's base effects; otherwise defers to `exitComplete` (a no-op if
+// the session wasn't already `complete`).
+function resolveCompletion(
+  s: Session, newValue: number, newDirection: Direction, effects: Effect[],
+): CompletionResolution {
+  const boundary = activeBoundary({ startValue: s.startValue, finishValue: s.finishValue, direction: newDirection });
+  if (newValue === boundary) {
+    return {
+      status: 'complete',
+      overlayVisible: s.overlayVisible,
+      effects: [...effects, { kind: 'completed', completion: s.completion }],
+    };
+  }
+  return exitComplete(s, effects);
+}
+
 function move(s: Session, delta: 1 | -1, nowMs: number): ApplyResult {
   const { lo, hi } = rangeOf(s);
   const next = s.currentValue + delta;
@@ -97,9 +149,8 @@ function move(s: Session, delta: 1 | -1, nowMs: number): ApplyResult {
   const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
   const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
 
-  // Completion handling (landing on activeBoundary) arrives in Task 1.6; for now a
-  // move that lands exactly on a boundary still just moves.
-  return accept(s, { currentValue: next, undoStack }, nowMs, [{ kind: 'animate' }]);
+  const { status, overlayVisible, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: next, undoStack, status, overlayVisible }, nowMs, effects);
 }
 
 function jump(s: Session, value: number, nowMs: number): ApplyResult {
@@ -110,9 +161,8 @@ function jump(s: Session, value: number, nowMs: number): ApplyResult {
   const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
   const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
 
-  // Completion handling (landing on activeBoundary) arrives in Task 1.6; for now a
-  // jump that lands exactly on a boundary still just moves.
-  return accept(s, { currentValue: value, undoStack }, nowMs, [{ kind: 'animate' }]);
+  const { status, overlayVisible, effects } = resolveCompletion(s, value, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: value, undoStack, status, overlayVisible }, nowMs, effects);
 }
 
 function reverse(s: Session, nowMs: number): ApplyResult {
@@ -120,8 +170,11 @@ function reverse(s: Session, nowMs: number): ApplyResult {
   const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
   const nextDirection = s.direction === 'up' ? 'down' : 'up';
 
-  // Value is unchanged, so no animate effect.
-  return accept(s, { direction: nextDirection, undoStack }, nowMs, []);
+  // Value is unchanged, so no animate effect; a direction flip can only ever
+  // *exit* complete (see the doc comment above `resolveCompletion`), never
+  // enter it.
+  const { status, overlayVisible, effects } = exitComplete(s, []);
+  return accept(s, { direction: nextDirection, undoStack, status, overlayVisible }, nowMs, effects);
 }
 
 function undo(s: Session, nowMs: number): ApplyResult {
@@ -131,20 +184,96 @@ function undo(s: Session, nowMs: number): ApplyResult {
   const undoStack = s.undoStack.slice(0, -1);
   const valueChanged = entry.value !== s.currentValue;
 
-  const effects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
-  return accept(s, { currentValue: entry.value, direction: entry.direction, undoStack }, nowMs, effects);
+  const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+  const { status, overlayVisible, effects } = resolveCompletion(s, entry.value, entry.direction, baseEffects);
+  return accept(
+    s,
+    { currentValue: entry.value, direction: entry.direction, undoStack, status, overlayVisible },
+    nowMs,
+    effects,
+  );
 }
 
 function reset(s: Session, nowMs: number): ApplyResult {
   const direction = initialDirection(s.startValue, s.finishValue);
   const valueChanged = s.currentValue !== s.startValue;
 
-  if (!valueChanged && s.direction === direction && s.undoStack.length === 0) {
+  // `status` can never be `complete` here while the other three conditions
+  // also hold: reaching `complete` always requires either landing away from
+  // startValue with the direction unchanged, or a prior `reverse` (which
+  // always pushes an undo entry) — but this check documents that invariant
+  // explicitly rather than relying on it silently staying true.
+  if (!valueChanged && s.direction === direction && s.undoStack.length === 0 && s.status !== 'complete') {
     return noop(s);
   }
 
-  const effects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
-  return accept(s, { currentValue: s.startValue, direction, undoStack: [] }, nowMs, effects);
+  const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+  const { status, overlayVisible, effects } = exitComplete(s, baseEffects);
+  return accept(s, { currentValue: s.startValue, direction, undoStack: [], status, overlayVisible }, nowMs, effects);
+}
+
+// ---------------------------------------------------------------------------
+// Automatic mode, speed, mode switching, overlay visibility, session lifecycle
+// ---------------------------------------------------------------------------
+
+function start(s: Session, nowMs: number): ApplyResult {
+  if (s.mode !== 'automatic' || (s.status !== 'idle' && s.status !== 'paused')) {
+    return reject(s, 'invalid-state');
+  }
+  return accept(s, { status: 'running' }, nowMs, []);
+}
+
+function pause(s: Session, nowMs: number): ApplyResult {
+  if (s.mode !== 'automatic' || s.status !== 'running') return reject(s, 'invalid-state');
+  return accept(s, { status: 'paused' }, nowMs, []);
+}
+
+function resume(s: Session, nowMs: number): ApplyResult {
+  if (s.mode !== 'automatic' || s.status !== 'paused') return reject(s, 'invalid-state');
+  return accept(s, { status: 'running' }, nowMs, []);
+}
+
+// direction -1 = faster (step to a smaller, quicker interval); +1 = slower.
+function speedStep(s: Session, direction: 1 | -1, nowMs: number): ApplyResult {
+  if (s.mode !== 'automatic') return reject(s, 'invalid-state');
+
+  const levels = SPEED_LEVELS as readonly number[];
+  const idx = levels.indexOf(s.intervalSeconds);
+  const nextIdx = idx + direction;
+  if (idx === -1 || nextIdx < 0 || nextIdx >= levels.length) return noop(s);
+
+  return accept(s, { intervalSeconds: levels[nextIdx]! }, nowMs, []);
+}
+
+function setMode(s: Session, mode: Mode, nowMs: number): ApplyResult {
+  if (mode === s.mode) return noop(s);
+  if (s.status === 'complete') return accept(s, { mode }, nowMs, []);
+
+  const status: Status = mode === 'automatic' ? 'paused' : 'idle';
+  return accept(s, { mode, status }, nowMs, []);
+}
+
+function tick(s: Session, nowMs: number): ApplyResult {
+  if (s.mode !== 'automatic' || s.status !== 'running') return reject(s, 'invalid-state');
+
+  const { lo, hi } = rangeOf(s);
+  const next = s.currentValue + (s.direction === 'up' ? 1 : -1);
+  if (next < lo || next > hi) return reject(s, 'out-of-range');
+
+  // Ticks never push undo (PRD §8.3: automatic ticks are never undo targets
+  // and never displace undo entries) — undoStack is intentionally omitted
+  // from the accepted changes below.
+  const { status, overlayVisible, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: next, status, overlayVisible }, nowMs, effects);
+}
+
+function setOverlay(s: Session, visible: boolean, nowMs: number): ApplyResult {
+  if (s.overlayVisible === visible) return noop(s);
+  return accept(s, { overlayVisible: visible }, nowMs, [{ kind: 'overlay', visible }]);
+}
+
+function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResult {
+  return accept(s, { status: 'idle' }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
 }
 
 export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResult {
@@ -161,19 +290,26 @@ export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResu
       return reset(s, nowMs);
     case 'undo':
       return undo(s, nowMs);
-
-    // --- Not yet implemented. Task 1.6 replaces these branches one at a time. ---
     case 'start':
+      return start(s, nowMs);
     case 'pause':
+      return pause(s, nowMs);
     case 'resume':
+      return resume(s, nowMs);
     case 'faster':
+      return speedStep(s, -1, nowMs);
     case 'slower':
+      return speedStep(s, 1, nowMs);
     case 'setMode':
+      return setMode(s, cmd.mode, nowMs);
     case 'tick':
+      return tick(s, nowMs);
     case 'showOverlay':
+      return setOverlay(s, true, nowMs);
     case 'hideOverlay':
+      return setOverlay(s, false, nowMs);
     case 'endSession':
-      return reject(s, 'invalid-state');
+      return endSession(s, cmd.keepOverlay, nowMs);
 
     default: {
       // Exhaustiveness guard: if Command ever grows a new variant without a case
