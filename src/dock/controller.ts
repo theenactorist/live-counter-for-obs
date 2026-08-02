@@ -237,7 +237,13 @@ export class SessionController {
     if (this.disposed) return;
     this.timer.stop();
     this.cancelHold();
-    this.session = createSession(cfg, this.nowMs());
+    // F5 (fix round 2): createSession() always returns revision 0, which made
+    // the mirror's "higher revision wins" rule meaningless across sessions —
+    // a stale mirrored predecessor (or its tombstone) out-ranked the live new
+    // session. Seeding above the storage lineage's high-water mark keeps
+    // revision monotonic across sessions; the engine only requires it to be
+    // non-decreasing WITHIN one, which this preserves.
+    this.session = { ...createSession(cfg, this.nowMs()), revision: this.storage.lastKnownRevision() + 1 };
     this.style = style;
     this.template = template;
     this.animation = animation;

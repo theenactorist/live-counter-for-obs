@@ -92,10 +92,9 @@ export class DockStorage {
   // currently succeeding — so a StorageLike that starts throwing (quota
   // exceeded, private-browsing lockout, etc.) never loses recent entries.
   private memoryLog: string[] | null = null;
-  // Highest session `revision` this instance has seen written or loaded —
-  // the basis for the end-of-session tombstone's own revision (see
-  // saveSession below, and SessionTombstone in engine/types.ts).
-  private lastKnownRevision = -1;
+  // Highest session `revision` this instance has ever read or written — see
+  // lastKnownRevision() below.
+  private maxSeenRevision = -1;
 
   constructor(local: StorageLike, client: ObsWsClient | null, onWriteError?: (key: string, err: unknown) => void) {
     this.local = local;
@@ -142,6 +141,12 @@ export class DockStorage {
     mirrorSlot: string,
     parseLocal: (raw: string | null) => LoadResult<T>,
     mirrorWins: (local: T, mirror: T) => boolean,
+    // Called for EVERY valid candidate read — local and mirror, winner and
+    // loser alike. loadSession uses it to keep its revision high-water mark
+    // above everything this lineage has ever seen, including the copy that
+    // just lost the conflict (F5 fix round 2): the losing record's revision is
+    // exactly what a later write has to out-rank.
+    observe?: (value: T) => void,
   ): Promise<LoadOutcome<T>> {
     const raw = this.local.getItem(localKey);
     let localValue: T | null = null;
@@ -151,6 +156,7 @@ export class DockStorage {
       const result = parseLocal(raw);
       if (result.ok) {
         localValue = result.value;
+        observe?.(localValue);
       } else {
         corrupted = true;
         this.safeSet(`lc.quarantine.${quarantineSuffix()}`, raw);
@@ -175,7 +181,10 @@ export class DockStorage {
           // rejects (corrupt, wrong shape, or an unknown/future
           // schemaVersion) is treated as if the mirror were simply empty.
           const migrated = parseLocal(JSON.stringify(slotValue));
-          if (migrated.ok) mirrorValue = migrated.value;
+          if (migrated.ok) {
+            mirrorValue = migrated.value;
+            observe?.(mirrorValue);
+          }
         }
       } catch {
         // Mirror failures (server unreachable, dropped mid-flight, etc.) must
@@ -206,6 +215,35 @@ export class DockStorage {
       .catch(() => {});
   }
 
+  /**
+   * The highest session `revision` this storage LINEAGE has ever read or
+   * written — every record seen by a load (local or mirror, winner or loser),
+   * every session saved, every tombstone written, plus whatever the local
+   * slot currently holds (covering a fresh instance that has done neither
+   * yet, e.g. one built by a settings-save reconnect).
+   *
+   * F5, fix round 2. `revision` restarts at 0 for every new session, which
+   * makes the mirror's "higher revision wins" rule meaningless ACROSS
+   * sessions — the defect cuts both ways:
+   *   - end A@200 offline, start B@0: the stale mirrored A@200 beat the live
+   *     B@0 and resurrected an ended session over it;
+   *   - end A with ws up (tombstone@201 mirrored), ws drops, start B@0: the
+   *     mirrored tombstone@201 beat B@0 and silently deleted a live session.
+   * Both disappear once every new record is stamped above everything the
+   * lineage has seen, which is what this accessor exists to provide:
+   * `SessionController.startSession` seeds a new session at
+   * `lastKnownRevision() + 1`, and the tombstone below uses the same source
+   * of truth. Revision then only ever increases for a given localStorage +
+   * mirror pair, so the comparison means something again.
+   */
+  lastKnownRevision(): number {
+    return Math.max(this.maxSeenRevision, this.localSessionRevision());
+  }
+
+  private noteRevision(revision: number): void {
+    if (Number.isFinite(revision) && revision > this.maxSeenRevision) this.maxSeenRevision = revision;
+  }
+
   // The conflict rule is unchanged ("higher `revision` wins"), but it now
   // runs over `StoredSession` — a real Session OR the end-of-session
   // tombstone (live-safety:F5). Because the tombstone carries a revision one
@@ -219,16 +257,11 @@ export class DockStorage {
       MIRROR_SLOT_SESSION,
       engineLoadSession,
       (local, mirror) => mirror.revision > local.revision,
+      (candidate) => this.noteRevision(candidate.revision),
     );
 
     const winner = outcome.value;
     if (winner === null) return { value: null, warning: outcome.warning };
-
-    // Keep the tombstone counter monotonic across a load: a dock that boots,
-    // adopts a mirrored session at revision 40 and then ends it must write
-    // its tombstone at 41, not at 0.
-    this.lastKnownRevision = Math.max(this.lastKnownRevision, winner.revision);
-
     if (isSessionTombstone(winner)) return { value: null, warning: outcome.warning };
     return { value: winner, warning: outcome.warning };
   }
@@ -240,22 +273,22 @@ export class DockStorage {
       // window in which the mirror's stale copy of A resurrected itself on
       // the next boot. Both the local record and the mirror get the same
       // object, so whichever copy survives says the same thing.
-      const revision = Math.max(this.lastKnownRevision, this.localSessionRevision()) + 1;
+      const revision = this.lastKnownRevision() + 1;
       const tombstone: SessionTombstone = { ended: true, revision };
-      this.lastKnownRevision = revision;
+      this.noteRevision(revision);
       this.safeSet(KEY_SESSION, JSON.stringify(tombstone));
       this.mirrorSet(MIRROR_SLOT_SESSION, tombstone);
       return;
     }
-    this.lastKnownRevision = Math.max(this.lastKnownRevision, s.revision);
+    this.noteRevision(s.revision);
     this.safeSet(KEY_SESSION, serializeSession(s));
     this.mirrorSet(MIRROR_SLOT_SESSION, s);
   }
 
   // Best-effort read of whatever revision the local session slot currently
   // records (session or tombstone alike), so a DockStorage instance that has
-  // never itself written a session — e.g. one built fresh by a settings-save
-  // reconnect — still tombstones ABOVE what is on disk rather than at 0.
+  // never itself read or written a session still ranks ABOVE what is on disk
+  // rather than restarting at 0.
   private localSessionRevision(): number {
     const raw = this.local.getItem(KEY_SESSION);
     if (raw === null) return -1;

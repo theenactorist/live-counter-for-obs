@@ -810,6 +810,145 @@ describe('SessionController — init()', () => {
   });
 });
 
+// F5, fix round 2. `revision` restarted at 0 for every new session, so the
+// mirror's "higher revision wins" rule was meaningless across sessions and
+// broke in BOTH directions. SessionController.startSession now seeds a new
+// session at `storage.lastKnownRevision() + 1`, making revision monotonic
+// across the whole localStorage+mirror lineage.
+//
+// Both scenarios model the ws outage with `new DockStorage(local, null)` —
+// client null means the mirror is neither read nor written, which is exactly
+// what a down socket produces — over the SAME MapStorage, then "reboot" with
+// a mirror-backed instance to prove which copy wins on the next load.
+describe('SessionController — cross-session revision monotonicity (F5)', () => {
+  interface Lineage {
+    local: MapStorage;
+    client: ObsWsClient;
+    mirrorSet: (value: unknown) => Promise<void>;
+    build: (storage: DockStorage) => SessionController;
+  }
+
+  async function lineage(): Promise<Lineage> {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    return {
+      local: new MapStorage(),
+      client,
+      mirrorSet: async (value) => {
+        await client.request('SetPersistentData', {
+          realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+          slotName: 'live-counter/session',
+          slotValue: value,
+        });
+      },
+      build: (storage) => {
+        const rt = new FakeRuntime();
+        return new SessionController({
+          storage,
+          bus: new Bus(client, 'dock'),
+          timer: new AutoTimer(rt.clock, rt.schedule, rt.cancel),
+          scheduler: new FakeScheduler(),
+        });
+      },
+    };
+  }
+
+  // Session A, well into its life, with both copies in sync.
+  function sessionA(): ReturnType<typeof createSession> {
+    return { ...createSession({ startValue: 0, finishValue: 500, mode: 'manual' }, 1000), revision: 200, currentValue: 7 };
+  }
+
+  it('case 1: ending A offline then starting B survives a reload — the stale mirrored A never resurrects', async () => {
+    const { local, client, mirrorSet, build } = await lineage();
+    const a = sessionA();
+    local.setItem(KEY_SESSION, serializeSession(a));
+    await mirrorSet(a); // mirror is up to date at revision 200
+
+    // --- ws goes down: neither the end nor the new session reaches the mirror.
+    const offline = new DockStorage(local, null);
+    const c1 = build(offline);
+    await c1.init();
+    expect(c1.getState().session?.revision).toBe(200);
+    c1.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'end-a' }); // tombstone, local only
+    c1.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+    const bRevision = c1.getState().session?.revision as number;
+    expect(bRevision).toBeGreaterThan(200); // B out-ranks the stale mirrored A
+    c1.dispose();
+
+    // --- reboot with ws back; the mirror still holds the stale A@200.
+    const rebooted = new DockStorage(local, client);
+    const c2 = build(rebooted);
+    await c2.init();
+
+    const restored = c2.getState().session;
+    expect(restored?.finishValue).toBe(50); // B, not A
+    expect(restored?.currentValue).toBe(0);
+    expect(restored?.revision).toBe(bRevision);
+  });
+
+  it('case 2: a mirrored tombstone from session A does not delete a later offline-started B', async () => {
+    const { local, client, mirrorSet, build } = await lineage();
+    const a = sessionA();
+    local.setItem(KEY_SESSION, serializeSession(a));
+    await mirrorSet(a);
+
+    // --- ws UP: ending A mirrors the tombstone (revision 201).
+    const online = new DockStorage(local, client);
+    const c1 = build(online);
+    await c1.init();
+    c1.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'end-a' });
+    await new Promise((resolve) => setTimeout(resolve, 100)); // let the fire-and-forget mirror write land
+    const mirroredAfterEnd = await client.request('GetPersistentData', {
+      realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+      slotName: 'live-counter/session',
+    });
+    expect(mirroredAfterEnd.slotValue).toEqual({ ended: true, revision: 201 });
+    c1.dispose();
+
+    // --- ws drops; B is started with no mirror reachable.
+    const offline = new DockStorage(local, null);
+    const c2 = build(offline);
+    await c2.init();
+    expect(c2.getState().session).toBeNull(); // the tombstone means "ended"
+    c2.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+    const bRevision = c2.getState().session?.revision as number;
+    expect(bRevision).toBeGreaterThan(201); // B out-ranks the mirrored tombstone
+    c2.dispose();
+
+    // --- reboot with ws back; the mirror still holds only the tombstone.
+    const rebooted = new DockStorage(local, client);
+    const c3 = build(rebooted);
+    await c3.init();
+
+    const restored = c3.getState().session;
+    expect(restored).not.toBeNull(); // NOT silently deleted
+    expect(restored?.finishValue).toBe(50);
+    expect(restored?.revision).toBe(bRevision);
+  });
+
+  it('revision continuity: a session started after an end-at-revision-N persists above N', async () => {
+    const { local, build } = await lineage();
+    const a = sessionA(); // revision 200
+    local.setItem(KEY_SESSION, serializeSession(a));
+
+    const storage = new DockStorage(local, null);
+    const controller = build(storage);
+    await controller.init();
+    controller.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'end-a' });
+    expect(JSON.parse(local.getItem(KEY_SESSION) as string)).toEqual({ ended: true, revision: 201 });
+
+    controller.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+
+    const persisted = JSON.parse(local.getItem(KEY_SESSION) as string) as { revision: number };
+    expect(persisted.revision).toBe(202);
+    expect(persisted.revision).toBeGreaterThan(201);
+    // ...and it keeps climbing normally from there within the session.
+    controller.dispatch({ type: 'increment', nonce: 'b-1' });
+    expect(controller.getState().session?.revision).toBe(203);
+  });
+});
+
 describe('SessionController — lastAction', () => {
   it('is set on an accepted dispatch with the human-short label and resulting value; unchanged on rejection', async () => {
     const { controller } = await setup();
