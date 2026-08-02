@@ -565,4 +565,254 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.9: preset export/import via clipboard ---
+
+  /** Builds a full, independently-valid Preset object literal for hand-crafted envelope tests. */
+  function rawPreset(overrides: { id: string; title: string; startValue: number; finishValue: number }): unknown {
+    const now = new Date().toISOString();
+    return {
+      schemaVersion: 1,
+      id: overrides.id,
+      title: overrides.title,
+      description: null,
+      startValue: overrides.startValue,
+      finishValue: overrides.finishValue,
+      mode: 'manual',
+      intervalSeconds: 1,
+      template: null,
+      style: {
+        fontFamily: 'Inter',
+        fontWeight: 700,
+        numberSizePx: 96,
+        textSizePx: 24,
+        numberColor: '#ffffff',
+        textColor: '#cccccc',
+        alignH: 'center',
+        alignV: 'middle',
+        outline: null,
+        shadow: null,
+        background: null,
+        paddingPx: 8,
+      },
+      animation: { type: 'none', target: 'number', durationMs: 300 },
+      completion: { kind: 'hold' },
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  test('export puts a valid { app, kind, v, exportedAt, presets } envelope on the clipboard', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Exportable' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
+      await expect(page.getByTestId('export-confirm')).toContainText('1 presets copied');
+
+      const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+      const envelope = JSON.parse(clipboardText) as {
+        app: string;
+        kind: string;
+        v: number;
+        exportedAt: string;
+        presets: Array<{ title: string }>;
+      };
+      expect(envelope.app).toBe('live-counter');
+      expect(envelope.kind).toBe('preset-export');
+      expect(envelope.v).toBe(1);
+      expect(typeof envelope.exportedAt).toBe('string');
+      expect(envelope.presets).toHaveLength(1);
+      expect(envelope.presets[0]!.title).toBe('Exportable');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('round-trip: export, wipe storage, paste + apply restores the row with its settings (AC 21)', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, {
+        start: 2,
+        finish: 22,
+        title: 'Round Trip',
+        description: 'Keeps settings',
+        template: 'Left: {count}',
+      });
+      await page.getByTestId('setup-mode').selectOption('automatic');
+      await page.getByTestId('setup-interval').selectOption('2');
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
+      const clip = await page.evaluate(() => navigator.clipboard.readText());
+
+      // Wipe storage entirely — the import must restore from the pasted
+      // envelope alone, not from anything left over in memory or storage.
+      await page.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+      await expect(page.getByTestId('import-confirm')).toContainText('1 presets imported');
+
+      const row = page.getByTestId('preset-row').filter({ hasText: 'Round Trip' });
+      await expect(row).toBeVisible();
+      await expect(row).toContainText('Keeps settings');
+      await expect(row).toContainText('2→22');
+      await expect(row).toContainText('automatic');
+
+      await row.getByTestId('preset-load').click();
+      await expect(page.getByTestId('setup-template')).toHaveValue('Left: {count}');
+      await expect(page.getByTestId('setup-start')).toHaveValue('2');
+      await expect(page.getByTestId('setup-finish')).toHaveValue('22');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('malformed JSON on import shows import-error and leaves storage untouched', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Untouched' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill('{not valid json');
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-error')).toBeVisible();
+      await expect(page.getByTestId('import-confirm')).toHaveCount(0);
+
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as unknown[],
+      );
+      expect(stored).toHaveLength(1);
+      await expect(page.getByTestId('preset-row')).toHaveCount(1);
+      await expect(page.getByTestId('preset-row')).toContainText('Untouched');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('envelope with one invalid preset is rejected entirely (all-or-nothing)', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Survivor' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('preset-row')).toHaveCount(1);
+
+      const envelope = {
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: new Date().toISOString(),
+        presets: [
+          rawPreset({ id: 'seed-good', title: 'Good Import', startValue: 0, finishValue: 20 }),
+          // Invalid: startValue === finishValue fails isPreset/isSession's shared range rule.
+          rawPreset({ id: 'seed-bad', title: 'Bad Import', startValue: 5, finishValue: 5 }),
+        ],
+      };
+
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(JSON.stringify(envelope));
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-error')).toBeVisible();
+      await expect(page.getByTestId('import-confirm')).toHaveCount(0);
+      await expect(page.getByTestId('preset-row')).toHaveCount(1); // still just Survivor
+      const titles = await page.getByTestId('preset-row').locator('.list-row-title').allTextContents();
+      expect(titles).toEqual(['Survivor']);
+
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as unknown[],
+      );
+      expect(stored).toHaveLength(1);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('title collision on import appends "(imported)"; original untouched', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Collide' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+      const clip = await page.evaluate(() => navigator.clipboard.readText());
+
+      // Import the SAME export back in without wiping storage first — the
+      // title collides with the "Collide" preset already on disk.
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+      const rows = page.getByTestId('preset-row');
+      await expect(rows).toHaveCount(2);
+      const titles = (await rows.locator('.list-row-title').allTextContents()).sort();
+      expect(titles).toEqual(['Collide', 'Collide (imported)']);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('imported preset ids differ from the ids in the envelope', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Id Check' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+      const clip = await page.evaluate(() => navigator.clipboard.readText());
+      const originalEnvelope = JSON.parse(clip) as { presets: Array<{ id: string }> };
+      const originalId = originalEnvelope.presets[0]!.id;
+
+      // Wipe then reimport for a clean single-row id comparison.
+      await page.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as Array<{ id: string }>,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.id).not.toBe(originalId);
+    } finally {
+      await mock.close();
+    }
+  });
 });

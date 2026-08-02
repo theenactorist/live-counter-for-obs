@@ -13,12 +13,22 @@
 //
 // Escaping discipline: preset titles/descriptions are operator content —
 // every dynamic string here goes through `textContent`, never `innerHTML`.
+//
+// Task 2.9 adds export/import via the clipboard (no file-picker dependency —
+// works in OBS's embedded CEF docks): `presets-export` copies a versioned
+// envelope built from a fresh `loadPresets()`; `presets-import` reveals a
+// textarea the operator pastes into, and `import-apply` re-validates the
+// WHOLE pasted array through the same engine pipeline (serializePresets +
+// loadPresets) that every other persisted preset goes through, all-or-
+// nothing, before assigning fresh ids and merging against another fresh
+// `loadPresets()` fetch.
 import type { Preset } from '../../engine/types.js';
 import { rangeOf } from '../../engine/types.js';
 import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
+import { loadPresets as engineLoadPresets, serializePresets } from '../../engine/migrate.js';
 
 export interface PresetsViewHandle {
   destroy(): void;
@@ -47,7 +57,40 @@ interface PresetsUiState {
   search: string;
   deleteConfirmId: string | null;
   replaceConfirm: ReplaceConfirmState | null;
+  exportFeedback: string | null;
+  importOpen: boolean;
+  importText: string;
+  importError: string | null;
+  importFeedback: string | null;
 }
+
+// Task 2.9 — export/import via clipboard. The envelope shape is deliberately
+// tiny (app/kind/v tag + timestamp + the presets array itself) so a future
+// schema bump can add fields without breaking this structural check; the
+// PRESETS themselves are re-validated through the full engine pipeline
+// (loadPresets/serializePresets) below rather than trusted at face value.
+interface PresetExportEnvelope {
+  app: 'live-counter';
+  kind: 'preset-export';
+  v: 1;
+  exportedAt: string;
+  presets: unknown[];
+}
+
+function isPresetExportEnvelope(x: unknown): x is PresetExportEnvelope {
+  if (typeof x !== 'object' || x === null || Array.isArray(x)) return false;
+  const { app, kind, v, exportedAt, presets } = x as Record<string, unknown>;
+  return (
+    app === 'live-counter' &&
+    kind === 'preset-export' &&
+    v === 1 &&
+    typeof exportedAt === 'string' &&
+    Array.isArray(presets)
+  );
+}
+
+const EXPORT_CONFIRM_MS = 2000;
+const IMPORT_CONFIRM_MS = 2000;
 
 interface FocusSnapshot {
   testid: string;
@@ -113,7 +156,15 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     search: '',
     deleteConfirmId: null,
     replaceConfirm: null,
+    exportFeedback: null,
+    importOpen: false,
+    importText: '',
+    importError: null,
+    importFeedback: null,
   };
+
+  let exportConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  let importConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function refresh(): Promise<void> {
     const outcome = await opts.storage.loadPresets();
@@ -183,6 +234,100 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     ui.presets = next;
     ui.deleteConfirmId = null;
     render();
+  }
+
+  // --- Task 2.9: export/import via clipboard ---------------------------
+  // Clipboard is the transport (no file-picker dependency — OBS's embedded
+  // CEF docks make native file dialogs awkward at best). Export always
+  // re-fetches presets fresh from storage, same reasoning as onDuplicate/
+  // onDelete above: this view's own `ui.presets` cache may be stale.
+  async function onExport(): Promise<void> {
+    const outcome = await opts.storage.loadPresets();
+    const presets = outcome.value ?? [];
+    const envelope: PresetExportEnvelope = {
+      app: 'live-counter',
+      kind: 'preset-export',
+      v: 1,
+      exportedAt: new Date().toISOString(),
+      presets,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(envelope));
+    } catch {
+      // Clipboard permission denied/unavailable — nothing else to do here
+      // (mirrors diagnostics.ts's copyText()).
+      return;
+    }
+    if (exportConfirmTimer !== null) clearTimeout(exportConfirmTimer);
+    ui.exportFeedback = `${presets.length} presets copied`;
+    render();
+    exportConfirmTimer = setTimeout(() => {
+      ui.exportFeedback = null;
+      exportConfirmTimer = null;
+      render();
+    }, EXPORT_CONFIRM_MS);
+  }
+
+  // Import is all-or-nothing: the WHOLE pasted array is routed through the
+  // exact same validation/migration pipeline every other persisted preset
+  // goes through (serializePresets + the engine's loadPresets — the same
+  // function DockStorage.loadPresets calls) before a single byte is written.
+  // One invalid preset anywhere in the batch rejects the entire import;
+  // nothing partial is ever saved.
+  async function onImportApply(): Promise<void> {
+    ui.importError = null;
+    ui.importFeedback = null;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(ui.importText);
+    } catch {
+      ui.importError = 'Could not parse — the pasted text is not valid JSON.';
+      render();
+      return;
+    }
+
+    if (!isPresetExportEnvelope(parsed)) {
+      ui.importError = 'Not a Live Counter preset export.';
+      render();
+      return;
+    }
+
+    const loadResult = engineLoadPresets(serializePresets(parsed.presets as Preset[]));
+    if (!loadResult.ok) {
+      ui.importError = 'This export contains one or more invalid presets — nothing was imported.';
+      render();
+      return;
+    }
+
+    // Fresh fetch immediately before merging — never trust this view's
+    // cached `ui.presets` — so a concurrent edit elsewhere is never clobbered
+    // (same reasoning as onDuplicate/onDelete above).
+    const outcome = await opts.storage.loadPresets();
+    const existing = outcome.value ?? [];
+    const titles = new Set(existing.map((p) => p.title));
+
+    const imported: Preset[] = [];
+    for (const candidate of loadResult.value) {
+      let title = candidate.title;
+      if (titles.has(title)) title = `${title} (imported)`;
+      titles.add(title);
+      imported.push({ ...candidate, id: crypto.randomUUID(), title });
+    }
+
+    const next = [...existing, ...imported];
+    opts.storage.savePresets(next);
+    ui.presets = next;
+    ui.importText = '';
+
+    if (importConfirmTimer !== null) clearTimeout(importConfirmTimer);
+    ui.importFeedback = `${imported.length} presets imported`;
+    render();
+    importConfirmTimer = setTimeout(() => {
+      ui.importFeedback = null;
+      importConfirmTimer = null;
+      render();
+    }, IMPORT_CONFIRM_MS);
   }
 
   function renderDeleteConfirm(preset: Preset): HTMLElement {
@@ -282,6 +427,49 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     return box;
   }
 
+  function renderImportPanel(): HTMLElement {
+    const box = el('div', { 'data-testid': 'import-panel', class: 'import-panel' });
+    box.appendChild(el('div', { class: 'form-label' }, 'Paste an exported preset list, then Apply.'));
+
+    const textarea = el('textarea', { 'data-testid': 'import-textarea', rows: '6' }) as HTMLTextAreaElement;
+    textarea.value = ui.importText;
+    textarea.addEventListener('input', () => {
+      ui.importText = textarea.value;
+    });
+    box.appendChild(textarea);
+
+    if (ui.importError) {
+      box.appendChild(el('div', { 'data-testid': 'import-error', class: 'field-error' }, ui.importError));
+    }
+    if (ui.importFeedback) {
+      box.appendChild(el('div', { 'data-testid': 'import-confirm', class: 'copy-confirm' }, ui.importFeedback));
+    }
+
+    const actions = el('div', { class: 'btn-row' });
+    const apply = button('import-apply', 'Apply');
+    apply.addEventListener('click', () => {
+      void onImportApply();
+    });
+    actions.appendChild(apply);
+
+    const cancel = button('import-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      if (importConfirmTimer !== null) {
+        clearTimeout(importConfirmTimer);
+        importConfirmTimer = null;
+      }
+      ui.importOpen = false;
+      ui.importText = '';
+      ui.importError = null;
+      ui.importFeedback = null;
+      render();
+    });
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+
+    return box;
+  }
+
   function render(): void {
     const focusSnapshot = captureFocus(container);
     container.innerHTML = '';
@@ -301,6 +489,25 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     });
     header.appendChild(search);
     root.appendChild(header);
+
+    const ioRow = el('div', { class: 'btn-row' });
+    const exportBtn = button('presets-export', 'Export');
+    exportBtn.addEventListener('click', () => {
+      void onExport();
+    });
+    ioRow.appendChild(exportBtn);
+    const importBtn = button('presets-import', 'Import');
+    importBtn.addEventListener('click', () => {
+      ui.importOpen = !ui.importOpen;
+      render();
+    });
+    ioRow.appendChild(importBtn);
+    root.appendChild(ioRow);
+
+    if (ui.exportFeedback) {
+      root.appendChild(el('div', { 'data-testid': 'export-confirm', class: 'copy-confirm' }, ui.exportFeedback));
+    }
+    if (ui.importOpen) root.appendChild(renderImportPanel());
 
     if (ui.replaceConfirm) root.appendChild(renderReplaceConfirm(ui.replaceConfirm));
 
@@ -328,7 +535,8 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
   return {
     destroy(): void {
-      // No subscriptions of its own — nothing to unsubscribe.
+      if (exportConfirmTimer !== null) clearTimeout(exportConfirmTimer);
+      if (importConfirmTimer !== null) clearTimeout(importConfirmTimer);
     },
     refresh(): void {
       void refresh();
