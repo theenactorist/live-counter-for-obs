@@ -9,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { startMockObs } from '../helpers/mock-obsws.js';
 import type { CompletionConfig, Mode } from '../../src/engine/types.js';
+import { createSession, applyCommand } from '../../src/engine/counter.js';
+import { serializeSession } from '../../src/engine/migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
@@ -32,12 +34,13 @@ interface AnimationCfg {
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number },
+  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; diagRefreshMs?: number },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
+  if (opts.diagRefreshMs !== undefined) params.set('diagRefreshMs', String(opts.diagRefreshMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
 }
 
@@ -294,6 +297,103 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       await expect(dock.getByTestId('diag-row-ws')).toContainText('Tools → WebSocket Server Settings');
     } finally {
       if (!closed) await mock.close();
+    }
+  });
+
+  // Phase 2 final-review fix (live-safety:F1 / contracts:overlay-presence-
+  // one-shot / code-quality:P2-Q-02) — the one test the 94-green suite was
+  // missing: hold a HEALTHY overlay past the silence window and assert the
+  // dock stays quiet. Before the fix the overlay spoke exactly once per
+  // identify ('hello') and nothing ever sent 'overlay-status', so both
+  // rolling-window consumers went stale and every real session showed
+  // "Overlay not rendering" ~10s in, permanently.
+  //
+  // The overlay is opened FIRST here — the real OBS startup order, and the
+  // one the old one-shot hello could never survive (BroadcastCustomEvent only
+  // fans out to currently-identified clients, so a hello sent before the dock
+  // connects was gone for good).
+  test('8. overlay liveness: a healthy overlay keeps banner-overlay away and diag-row-overlay ok past the silence window; closing it flips both', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const overlay = await context.newPage();
+      await openOverlay(overlay, mock.port, { statusMs: '300' });
+      const dock = await context.newPage();
+      await openDock(dock, { port: mock.port, overlaySilenceMs: 1500, diagRefreshMs: 200 });
+
+      await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+      // Overlay proven alive and rendering the dock's broadcast.
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 5000 });
+
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-row-overlay')).toHaveAttribute('data-state', 'ok', { timeout: 3000 });
+
+      // Three full silence windows with the overlay still up.
+      await dock.waitForTimeout(4500);
+
+      await expect(dock.getByTestId('diag-row-overlay')).toHaveAttribute('data-state', 'ok');
+      await expect(dock.getByTestId('diag-row-overlay')).toContainText('Overlay connected');
+      // banner-overlay lives in the (currently hidden) Live pane — count, not
+      // visibility, is the assertion that works from the Diagnostics tab.
+      await expect(dock.getByTestId('banner-overlay')).toHaveCount(0);
+      // ...and it really did keep rendering the whole time.
+      await dock.getByTestId('tab-live').click();
+      await dock.getByTestId('btn-plus').click();
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('1', { timeout: 3000 });
+      await dock.getByTestId('tab-diagnostics').click();
+
+      await overlay.close(); // the overlay genuinely goes away
+
+      await expect(dock.getByTestId('diag-row-overlay')).toHaveAttribute('data-state', 'warn', { timeout: 5000 });
+      await expect(dock.getByTestId('diag-row-overlay')).toContainText('Overlay not seen');
+      await expect(dock.getByTestId('banner-overlay')).toHaveCount(1, { timeout: 5000 });
+      await expect(dock.getByTestId('banner-overlay')).toContainText('Overlay not rendering');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Phase 2 final-review fix (contracts:end-keep-blank-overlay): an ad hoc
+  // session (presetId null — the DEFAULT from the Setup form) recovered after
+  // a reload has no style on the fresh controller, and "End, keep overlay"
+  // used to write a null snapshot in that case — blanking the overlay on air,
+  // the exact opposite of what the button says.
+  test('9. end-keep on a RECOVERED ad hoc session leaves the frozen value on the overlay instead of blanking it', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // A session persisted by an earlier boot: no presetId, so nothing can
+      // re-derive a style for it after the reload.
+      let seeded = createSession({ startValue: 0, finishValue: 100, mode: 'manual' }, Date.now());
+      seeded = applyCommand(seeded, { type: 'jump', value: 42, nonce: 'seed-1' }, Date.now()).session;
+      expect(seeded.presetId).toBeNull();
+
+      const overlay = await context.newPage();
+      await openOverlay(overlay, mock.port);
+
+      const dock = await context.newPage();
+      await dock.addInitScript((sessionJson) => {
+        window.localStorage.setItem('lc.session.v1', sessionJson);
+      }, serializeSession(seeded));
+      await openDock(dock, { port: mock.port, devhook: false });
+
+      await expect(dock.getByTestId('current-value')).toHaveText('42', { timeout: 5000 });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('42', { timeout: 5000 });
+
+      await dock.getByTestId('btn-end').click();
+      await dock.getByTestId('end-keep').click();
+
+      await expect(dock.getByTestId('live-empty')).toBeVisible();
+      // The frozen final value stays on screen, styled, rather than the
+      // renderer taking its hideContent() branch.
+      await expect(overlay.getByTestId('overlay-content')).toHaveCount(1);
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('42');
+      const fontSize = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).fontSize);
+      expect(fontSize).toBe('96px'); // the shared DEFAULT_STYLE's numberSizePx
+    } finally {
+      await mock.close();
     }
   });
 });

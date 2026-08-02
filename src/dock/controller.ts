@@ -10,6 +10,7 @@ import type { AutoTimer, TimerHooks } from './timer.js';
 import type { Bus } from '../protocol/bus.js';
 import { generateNonce } from '../protocol/bus.js';
 import type { DockStorage, OverlaySnapshot } from '../protocol/persistence.js';
+import { DEFAULT_STYLE } from '../shared/default-style.js';
 
 export interface Scheduler {
   schedule(ms: number, fn: () => void): unknown;
@@ -148,7 +149,25 @@ export class SessionController {
     if (!anyFailure) this.notifyFailureLogged = false;
   }
 
-  async init(): Promise<void> {
+  /**
+   * @param opts.identified Resolves once the ws client has identified (true)
+   *   or a caller-chosen short timeout has lapsed (false). Awaited BEFORE the
+   *   storage load so `DockStorage.loadSession()`'s persistent-data mirror
+   *   read actually reaches the wire — see `awaitIdentified` in
+   *   protocol/obsws-client.ts for the full "mirror was write-only" story
+   *   (live-safety:F2 / code-quality:P2-Q-01). Omitted (tests, or any caller
+   *   that already knows the client is up) = load immediately, exactly as
+   *   before. The promise must never REJECT and must always settle: an
+   *   OBS-down boot has to finish restoring from localStorage promptly.
+   */
+  async init(opts: { identified?: Promise<boolean> } = {}): Promise<void> {
+    if (opts.identified) await opts.identified;
+    // A settings-save reconnect can dispose this instance while the await
+    // above is still pending (the operator fixing a wrong port is exactly the
+    // case where it lasts the full timeout). A disposed controller must never
+    // broadcast or arm a heartbeat, so bail before doing either.
+    if (this.disposed) return;
+
     const outcome = await this.storage.loadSession();
 
     // Clobber guard: storage.loadSession() is async, and a caller can call
@@ -177,6 +196,26 @@ export class SessionController {
 
       this.session = session;
 
+      // Phase 2 final-review fix (live-safety:F3): scheduleHoldThenHide's
+      // handle is in-memory only, so a dock reload / OBS restart / settings-
+      // save reconnect DURING the hold window used to restore a
+      // status:'complete', holdThenHide session verbatim with nothing left to
+      // fire the completionHide — the overlay held the final number on
+      // Program forever, silently dropping the completion behaviour the
+      // operator configured (PRD §8.5). Re-arm it here. The window restarts
+      // from now (a fresh full N seconds) rather than being reconstructed
+      // from updatedAt: the persisted shape carries no "hold started at"
+      // field, and over-holding is the strictly safer failure than
+      // under-holding a number that is still on air.
+      if (
+        session !== null &&
+        session.status === 'complete' &&
+        session.completion.kind === 'holdThenHide' &&
+        session.overlayVisible
+      ) {
+        this.scheduleHoldThenHide(session.completion.seconds ?? 0);
+      }
+
       if (outcome.warning !== null) {
         this.storage.log('session-load', outcome.warning);
       }
@@ -187,7 +226,15 @@ export class SessionController {
     this.startHeartbeat();
   }
 
+  // Guarded by `disposed` for the same reason adoptPresentation and
+  // runDispatch are (live-safety:F4): this was the ONE mutating entry point
+  // without the check, so a stale, still-clickable view bound to a
+  // torn-down controller (e.g. a Presets row surviving a settings-save
+  // reconnect) could make a disposed instance write a fresh session to the
+  // LIVE localStorage keys the NEW controller owns, and clear the live
+  // snapshot — last-writer-wins corruption on the next reload.
   startSession(cfg: SessionConfig, style: StyleConfig, template: string | null, animation: AnimationConfig | null): void {
+    if (this.disposed) return;
     this.timer.stop();
     this.cancelHold();
     this.session = createSession(cfg, this.nowMs());
@@ -344,11 +391,22 @@ export class SessionController {
     // startSession() itself OR had it re-derived via adoptPresentation()
     // (Task 2.6, e.g. after a recovered session's preset was looked up in
     // main.ts). If neither ever happened — an ad hoc session recovered from
-    // storage with no presetId, or one whose preset has since been deleted —
-    // there is nothing usable to snapshot, so treat it the same as
-    // keepOverlay:false.
-    if (keepOverlay && this.style !== null) {
-      snapshot = { template: this.template, value: endedValue, style: this.style, schemaVersion: 1 };
+    // storage with no presetId (the DEFAULT for anything started from the
+    // Setup form, see setup.ts's `presetId`), or one whose preset has since
+    // been deleted — this used to fall through to saveSnapshot(null), so
+    // "End & keep overlay showing its last value" BLANKED the overlay on air:
+    // the exact opposite of what the button says (contracts:end-keep-blank-
+    // overlay). Fall back to the shared DEFAULT_STYLE instead — which is what
+    // the renderer was already painting that frame with (renderer.applyStyle
+    // substitutes it for a null style), so the frozen frame is
+    // byte-identical to what the audience was already seeing. `template`
+    // rides along when known and is null (number-only) when not.
+    if (keepOverlay) {
+      const style = this.style ?? DEFAULT_STYLE;
+      if (this.style === null) {
+        this.storage.log('session-ended', 'keep-overlay used the default style (no preset presentation known)');
+      }
+      snapshot = { template: this.template, value: endedValue, style, schemaVersion: 1 };
     }
     this.storage.saveSnapshot(snapshot);
     this.snapshot = snapshot;

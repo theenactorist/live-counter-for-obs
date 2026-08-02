@@ -306,6 +306,88 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Phase 2 final-review fix (contracts:status-chip-no-unknown). SHOWING /
+  // HIDDEN describe the render-level hide flag, which only means anything
+  // while the dock is actually talking to OBS; with the socket down the dock
+  // knows nothing about what the audience sees. The plan's DOM contract locks
+  // UNKNOWN as a Phase 2 chip state and dock.html already carried the (until
+  // now dead) `[data-state='unknown']` styling.
+  test('status-chip flips to UNKNOWN when the ws connection drops, alongside banner-ws', async ({ page }) => {
+    const mock = await startMockObs();
+    const port = mock.port;
+
+    await openDock(page, { port });
+    await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+    const chip = page.getByTestId('status-chip');
+    await expect(chip).toHaveAttribute('data-state', 'showing');
+    await expect(chip).toHaveText('SHOWING');
+
+    await mock.close(); // server goes away mid-session
+
+    await expect(chip).toHaveAttribute('data-state', 'unknown', { timeout: 5000 });
+    await expect(chip).toHaveText('UNKNOWN');
+    await expect(page.getByTestId('banner-ws')).toBeVisible({ timeout: 5000 });
+  });
+
+  // Phase 2 final-review fix (code-quality:P2-Q-07): the +/- handler is on
+  // `document` for the lifetime of the mount and wireTabs only toggles
+  // `pane.hidden`, so before this guard a stray '+' with focus on a tab
+  // button (where a tab click leaves it) mutated the ON-AIR count from a
+  // screen where the count is not even rendered — no operator feedback, but
+  // the audience saw the change.
+  test('global +/- shortcuts do not fire while the Live tab is hidden', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      await page.keyboard.press('+'); // Live visible: still works
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+
+      await page.getByTestId('tab-presets').click(); // focus lands on the tab BUTTON
+      await page.keyboard.press('+');
+      await page.keyboard.press('=');
+      await page.keyboard.press('-');
+
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('current-value')).toHaveText('1'); // untouched
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Phase 2 final-review fix (code-quality:P2-Q-08): PRD §6 requires the
+  // overlay-disconnect banner to be suppressed when the disconnect is
+  // operator-initiated. Warning that "the audience may not see updates" about
+  // an overlay the operator deliberately hid — directly above a chip reading
+  // HIDDEN — is exactly the noise that teaches them to ignore the real thing.
+  test('banner-overlay is suppressed while the overlay is deliberately hidden, and returns on Show', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, overlaySilenceMs: 500 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      await expect(page.getByTestId('banner-overlay')).toBeVisible({ timeout: 3000 });
+
+      await page.getByTestId('btn-show-hide').click(); // operator Hide
+      await expect(page.getByTestId('status-chip')).toHaveText('HIDDEN');
+      await expect(page.getByTestId('banner-overlay')).toHaveCount(0);
+
+      // Still suppressed after a poll tick or two, not just on the render
+      // that the click itself triggered.
+      await page.waitForTimeout(1500);
+      await expect(page.getByTestId('banner-overlay')).toHaveCount(0);
+
+      await page.getByTestId('btn-show-hide').click(); // Show again
+      await expect(page.getByTestId('banner-overlay')).toBeVisible({ timeout: 3000 });
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('no OBS server: banner-ws appears, empty state shown', async ({ page }) => {
     // Nothing listens on this port — the client will never identify.
     await openDock(page, { port: 39217, devhook: false });

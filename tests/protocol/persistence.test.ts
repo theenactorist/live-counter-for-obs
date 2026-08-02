@@ -285,24 +285,107 @@ describe('DockStorage — session', () => {
     expect(outcome).toEqual({ value: session, warning: null });
   });
 
-  it('saveSession(null) removes the local key and mirrors null', async () => {
+  // Phase 2 final-review fix (live-safety:F5). This test previously asserted
+  // that saveSession(null) REMOVED the local key and mirrored null. That is
+  // what made an ended session resurrectable: an absent local record loses to
+  // any mirror value at all, so a ws-down "end A / start B" window left the
+  // mirror holding A and the next boot restored it over B. saveSession(null)
+  // now writes a revision-bearing tombstone to both copies instead.
+  it('saveSession(null) writes an {ended, revision} tombstone locally and mirrors the same object', async () => {
     mock = await startMockObs();
     const client = await connectedClient(mock.url);
     clients.push(client);
 
     const local = new MapStorage();
     const storage = new DockStorage(local, client);
-    const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    let session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000); // revision 0
+    session = applyCommand(session, { type: 'increment', nonce: 'n1' }, 1100).session; // revision 1
     storage.saveSession(session);
     expect(local.getItem(KEY_SESSION)).not.toBeNull();
 
     storage.saveSession(null);
-    expect(local.getItem(KEY_SESSION)).toBeNull();
 
-    // Give the fire-and-forget mirror write a moment to land, then confirm it too is null.
+    // One above the ended session's last revision, so it beats every stale
+    // copy of THAT session while still losing to a genuinely newer one.
+    expect(JSON.parse(local.getItem(KEY_SESSION) as string)).toEqual({ ended: true, revision: 2 });
+
+    // Give the fire-and-forget mirror write a moment to land, then confirm the
+    // mirror carries the same tombstone (not null, and not the ended session).
     await new Promise((resolve) => setTimeout(resolve, 100));
     const mirrored = await client.request('GetPersistentData', { realm: REALM, slotName: SLOT_SESSION });
-    expect(mirrored.slotValue).toBeNull();
+    expect(mirrored.slotValue).toEqual({ ended: true, revision: 2 });
+  });
+
+  it('a tombstone load resolves to "no session", not to a corrupt-quarantine', async () => {
+    const local = new MapStorage();
+    local.setItem(KEY_SESSION, JSON.stringify({ ended: true, revision: 7 }));
+    const storage = new DockStorage(local, null);
+
+    await expect(storage.loadSession()).resolves.toEqual({ value: null, warning: null });
+    // Not quarantined, not deleted — the tombstone is a legitimate record.
+    expect(local.getItem(KEY_SESSION)).not.toBeNull();
+    expect(local.keys().some((k) => k.startsWith('lc.quarantine.'))).toBe(false);
+  });
+
+  it('ended offline, then reconnect: a local tombstone beats the stale mirrored session (stays ended)', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    // The mirror still holds session A as it was before it ended — the
+    // fire-and-forget clear never reached the server while ws was down.
+    const local = new MapStorage();
+    let sessionA = createSession({ startValue: 0, finishValue: 500, mode: 'manual' }, 1000);
+    for (let i = 0; i < 5; i++) {
+      sessionA = applyCommand(sessionA, { type: 'increment', nonce: `a-${i}` }, 1100 + i).session;
+    }
+    expect(sessionA.revision).toBe(5);
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: sessionA });
+
+    // Locally, the operator ended it (offline): tombstone at revision 6.
+    local.setItem(KEY_SESSION, JSON.stringify({ ended: true, revision: 6 }));
+
+    const storage = new DockStorage(local, client);
+    await expect(storage.loadSession()).resolves.toEqual({ value: null, warning: null });
+  });
+
+  it('a mirror with a HIGHER revision than the tombstone still wins (a genuinely newer session elsewhere)', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage();
+    local.setItem(KEY_SESSION, JSON.stringify({ ended: true, revision: 6 }));
+
+    let newer = createSession({ startValue: 0, finishValue: 500, mode: 'manual' }, 2000);
+    for (let i = 0; i < 9; i++) {
+      newer = applyCommand(newer, { type: 'increment', nonce: `b-${i}` }, 2100 + i).session;
+    }
+    expect(newer.revision).toBe(9);
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: newer });
+
+    const storage = new DockStorage(local, client);
+    await expect(storage.loadSession()).resolves.toEqual({ value: newer, warning: 'mirror-used' });
+  });
+
+  it('a tombstone written after adopting a mirrored session out-ranks that session (revision stays monotonic)', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage(); // no local record at all — mirror-only recovery
+    let mirrored = createSession({ startValue: 0, finishValue: 500, mode: 'manual' }, 1000);
+    for (let i = 0; i < 40; i++) {
+      mirrored = applyCommand(mirrored, { type: 'increment', nonce: `m-${i}` }, 1100 + i).session;
+    }
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: mirrored });
+
+    const storage = new DockStorage(local, client);
+    const recovered = await storage.loadSession();
+    expect(recovered.value?.revision).toBe(40);
+
+    storage.saveSession(null); // operator ends the recovered session
+    expect(JSON.parse(local.getItem(KEY_SESSION) as string)).toEqual({ ended: true, revision: 41 });
   });
 });
 

@@ -33,6 +33,7 @@ import { SPEED_LEVELS, isValidCountValue, isPreset } from '../../engine/types.js
 import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
+import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -40,6 +41,30 @@ const COMPLETION_KINDS = ['hold', 'hide', 'holdThenHide'] as const;
 const FONTS = ['Inter', 'Oswald'] as const;
 
 const DEFAULT_COMPLETION_SECONDS = 5;
+
+// Font-size bounds for the Number-size field (code-quality:P2-Q-06). Before
+// this gate, clearing the field yielded Number('') === 0 -> a `font-size: 0px`
+// counter that vanished from the stream with no error anywhere in the dock,
+// and a negative value produced a declaration the browser drops, silently
+// inheriting an unrelated size. 8px is the smallest legible size; 512px
+// comfortably exceeds a 4K browser source's usable digit height.
+const MIN_SIZE_PX = 8;
+const MAX_SIZE_PX = 512;
+const DEFAULT_NUMBER_SIZE_PX = 96;
+// Not operator-editable yet (buildStyle() hardcodes it), but validated on the
+// same path so the gate is already correct when Phase 3 exposes the field.
+const TEXT_SIZE_PX = 24;
+
+// Which variant of the `setup-conflict` box to render, or null for none.
+//  - 'stale':   the stored preset changed since editing began (Task 2.6's
+//               original stale-edit guard).
+//  - 'deleted': the preset being edited no longer exists at all
+//               (code-quality:P2-Q-04). Previously unhandled: the editing
+//               branch's `existing.map(...)` matched nothing, so savePresets
+//               wrote a byte-identical list and the operator got the normal
+//               post-save UI while every edit silently failed to persist —
+//               permanently, since editing mode is never left.
+type ConflictKind = 'stale' | 'deleted' | null;
 
 export interface SetupViewHandle {
   destroy(): void;
@@ -70,7 +95,11 @@ interface SetupUiState {
   mode: Mode;
   intervalSeconds: number;
   template: string;
-  numberSizePx: number;
+  // A RAW string, like startValue/finishValue — not a number. As a number,
+  // the field could never represent "cleared": Number('') is 0, which
+  // round-tripped back into the input as a literal "0" and shipped an
+  // invisible counter (code-quality:P2-Q-06).
+  numberSizePx: string;
   numberColor: string;
   textColor: string;
   fontFamily: string;
@@ -80,7 +109,7 @@ interface SetupUiState {
   completionKind: CompletionConfig['kind'];
   completionSeconds: number;
   editing: EditingState | null;
-  conflict: boolean;
+  conflict: ConflictKind;
   error: string | null;
 }
 
@@ -159,7 +188,7 @@ function defaultUiState(): SetupUiState {
     mode: 'manual',
     intervalSeconds: 1,
     template: '',
-    numberSizePx: 96,
+    numberSizePx: String(DEFAULT_NUMBER_SIZE_PX),
     numberColor: '#ffffff',
     textColor: '#cccccc',
     fontFamily: 'Inter',
@@ -169,20 +198,40 @@ function defaultUiState(): SetupUiState {
     completionKind: 'hold',
     completionSeconds: DEFAULT_COMPLETION_SECONDS,
     editing: null,
-    conflict: false,
+    conflict: null,
     error: null,
   };
 }
 
 export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptions): SetupViewHandle {
   const ui = defaultUiState();
+  // Phase 2 final-review fix (code-quality:P2-Q-03): performSave() awaits
+  // storage and then render()s, and main.ts's boot() (settings-save
+  // reconnect) can tear this view down mid-await — the operator fixing a bad
+  // port is exactly when that happens. Without this flag the stale
+  // continuation repaints THIS mount's form (old title, old values, handlers
+  // closed over a disposed controller) over the freshly-mounted replacement,
+  // and Setup has no onActivate refresh hook to heal it.
+  let destroyed = false;
+
+  function numberSizeValue(): number | null {
+    const n = parseIntStrict(ui.numberSizePx);
+    if (n === null || n < MIN_SIZE_PX || n > MAX_SIZE_PX) return null;
+    return n;
+  }
+
+  function styleValid(): boolean {
+    return numberSizeValue() !== null && TEXT_SIZE_PX >= MIN_SIZE_PX && TEXT_SIZE_PX <= MAX_SIZE_PX;
+  }
 
   function buildStyle(): StyleConfig {
     return {
       fontFamily: ui.fontFamily,
       fontWeight: 700,
-      numberSizePx: ui.numberSizePx,
-      textSizePx: 24,
+      // Non-null by construction: every caller is gated behind
+      // canSave()/canStart(), both of which require styleValid().
+      numberSizePx: numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX,
+      textSizePx: TEXT_SIZE_PX,
       numberColor: ui.numberColor,
       textColor: ui.textColor,
       alignH: 'center',
@@ -229,11 +278,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   function canSave(): boolean {
-    return ui.title.trim().length > 0 && rangeValid() && templateError() === null && completionValid();
+    return ui.title.trim().length > 0 && rangeValid() && templateError() === null && completionValid() && styleValid();
   }
 
   function canStart(): boolean {
-    return rangeValid() && templateError() === null && completionValid();
+    return rangeValid() && templateError() === null && completionValid() && styleValid();
   }
 
   function previewValue(): number {
@@ -252,12 +301,21 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.error = null;
 
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     const existing = outcome.value ?? [];
 
     if (ui.editing && !force) {
       const stored = existing.find((p) => p.id === ui.editing!.id);
-      if (stored && stored.updatedAt !== ui.editing.editingSince) {
-        ui.conflict = true;
+      // Deleted elsewhere (Presets tab, another dock window): the editing
+      // branch's map() below would match nothing and write a byte-identical
+      // list, reporting success while dropping every edit. Ask instead.
+      if (!stored) {
+        ui.conflict = 'deleted';
+        render();
+        return;
+      }
+      if (stored.updatedAt !== ui.editing.editingSince) {
+        ui.conflict = 'stale';
         render();
         return;
       }
@@ -317,7 +375,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     if (ui.editing) {
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
     }
-    ui.conflict = false;
+    ui.conflict = null;
     render();
   }
 
@@ -359,29 +417,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // animation is local WAAPI on the preview node only. Compositor-friendly
     // properties only (transform/opacity), matching the PRD §8.10 restriction
     // the real overlay renderer (Task 2.7) also follows.
+    //
+    // Keyframes come from src/shared/animation-keyframes.ts — the SAME
+    // source the real overlay renderer animates from (code-quality:P2-Q-05).
+    // This used to be a hand-copied second table that had drifted in three of
+    // the four non-none types, so the operator previewed one motion and the
+    // audience saw another; the loudest was `flip` losing its perspective()
+    // and rendering as a flat vertical squash.
     const target = container.querySelector<HTMLElement>('[data-testid="setup-preview"]');
-    if (!target || ui.animType === 'none') return;
+    if (!target) return;
+    const keyframes = keyframesFor(ui.animType);
+    if (keyframes === null) return;
     for (const anim of target.getAnimations()) anim.cancel();
-    target.animate(animationKeyframes(ui.animType), { duration: ui.animDurationMs, easing: 'ease-out' });
-  }
-
-  function animationKeyframes(type: AnimationConfig['type']): Keyframe[] {
-    switch (type) {
-      case 'pop':
-        return [{ transform: 'scale(1)' }, { transform: 'scale(1.15)' }, { transform: 'scale(1)' }];
-      case 'fade':
-        return [{ opacity: 0.2 }, { opacity: 1 }];
-      case 'slideUp':
-        return [
-          { transform: 'translateY(16px)', opacity: 0.3 },
-          { transform: 'translateY(0)', opacity: 1 },
-        ];
-      case 'flip':
-        return [{ transform: 'rotateX(90deg)' }, { transform: 'rotateX(0deg)' }];
-      case 'none':
-      default:
-        return [];
-    }
+    target.animate(keyframes, { duration: ui.animDurationMs, easing: ANIMATION_EASING });
   }
 
   function inputField(
@@ -525,19 +573,39 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return select;
   }
 
-  function renderConflict(): HTMLElement {
+  // One box, two variants — same testids (`setup-conflict`,
+  // `conflict-overwrite`, `conflict-cancel`), relabelled per `kind`, because
+  // the operator's decision has the same shape either way: proceed, or back
+  // out without losing what is on screen.
+  function renderConflict(kind: Exclude<ConflictKind, null>): HTMLElement {
     const box = el('div', { 'data-testid': 'setup-conflict', class: 'confirm-box' });
-    box.appendChild(el('span', {}, 'This preset was updated elsewhere since you started editing. Overwrite anyway?'));
-    const overwrite = button('conflict-overwrite', 'Overwrite');
-    overwrite.addEventListener('click', () => {
+    const deleted = kind === 'deleted';
+    box.appendChild(
+      el(
+        'span',
+        {},
+        deleted
+          ? 'This preset was deleted elsewhere. Save your changes as a new preset?'
+          : 'This preset was updated elsewhere since you started editing. Overwrite anyway?',
+      ),
+    );
+    const proceed = button('conflict-overwrite', deleted ? 'Save as new' : 'Overwrite');
+    proceed.addEventListener('click', () => {
+      if (deleted) {
+        // Leaving editing mode is what turns the save into a create: the
+        // write path below mints a fresh id and appends, instead of mapping
+        // over an id that is no longer in the list.
+        ui.editing = null;
+      }
+      ui.conflict = null;
       void performSave(true);
     });
     const cancel = button('conflict-cancel', 'Cancel');
     cancel.addEventListener('click', () => {
-      ui.conflict = false;
+      ui.conflict = null;
       render();
     });
-    box.appendChild(overwrite);
+    box.appendChild(proceed);
     box.appendChild(cancel);
     return box;
   }
@@ -547,7 +615,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const preview = el('div', { 'data-testid': 'setup-preview', class: 'setup-preview' });
     preview.style.fontFamily = ui.fontFamily;
     preview.style.color = ui.numberColor;
-    preview.style.fontSize = `${ui.numberSizePx}px`;
+    // Falls back to the default while the field is mid-edit/invalid rather
+    // than mirroring a 0 or negative into the preview: the field's own inline
+    // error is the feedback channel, and a preview that vanishes just makes
+    // the form harder to fix.
+    preview.style.fontSize = `${numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX}px`;
     preview.textContent = previewText();
     wrap.appendChild(preview);
 
@@ -558,6 +630,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   function render(): void {
+    if (destroyed) return;
     const focusSnapshot = captureFocus(container);
     container.innerHTML = '';
 
@@ -569,7 +642,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       );
     }
 
-    if (ui.conflict) root.appendChild(renderConflict());
+    if (ui.conflict !== null) root.appendChild(renderConflict(ui.conflict));
     if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
 
     root.appendChild(
@@ -638,15 +711,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         'Number size (px)',
         inputField(
           'setup-number-size',
-          String(ui.numberSizePx),
+          ui.numberSizePx,
           (v) => {
-            const n = Number(v);
-            if (Number.isFinite(n)) ui.numberSizePx = n;
+            ui.numberSizePx = v;
           },
           'number',
+          { min: String(MIN_SIZE_PX), max: String(MAX_SIZE_PX), step: '1' },
         ),
       ),
     );
+    if (numberSizeValue() === null) {
+      root.appendChild(
+        el(
+          'div',
+          { 'data-testid': 'setup-number-size-error', class: 'field-error' },
+          `Enter a whole number between ${MIN_SIZE_PX} and ${MAX_SIZE_PX}`,
+        ),
+      );
+    }
     root.appendChild(
       formRow(
         'Number color',
@@ -710,7 +792,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   return {
     destroy(): void {
       // No subscriptions of its own (this view only reads controller/storage
-      // on demand) — nothing to unsubscribe.
+      // on demand) — but an in-flight performSave() must not repaint this
+      // torn-down mount over its replacement (code-quality:P2-Q-03).
+      destroyed = true;
     },
     loadPreset(preset: Preset): void {
       ui.title = preset.title;
@@ -720,7 +804,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.mode = preset.mode;
       ui.intervalSeconds = preset.intervalSeconds;
       ui.template = preset.template ?? '';
-      ui.numberSizePx = preset.style.numberSizePx;
+      ui.numberSizePx = String(preset.style.numberSizePx);
       ui.numberColor = preset.style.numberColor;
       ui.textColor = preset.style.textColor;
       ui.fontFamily = preset.style.fontFamily;
@@ -730,7 +814,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.completionKind = preset.completion.kind;
       ui.completionSeconds = preset.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
-      ui.conflict = false;
+      ui.conflict = null;
       ui.error = null;
       render();
     },

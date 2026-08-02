@@ -286,6 +286,43 @@ export class ObsWsClient {
   }
 }
 
+/**
+ * Resolves `true` as soon as `client` is identified, or `false` once
+ * `timeoutMs` elapses without that happening. Never rejects, never leaves a
+ * listener or timer behind.
+ *
+ * Phase 2 final-review fix (live-safety:F2 / code-quality:P2-Q-01): the dock's
+ * boot used to call `controller.init()` — whose `DockStorage.loadSession()`
+ * issues a `GetPersistentData` for the mirror — before `client.connect()` had
+ * even constructed a socket. `request()` rejects SYNCHRONOUSLY when not
+ * identified (see the gate above), the mirror read was swallowed as "mirror
+ * empty", and nothing ever re-read it, so the mirror was write-only: the one
+ * scenario it exists for (localStorage lost — CEF profile cleared, OBS
+ * reinstall) silently restored nothing. Awaiting this before the load makes
+ * the mirror reachable, while the timeout keeps an OBS-down boot fast
+ * (localStorage-only, no waiting on a server that will never answer).
+ */
+export function awaitIdentified(client: Pick<ObsWsClient, 'state' | 'on'>, timeoutMs: number): Promise<boolean> {
+  if (client.state === 'identified') return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let unsub: (() => void) | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      unsub?.();
+      resolve(value);
+    };
+    timer = setTimeout(() => finish(false), timeoutMs);
+    unsub = client.on('identified', () => finish(true));
+    // Defensive: if `on()` somehow fired synchronously, `finish` already ran
+    // with `unsub` still null — drop the listener now that we have it.
+    if (settled) unsub();
+  });
+}
+
 async function computeAuthString(password: string, salt: string, challenge: string): Promise<string> {
   const secret = await sha256Base64(password + salt);
   return sha256Base64(secret + challenge);

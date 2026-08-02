@@ -10,7 +10,7 @@ import '../styles/fonts.css';
  * `init()` restores a session — re-deriving that session's style/template
  * from its preset (see the `adoptPresentation` call in `boot()`).
  */
-import { ObsWsClient } from '../protocol/obsws-client.js';
+import { ObsWsClient, awaitIdentified } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
 import { DockStorage } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
@@ -21,6 +21,7 @@ import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
 import { mountDiagnosticsView, type DiagnosticsViewHandle } from './diagnostics.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
+import { DEFAULT_STYLE } from '../shared/default-style.js';
 
 const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
@@ -36,20 +37,17 @@ const BANNER_WS_TEXT = 'Not connected to OBS — Tools → WebSocket Server Sett
 // required, non-nullable argument) for tests that start a session without
 // driving the real Setup form — the real form (Task 2.6) builds its own
 // StyleConfig from the operator's chosen fields instead of this constant.
-const DEV_DEFAULT_STYLE: StyleConfig = {
-  fontFamily: 'Inter',
-  fontWeight: 700,
-  numberSizePx: 96,
-  textSizePx: 24,
-  numberColor: '#ffffff',
-  textColor: '#cccccc',
-  alignH: 'center',
-  alignV: 'middle',
-  outline: null,
-  shadow: null,
-  background: null,
-  paddingPx: 8,
-};
+// Now the SHARED DEFAULT_STYLE (src/shared/default-style.ts) rather than a
+// third private copy of the same twelve fields — see that module.
+const DEV_DEFAULT_STYLE: StyleConfig = DEFAULT_STYLE;
+
+// How long boot() waits for the ws client to identify before giving up and
+// restoring from localStorage alone. Long enough for a healthy local
+// obs-websocket handshake (single-digit ms in practice) so the persistent-
+// data mirror is actually reachable on the one boot that needs it — a
+// localStorage-less recovery (live-safety:F2) — and short enough that an
+// OBS-down boot still puts the operator's session on screen promptly.
+const IDENTIFY_WAIT_MS = 2500;
 
 class RealScheduler implements Scheduler {
   schedule(ms: number, fn: () => void): unknown {
@@ -294,7 +292,14 @@ function main(): void {
     // build the options object conditionally so the key is omitted entirely
     // when there's no override, letting mountLiveView fall back to its own
     // default.
-    const liveOpts = overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {};
+    const bootedClient = client;
+    const liveOpts = {
+      ...(overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {}),
+      // Captures THIS boot()'s client (the outer `client` binding is
+      // reassigned by a later settings-save reconnect, and this view is torn
+      // down and remounted by that same call anyway).
+      isConnected: (): boolean => bootedClient.state === 'identified',
+    };
     liveHandle = mountLiveView(shell.panes.live, controller, bus, liveOpts);
 
     setupHandle = mountSetupView(shell.panes.setup, {
@@ -350,8 +355,18 @@ function main(): void {
     // overlay) picks it up. No presetId (an ad hoc session) or a since-
     // deleted preset both correctly fall through to doing nothing — the
     // session stays number-only, per the brief.
+    // Phase 2 final-review fix (live-safety:F2 / code-quality:P2-Q-01): the
+    // mirror was write-only because init()'s GetPersistentData fired while
+    // the client was still 'connecting' (indeed, before `connect()` had even
+    // constructed a socket) and ObsWsClient.request() rejects synchronously
+    // in that state. Handing init() a bounded identify wait makes the mirror
+    // read reach the wire on a healthy boot — and, because the wait resolves
+    // `false` on timeout rather than hanging, still restores from
+    // localStorage promptly when OBS is down. Created BEFORE connect() below
+    // so the 'identified' listener can never miss the event.
+    const identified = awaitIdentified(client, IDENTIFY_WAIT_MS);
     void bootedController
-      .init()
+      .init({ identified })
       .then(async () => {
         const session = bootedController.getState().session;
         if (session === null || session.presetId === null) return;

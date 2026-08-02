@@ -11,6 +11,27 @@ import { mountOverlayRenderer } from './renderer.js';
 const EVENT_SUBSCRIPTIONS = 9;
 const DEFAULT_PORT = 4455;
 
+// Phase 2 final-review fix (live-safety:F1 / contracts:overlay-presence-one-
+// shot / code-quality:P2-Q-02) — overlay LIVENESS heartbeat.
+//
+// The dock decides "is the overlay alive?" with a ROLLING window: both the
+// Live view's `banner-overlay` (src/dock/views/live.ts) and Diagnostics'
+// `diag-row-overlay` (src/dock/diagnostics.ts) refresh `lastOverlaySeenAt`
+// only when a 'hello' or 'overlay-status' bus message arrives, then warn once
+// that timestamp is `overlaySilenceMs` (10s) old. Before this fix the overlay
+// spoke exactly ONCE per identify ('hello') and nothing anywhere in src/ ever
+// sent 'overlay-status' — so a rolling predicate was being fed by a
+// non-repeating event, and every healthy session showed "Overlay not
+// rendering" ~10s in, permanently, training the operator to ignore the one
+// banner that matters. It also made the normal OBS startup order (overlay
+// browser source identifies BEFORE the operator opens the dock) permanently
+// blind, since BroadcastCustomEvent only fans out to currently-identified
+// clients.
+//
+// 2s mirrors the dock's own SessionController heartbeat, giving five chances
+// to land inside the 10s window.
+const OVERLAY_STATUS_MS = 2000;
+
 function renderOverlayRoot(): HTMLElement | null {
   const root = document.getElementById('app');
   if (!root) return null;
@@ -48,6 +69,15 @@ function main(): void {
   // `?overlaySilenceMs=` seam in src/dock/main.ts).
   const watchdogMsParam = params.get('watchdogMs');
   const watchdogMs = watchdogMsParam !== null && Number.isFinite(Number(watchdogMsParam)) ? Number(watchdogMsParam) : undefined;
+  // Test seam (same shape as `watchdogMs` above): lets a Playwright spec
+  // shrink the liveness heartbeat interval so a test can also shrink the
+  // dock's `?overlaySilenceMs=` well below the real 10s and still keep a
+  // comfortable several-beats-per-window margin under CPU contention.
+  const statusMsParam = params.get('statusMs');
+  const statusMs =
+    statusMsParam !== null && Number.isFinite(Number(statusMsParam)) && Number(statusMsParam) > 0
+      ? Number(statusMsParam)
+      : OVERLAY_STATUS_MS;
 
   // exactOptionalPropertyTypes forbids `{ password: undefined }` — build the
   // options object conditionally so the key is omitted entirely when no `pw`
@@ -59,9 +89,32 @@ function main(): void {
   );
   const bus = new Bus(client, 'overlay');
 
+  // The heartbeat interval is owned by the identify lifecycle, not started
+  // once and left running: a dropped socket + backoff reconnect re-fires
+  // 'identified', and re-arming without clearing first would leak a second
+  // interval per reconnect (and double the bus traffic each time). Stopping
+  // it on 'closed'/'auth-failed' also means a disconnected overlay stops
+  // claiming to be alive the instant it stops being able to reach OBS —
+  // which is exactly what the dock's silence window is there to detect.
+  let statusTimer: ReturnType<typeof setInterval> | null = null;
+  function stopStatusHeartbeat(): void {
+    if (statusTimer !== null) {
+      clearInterval(statusTimer);
+      statusTimer = null;
+    }
+  }
+
   client.on('identified', () => {
-    void bus.send('hello', {});
+    // Fire-and-forget, like every other bus send: a transient failure must
+    // never become an unhandled rejection inside a lifecycle listener.
+    void bus.send('hello', {}).catch(() => {});
+    stopStatusHeartbeat();
+    statusTimer = setInterval(() => {
+      void bus.send('overlay-status', {}).catch(() => {});
+    }, statusMs);
   });
+  client.on('closed', stopStatusHeartbeat);
+  client.on('auth-failed', stopStatusHeartbeat);
 
   mountOverlayRenderer(overlayRoot, bus, watchdogMs !== undefined ? { watchdogMs } : {});
 

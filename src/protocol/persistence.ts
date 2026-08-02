@@ -4,13 +4,15 @@
 // corrupt localStorage records are quarantined (never silently discarded)
 // rather than deleted outright.
 import type { ObsWsClient } from './obsws-client.js';
-import type { Session, Preset, StyleConfig } from '../engine/types.js';
+import type { Session, SessionTombstone, Preset, StyleConfig } from '../engine/types.js';
+import { isSessionTombstone } from '../engine/types.js';
 import {
   loadSession as engineLoadSession,
   serializeSession,
   loadPresets as engineLoadPresets,
   serializePresets,
   type LoadResult,
+  type StoredSession,
 } from '../engine/migrate.js';
 
 export interface StorageLike {
@@ -90,6 +92,10 @@ export class DockStorage {
   // currently succeeding — so a StorageLike that starts throwing (quota
   // exceeded, private-browsing lockout, etc.) never loses recent entries.
   private memoryLog: string[] | null = null;
+  // Highest session `revision` this instance has seen written or loaded —
+  // the basis for the end-of-session tombstone's own revision (see
+  // saveSession below, and SessionTombstone in engine/types.ts).
+  private lastKnownRevision = -1;
 
   constructor(local: StorageLike, client: ObsWsClient | null, onWriteError?: (key: string, err: unknown) => void) {
     this.local = local;
@@ -200,22 +206,68 @@ export class DockStorage {
       .catch(() => {});
   }
 
+  // The conflict rule is unchanged ("higher `revision` wins"), but it now
+  // runs over `StoredSession` — a real Session OR the end-of-session
+  // tombstone (live-safety:F5). Because the tombstone carries a revision one
+  // above the ended session's last, it beats every stale mirrored copy of
+  // that session, while a genuinely newer session recorded elsewhere (higher
+  // revision) still wins. Only AFTER the comparison is a winning tombstone
+  // collapsed to "no session" for the caller.
   async loadSession(): Promise<LoadOutcome<Session>> {
-    return this.loadWithMirror<Session>(
+    const outcome = await this.loadWithMirror<StoredSession>(
       KEY_SESSION,
       MIRROR_SLOT_SESSION,
       engineLoadSession,
       (local, mirror) => mirror.revision > local.revision,
     );
+
+    const winner = outcome.value;
+    if (winner === null) return { value: null, warning: outcome.warning };
+
+    // Keep the tombstone counter monotonic across a load: a dock that boots,
+    // adopts a mirrored session at revision 40 and then ends it must write
+    // its tombstone at 41, not at 0.
+    this.lastKnownRevision = Math.max(this.lastKnownRevision, winner.revision);
+
+    if (isSessionTombstone(winner)) return { value: null, warning: outcome.warning };
+    return { value: winner, warning: outcome.warning };
   }
 
   saveSession(s: Session | null): void {
     if (s === null) {
-      this.safeRemove(KEY_SESSION);
-    } else {
-      this.safeSet(KEY_SESSION, serializeSession(s));
+      // A tombstone, NOT removeItem: an absent local record loses to any
+      // mirror value at all, so the old clear left a ws-down "end A, start B"
+      // window in which the mirror's stale copy of A resurrected itself on
+      // the next boot. Both the local record and the mirror get the same
+      // object, so whichever copy survives says the same thing.
+      const revision = Math.max(this.lastKnownRevision, this.localSessionRevision()) + 1;
+      const tombstone: SessionTombstone = { ended: true, revision };
+      this.lastKnownRevision = revision;
+      this.safeSet(KEY_SESSION, JSON.stringify(tombstone));
+      this.mirrorSet(MIRROR_SLOT_SESSION, tombstone);
+      return;
     }
+    this.lastKnownRevision = Math.max(this.lastKnownRevision, s.revision);
+    this.safeSet(KEY_SESSION, serializeSession(s));
     this.mirrorSet(MIRROR_SLOT_SESSION, s);
+  }
+
+  // Best-effort read of whatever revision the local session slot currently
+  // records (session or tombstone alike), so a DockStorage instance that has
+  // never itself written a session — e.g. one built fresh by a settings-save
+  // reconnect — still tombstones ABOVE what is on disk rather than at 0.
+  private localSessionRevision(): number {
+    const raw = this.local.getItem(KEY_SESSION);
+    if (raw === null) return -1;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (isPlainObject(parsed) && typeof parsed.revision === 'number' && Number.isFinite(parsed.revision)) {
+        return parsed.revision;
+      }
+    } catch {
+      // Unparseable local record — nothing to compare against.
+    }
+    return -1;
   }
 
   async loadPresets(): Promise<LoadOutcome<Preset[]>> {

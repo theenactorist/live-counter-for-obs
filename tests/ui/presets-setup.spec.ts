@@ -970,4 +970,184 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Phase 2 final-review fix wave -------------------------------------
+
+  // code-quality:P2-Q-04. Deleting the preset being edited (Presets tab, or
+  // another dock window) used to make Save a silent no-op success: the
+  // editing branch's `existing.map(...)` matched nothing, savePresets wrote a
+  // byte-identical list, and the normal post-save UI appeared while every
+  // edit failed to persist — permanently, since there is no way to leave
+  // editing mode.
+  test('editing a preset deleted elsewhere: Save offers "save as new", which persists the edits', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Doomed' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-load').click(); // now editing it
+
+      // It is deleted behind this view's back (the Presets tab writes the
+      // same DockStorage and never notifies Setup).
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-delete').click();
+      await page.getByTestId('delete-yes').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
+
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Doomed Edited');
+      await page.getByTestId('setup-save').click();
+
+      const conflict = page.getByTestId('setup-conflict');
+      await expect(conflict).toBeVisible();
+      await expect(conflict).toContainText('deleted elsewhere');
+      await expect(page.getByTestId('conflict-overwrite')).toHaveText('Save as new');
+
+      await page.getByTestId('conflict-overwrite').click();
+      await expect(conflict).toHaveCount(0);
+
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('preset-row')).toHaveCount(1);
+      await expect(page.getByTestId('preset-row')).toContainText('Doomed Edited');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('editing a preset deleted elsewhere: Cancel writes nothing and leaves the form intact', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Doomed Two' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-load').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-delete').click();
+      await page.getByTestId('delete-yes').click();
+
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Doomed Two Edited');
+      await page.getByTestId('setup-save').click();
+      await expect(page.getByTestId('setup-conflict')).toBeVisible();
+
+      await page.getByTestId('conflict-cancel').click();
+      await expect(page.getByTestId('setup-conflict')).toHaveCount(0);
+      // The operator's edits are still on screen (nothing was discarded)...
+      await expect(page.getByTestId('setup-title')).toHaveValue('Doomed Two Edited');
+      // ...and nothing was written.
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as unknown[],
+      );
+      expect(stored).toEqual([]);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // code-quality:P2-Q-05. Setup's Test-animation used a hand-copied keyframe
+  // table that had drifted from the overlay's — most visibly `flip`, which
+  // had lost its perspective() and rendered as a flat vertical squash. Both
+  // now read src/shared/animation-keyframes.ts.
+  test('test animation uses the SAME keyframes as the overlay (flip keeps its perspective)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-anim-type').selectOption('flip');
+      await page.getByTestId('setup-test-anim').click();
+
+      const transforms = await page.getByTestId('setup-preview').evaluate((el) => {
+        const anim = el.getAnimations()[0];
+        if (!anim) return null;
+        return (anim.effect as KeyframeEffect).getKeyframes().map((kf) => String(kf.transform));
+      });
+      expect(transforms).not.toBeNull();
+      expect(transforms).toEqual([
+        'perspective(600px) rotateX(90deg)',
+        'perspective(600px) rotateX(0deg)',
+      ]);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // code-quality:P2-Q-06. A cleared Number-size field yielded Number('') === 0
+  // -> `font-size: 0px` on the stream, with no error anywhere in the dock; a
+  // negative produced a declaration the browser drops, silently inheriting an
+  // unrelated size. Neither canSave() nor canStart() looked at style at all.
+  test('number size: cleared / 0 / negative blocks Save and Start with an inline error', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Sized' });
+
+      const sizeField = page.getByTestId('setup-number-size');
+      await expect(sizeField).toHaveAttribute('min', '8');
+      await expect(sizeField).toHaveAttribute('max', '512');
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+
+      for (const bad of ['', '0', '-5', '7', '513']) {
+        await sizeField.fill(bad);
+        await expect(page.getByTestId('setup-number-size-error')).toBeVisible();
+        await expect(page.getByTestId('setup-save')).toBeDisabled();
+        await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+      }
+
+      await sizeField.fill('120');
+      await expect(page.getByTestId('setup-number-size-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // code-quality:P2-Q-03. Setup renders synchronously at mount and main.ts has
+  // no onActivate refresh hook for it, so an in-flight performSave() that
+  // resolves AFTER a settings-save boot() tore this view down would repaint
+  // the OLD form — old title, handlers closed over a disposed controller —
+  // over the freshly-mounted replacement, with nothing to heal it.
+  //
+  // Driven through the real dock rather than a unit harness because vitest
+  // runs in a plain Node environment here (no jsdom — see the note atop
+  // tests/protocol/animations.test.ts), so a DOM view cannot be mounted
+  // there at all. `mock.delayResponsesFor('GetPersistentData', …)` stalls the
+  // exact request performSave's loadPresets() awaits — per-type rather than
+  // "the next one", which the dock's own 2s heartbeat broadcast would
+  // otherwise win at random.
+  test('a settings-save reconnect mid-save does not let the old Setup view repaint over the new one', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Zombie Title' });
+
+      // Stall the mirror read performSave() awaits, then start the save.
+      mock.delayResponsesFor('GetPersistentData', 1500);
+      await page.getByTestId('setup-save').click();
+
+      // ...and reconnect while it is still in flight: boot() destroys this
+      // Setup view and mounts a fresh (blank) one into the same pane.
+      await page.getByTestId('tab-diagnostics').click();
+      await page.getByTestId('settings-save').click();
+
+      // Well past the stalled response: the old continuation has settled.
+      await page.waitForTimeout(2500);
+
+      await page.getByTestId('tab-setup').click();
+      await expect(page.getByTestId('setup-title')).toHaveValue('');
+      await expect(page.getByTestId('setup-editing-title')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

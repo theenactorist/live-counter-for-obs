@@ -27,6 +27,13 @@ export interface MockObs {
   delayIdentify(ms: number): void;
   /** Test hook: hold back the next request's op-7 response by `ms` (to force out-of-order replies). */
   delayNextResponse(ms: number): void;
+  /**
+   * Test hook: hold back EVERY response for `requestType` by `ms` (0 clears).
+   * Unlike `delayNextResponse`, this can't be consumed by whatever request
+   * happens to arrive first — needed once the dock has a 2s heartbeat
+   * broadcasting on its own, when "the next request" is a coin flip.
+   */
+  delayResponsesFor(requestType: string, ms: number): void;
   persistent: Map<string, unknown>;
   broadcasts: Array<{ from: number; eventData: unknown }>;
   /** Every requestType this server has ever received, in arrival order — lets a test assert NO scene/source-mutation request type was ever sent (only BroadcastCustomEvent/SetPersistentData/GetPersistentData). */
@@ -68,6 +75,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   let swallowNextFlag = false;
   let identifyDelayMs = 0;
   let nextResponseDelayMs = 0;
+  const perTypeDelayMs = new Map<string, number>();
 
   function send(socket: WsSocket, op: number, d: Record<string, unknown>): void {
     socket.send(JSON.stringify({ op, d }));
@@ -117,8 +125,9 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     const respond = (): void => {
       send(socket, OP_REQUEST_RESPONSE, { requestId, requestStatus: { result, code }, responseData });
     };
-    if (nextResponseDelayMs > 0) {
-      const delay = nextResponseDelayMs;
+    const typeDelay = perTypeDelayMs.get(requestType) ?? 0;
+    if (nextResponseDelayMs > 0 || typeDelay > 0) {
+      const delay = Math.max(nextResponseDelayMs, typeDelay);
       nextResponseDelayMs = 0;
       setTimeout(respond, delay);
     } else {
@@ -208,6 +217,10 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     },
     delayNextResponse(ms) {
       nextResponseDelayMs = ms;
+    },
+    delayResponsesFor(requestType, ms) {
+      if (ms <= 0) perTypeDelayMs.delete(requestType);
+      else perTypeDelayMs.set(requestType, ms);
     },
     persistent,
     broadcasts,

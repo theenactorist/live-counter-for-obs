@@ -187,9 +187,18 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
   let exportConfirmTimer: ReturnType<typeof setTimeout> | null = null;
   let importConfirmTimer: ReturnType<typeof setTimeout> | null = null;
+  // Phase 2 final-review fix (code-quality:P2-Q-03): every handler below
+  // awaits storage before calling render(), and main.ts's boot() (a
+  // settings-save reconnect) can tear this view down mid-await. Without a
+  // flag, the continuation would resolve afterward and paint THIS mount's
+  // DOM — wired to a disposed SessionController and a closed client's
+  // DockStorage — over the freshly-mounted replacement. Checked after every
+  // await, and at the top of render() so no path can forget.
+  let destroyed = false;
 
   async function refresh(): Promise<void> {
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     ui.presets = outcome.value ?? [];
     ui.loaded = true;
     render();
@@ -239,6 +248,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
   // the whole array, so mutating a stale copy loses whatever changed since.
   async function onDuplicate(preset: Preset): Promise<void> {
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     const existing = outcome.value ?? [];
     const now = new Date().toISOString();
     const copy: Preset = { ...preset, id: crypto.randomUUID(), title: `${preset.title} (copy)`, createdAt: now, updatedAt: now };
@@ -250,6 +260,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
   async function onDelete(preset: Preset): Promise<void> {
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     const existing = outcome.value ?? [];
     const next = existing.filter((p) => p.id !== preset.id);
     opts.storage.savePresets(next);
@@ -267,6 +278,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     ui.exportError = null;
     ui.exportFallbackText = null;
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     const presets = outcome.value ?? [];
     const envelope: PresetExportEnvelope = {
       app: 'live-counter',
@@ -276,9 +288,14 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       presets,
     };
     const json = JSON.stringify(envelope);
+    let clipboardFailed = false;
     try {
       await navigator.clipboard.writeText(json);
     } catch {
+      clipboardFailed = true;
+    }
+    if (destroyed) return;
+    if (clipboardFailed) {
       // Clipboard permission denied/unavailable. Unlike diagnostics.ts's
       // copyText() (whose readonly <input> the operator can already
       // select+copy manually on failure), this envelope has no other visible
@@ -337,6 +354,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     // cached `ui.presets` — so a concurrent edit elsewhere is never clobbered
     // (same reasoning as onDuplicate/onDelete above).
     const outcome = await opts.storage.loadPresets();
+    if (destroyed) return;
     const existing = outcome.value ?? [];
     const titles = new Set(existing.map((p) => p.title));
 
@@ -503,6 +521,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
   }
 
   function render(): void {
+    if (destroyed) return;
     const focusSnapshot = captureFocus(container);
     container.innerHTML = '';
 
@@ -581,8 +600,17 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
   return {
     destroy(): void {
+      destroyed = true;
       if (exportConfirmTimer !== null) clearTimeout(exportConfirmTimer);
       if (importConfirmTimer !== null) clearTimeout(importConfirmTimer);
+      // Parity with diagnostics.ts's destroy (contracts:presets-destroy-no-
+      // clear): boot() destroys this view and remounts a fresh one into the
+      // SAME pane, but the replacement's first render() only lands after its
+      // async loadPresets() resolves. Until then the OLD, fully-wired rows
+      // (preset-load / preset-start / preset-delete, all closed over a
+      // disposed controller) stayed clickable. Clearing here means the pane
+      // is empty for that window instead of misleadingly live.
+      container.innerHTML = '';
     },
     refresh(): void {
       void refresh();

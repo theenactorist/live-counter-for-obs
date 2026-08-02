@@ -1,5 +1,5 @@
-import type { Session, Preset, Command, Mode } from './types.js';
-import { isSession, isPreset, SESSION_SCHEMA_VERSION, PRESET_SCHEMA_VERSION } from './types.js';
+import type { Session, SessionTombstone, Preset, Command, Mode } from './types.js';
+import { isSession, isSessionTombstone, isPreset, SESSION_SCHEMA_VERSION, PRESET_SCHEMA_VERSION } from './types.js';
 import { createSession, applyCommand } from './counter.js';
 
 // ---------------------------------------------------------------------------
@@ -88,9 +88,29 @@ export function serializeSession(s: Session): string {
   return JSON.stringify(s);
 }
 
-export function loadSession(raw: string | null): LoadResult<Session> {
+/**
+ * What the session slot can legitimately hold: a real `Session`, or the
+ * `SessionTombstone` written by `DockStorage.saveSession(null)` to record
+ * "this session was deliberately ended at revision N" (Phase 2 final-review
+ * fix, live-safety:F5). Callers resolve a tombstone to "no session" AFTER the
+ * localStorage-vs-mirror revision comparison, which is the whole point — a
+ * tombstone has to be COMPARABLE to a stale mirrored session to beat it.
+ */
+export type StoredSession = Session | SessionTombstone;
+
+export function loadSession(raw: string | null): LoadResult<StoredSession> {
   const parseResult = tryParse(raw);
   if ('corrupt' in parseResult) return { ok: false, reason: 'corrupt' };
+
+  // Checked BEFORE the migration chain: a tombstone deliberately carries no
+  // `schemaVersion` (its whole content is `{ended, revision}`), so
+  // migrateItem would reject it as 'invalid' and the caller would quarantine
+  // a perfectly valid, deliberately-written record — turning "session ended"
+  // back into "storage looks corrupt, fall back to the mirror", which is
+  // exactly the resurrection F5 is about.
+  if (isSessionTombstone(parseResult.parsed)) {
+    return { ok: true, value: parseResult.parsed };
+  }
 
   const { migrated, reason } = migrateItem(parseResult.parsed, SESSION_SCHEMA_VERSION, SESSION_MIGRATIONS);
   if (reason) return { ok: false, reason };

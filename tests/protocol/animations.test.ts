@@ -6,6 +6,7 @@
 // real Web Animations API end to end.
 import { describe, expect, it, vi } from 'vitest';
 import { animate, interruptAndAnimate } from '../../src/overlay/animations.js';
+import { keyframesFor, ANIMATION_EASING } from '../../src/shared/animation-keyframes.js';
 import type { AnimationConfig } from '../../src/engine/types.js';
 
 interface FakeAnimation {
@@ -100,6 +101,42 @@ describe('animate()', () => {
     expect(keyframeProps(keyframes)).toEqual(['transform']);
     for (const kf of keyframes) {
       expect(String(kf.transform)).toContain('rotateX');
+    }
+  });
+});
+
+// Phase 2 final-review fix (code-quality:P2-Q-05): the keyframes now live in
+// one shared module that BOTH the overlay renderer and the dock's Setup
+// preview import. These pin the three values that had drifted in the Setup
+// copy — the ones that made the operator preview a different motion from what
+// the audience saw.
+describe('shared keyframesFor()', () => {
+  it('is the exact source animate() uses', () => {
+    const el = fakeElement();
+    animate(el as unknown as HTMLElement, cfg({ type: 'slideUp' }));
+    const [keyframes, options] = el.animate.mock.calls[0]! as [Keyframe[], KeyframeAnimationOptions];
+    expect(keyframes).toEqual(keyframesFor('slideUp'));
+    expect(options.easing).toBe(ANIMATION_EASING);
+  });
+
+  it('"none" has no keyframes', () => {
+    expect(keyframesFor('none')).toBeNull();
+  });
+
+  it('fade starts fully transparent (Setup\'s drifted copy started at 0.2)', () => {
+    expect(keyframesFor('fade')).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+  });
+
+  it('slideUp travels a size-relative 0.35em from opacity 0 (Setup\'s copy used a fixed 16px at 0.3)', () => {
+    expect(keyframesFor('slideUp')).toEqual([
+      { transform: 'translateY(0.35em)', opacity: 0 },
+      { transform: 'translateY(0)', opacity: 1 },
+    ]);
+  });
+
+  it('flip keeps its perspective (Setup\'s copy dropped it, rendering a flat vertical squash)', () => {
+    for (const kf of keyframesFor('flip') ?? []) {
+      expect(String(kf.transform)).toContain('perspective(600px)');
     }
   });
 });

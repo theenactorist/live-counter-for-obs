@@ -5,7 +5,7 @@
 // and a FakeScheduler standing in for the controller's own `Scheduler` dependency
 // (heartbeat + holdThenHide scheduling).
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ObsWsClient } from '../../src/protocol/obsws-client.js';
+import { ObsWsClient, awaitIdentified } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { DockStorage, type StorageLike } from '../../src/protocol/persistence.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
@@ -14,6 +14,7 @@ import { SessionController, type Scheduler } from '../../src/dock/controller.js'
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession } from '../../src/engine/migrate.js';
 import type { StyleConfig, AnimationConfig } from '../../src/engine/types.js';
+import { DEFAULT_STYLE } from '../../src/shared/default-style.js';
 
 const KEY_SESSION = 'lc.session.v1';
 
@@ -491,6 +492,48 @@ describe('SessionController — endSession', () => {
     expect(storage.loadSnapshot()).toBeNull();
   });
 
+  // Phase 2 final-review fix (contracts:end-keep-blank-overlay): an ad hoc
+  // session (presetId null — the DEFAULT for anything started from the Setup
+  // form) recovered after a reload has NO style on the fresh controller
+  // instance, because style/template are controller-instance-only state and
+  // main.ts's re-derivation only fires for preset-backed sessions. "End &
+  // keep overlay showing its last value" used to degrade to a null snapshot
+  // in exactly that case, blanking the overlay on air.
+  it('keepOverlay:true with no known style (recovered ad hoc session) still snapshots, using the shared DEFAULT_STYLE', async () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    let stored = createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, 1000);
+    stored = applyCommand(stored, { type: 'jump', value: 42, nonce: 'seed-1' }, 1100).session;
+    expect(stored.presetId).toBeNull();
+    local.setItem(KEY_SESSION, serializeSession(stored));
+
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    await controller.init(); // recovered; startSession() never ran this boot
+    expect(controller.getState().recovered).toBe(true);
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    const result = controller.dispatch({ type: 'endSession', keepOverlay: true, nonce: 'n1' });
+
+    expect(result.accepted).toBe(true);
+    const snapshot = controller.getState().snapshot;
+    expect(snapshot).toEqual({ template: null, value: 42, style: DEFAULT_STYLE, schemaVersion: 1 });
+    expect(storage.loadSnapshot()).toEqual(snapshot);
+
+    // The broadcast the overlay renders from carries it, so the frozen final
+    // value stays on screen instead of the renderer taking hideContent().
+    const payload = sendSpy.mock.calls[0]![1] as { session: unknown; snapshot: unknown };
+    expect(payload.session).toBeNull();
+    expect(payload.snapshot).toEqual(snapshot);
+  });
+
   it('startSession clears any stale overlay snapshot left over from a previous ended session', async () => {
     const { storage, controller } = await setup();
     controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl-a', null);
@@ -623,6 +666,147 @@ describe('SessionController — init()', () => {
     await controller.init();
 
     expect(logSpy).toHaveBeenCalledWith('session-load', 'mirror-used');
+  });
+
+  // Phase 2 final-review fix (live-safety:F3): scheduleHoldThenHide's handle
+  // is in-memory only, so a reload / OBS restart / settings-save reconnect
+  // during the hold window used to restore the complete session verbatim with
+  // nothing left to fire the completionHide — the overlay held the final
+  // number on Program indefinitely.
+  it('re-arms a holdThenHide completion for a restored complete session, and the hide fires', async () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+
+    // Build the exact persisted shape: complete, holdThenHide, still visible,
+    // not yet hidden by completion (i.e. mid-hold when the dock went away).
+    let seed = createSession(
+      { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 60 } },
+      1000,
+    );
+    seed = applyCommand(seed, { type: 'increment', nonce: 'seed-1' }, 1100).session;
+    expect(seed.status).toBe('complete');
+    expect(seed.overlayVisible).toBe(true);
+    expect(seed.hiddenByCompletion).toBe(false);
+    local.setItem(KEY_SESSION, serializeSession(seed));
+
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    await controller.init();
+
+    // A fresh full 60s window (the persisted shape carries no "hold started
+    // at", and over-holding beats under-holding a number that is on air).
+    const hold = scheduler.entries.find((e) => e.ms === 60_000);
+    expect(hold).toBeDefined();
+
+    scheduler.fireNext(); // the hold entry is queued before the heartbeat's
+
+    const state = controller.getState();
+    expect(state.session?.overlayVisible).toBe(false);
+    expect(state.session?.hiddenByCompletion).toBe(true);
+  });
+
+  it('does NOT re-arm a hold for a complete session that was already hidden by its completion', async () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+
+    let seed = createSession(
+      { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 30 } },
+      1000,
+    );
+    seed = applyCommand(seed, { type: 'increment', nonce: 'seed-1' }, 1100).session;
+    seed = applyCommand(seed, { type: 'completionHide', nonce: 'seed-2' }, 1200).session;
+    expect(seed.overlayVisible).toBe(false);
+    local.setItem(KEY_SESSION, serializeSession(seed));
+
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    await controller.init();
+
+    expect(scheduler.entries.some((e) => e.ms === 30_000)).toBe(false);
+  });
+
+  // Phase 2 final-review fix (live-safety:F2 / code-quality:P2-Q-01) — the
+  // mirror-recovery path. Boot order is main.ts's verbatim: build the client,
+  // create the identify wait, kick off init(), THEN connect().
+  it('recovers a mirror-only session on a boot whose client identifies after a delay (localStorage empty)', async () => {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+
+    // Seed the mirror through a separate, already-identified client, exactly
+    // as a previous dock session's SetPersistentData would have.
+    const seeder = await connectedClient(mock.url);
+    let mirrored = createSession({ startValue: 0, finishValue: 100, mode: 'manual' }, 1000);
+    mirrored = applyCommand(mirrored, { type: 'jump', value: 42, nonce: 'seed-1' }, 1100).session;
+    await seeder.request('SetPersistentData', {
+      realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+      slotName: 'live-counter/session',
+      slotValue: mirrored,
+    });
+
+    // Identify slowly enough that a pre-identify GetPersistentData (the old
+    // behavior) would certainly have been rejected before the socket was up.
+    mock.delayIdentify(300);
+
+    const local = new MapStorage(); // localStorage lost: CEF profile cleared / OBS reinstall
+    const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
+    wsClients.push(client);
+    const storage = new DockStorage(local, client);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const identified = awaitIdentified(client, 2500);
+    const initPromise = controller.init({ identified });
+    client.connect();
+    await initPromise;
+
+    const state = controller.getState();
+    expect(state.recovered).toBe(true);
+    expect(state.session?.currentValue).toBe(42);
+    expect(mock.requestLog).toContain('GetPersistentData');
+  });
+
+  it('offline boot (no server at all) still completes promptly with the local session', async () => {
+    const local = new MapStorage();
+    const stored = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    local.setItem(KEY_SESSION, serializeSession(stored));
+
+    // Nothing listens on this port — `identified` can only settle by timeout.
+    const client = new ObsWsClient({ url: 'ws://127.0.0.1:39281', eventSubscriptions: 0, backoffMs: [50_000, 50_000] });
+    wsClients.push(client);
+    const storage = new DockStorage(local, client);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const startedAt = Date.now();
+    const identified = awaitIdentified(client, 2500);
+    const initPromise = controller.init({ identified });
+    client.connect();
+    await initPromise;
+    const elapsed = Date.now() - startedAt;
+
+    expect(controller.getState().session?.finishValue).toBe(10);
+    expect(controller.getState().recovered).toBe(true);
+    expect(elapsed).toBeLessThan(3500); // the 2.5s wait plus slack, never a hang
   });
 });
 
@@ -861,6 +1045,51 @@ describe('SessionController — dispose()', () => {
     expect(result.session).toBeNull();
     expect(saveSpy).not.toHaveBeenCalled();
     expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  // Phase 2 final-review fix (live-safety:F4): startSession() was the ONE
+  // mutating entry point without the disposed guard, breaking the symmetry
+  // with adoptPresentation/runDispatch/beat and contradicting the class
+  // contract ("a disposed controller must never persist or broadcast again").
+  // A stale, still-clickable Presets row surviving a settings-save reconnect
+  // could otherwise make a torn-down instance write a fresh session over the
+  // LIVE localStorage keys the NEW controller owns.
+  it('startSession() after dispose is a no-op — no state change, no storage write, no broadcast', async () => {
+    const { storage, bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'tpl', null);
+    const sessionBefore = controller.getState().session;
+
+    controller.dispose();
+
+    const saveSessionSpy = vi.spyOn(storage, 'saveSession');
+    const saveSnapshotSpy = vi.spyOn(storage, 'saveSnapshot');
+    const sendSpy = vi.spyOn(bus, 'send');
+
+    controller.startSession({ startValue: 0, finishValue: 999, mode: 'manual' }, styleFixture(), 'other', null);
+
+    expect(controller.getState().session).toBe(sessionBefore); // untouched
+    expect(saveSessionSpy).not.toHaveBeenCalled();
+    expect(saveSnapshotSpy).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('init() started before dispose() neither broadcasts nor arms a heartbeat once disposed mid-await', async () => {
+    const { bus, scheduler, controller } = await setup();
+
+    let releaseIdentify: (v: boolean) => void = () => {};
+    const identified = new Promise<boolean>((resolve) => {
+      releaseIdentify = resolve;
+    });
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    const initPromise = controller.init({ identified });
+
+    controller.dispose(); // e.g. a settings-save reconnect while OBS is still down
+    releaseIdentify(false);
+    await initPromise;
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(scheduler.pendingCount()).toBe(0);
   });
 
   it('is idempotent — a second dispose() call is a safe no-op', async () => {

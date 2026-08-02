@@ -57,6 +57,7 @@ import type { Session, StyleConfig, AnimationConfig } from '../engine/types.js';
 import type { OverlaySnapshot } from '../protocol/persistence.js';
 import { formatValue } from '../engine/format.js';
 import { interruptAndAnimate } from './animations.js';
+import { DEFAULT_STYLE } from '../shared/default-style.js';
 
 export interface StatePayload {
   session: Session | null;
@@ -95,23 +96,12 @@ const DEFAULT_WATCHDOG_MS = 6000;
 const DEFAULT_COALESCE_MS = 150;
 
 // Fallback presentation for the (rare, transient) case where a value must be
-// painted before any StyleConfig has arrived — matches the dock's own
-// DEV_DEFAULT_STYLE (src/dock/main.ts) so a number-only coalesce-timeout
-// paint looks like a plausible default rather than unstyled black-on-white.
-const DEFAULT_STYLE: StyleConfig = {
-  fontFamily: 'Inter',
-  fontWeight: 700,
-  numberSizePx: 96,
-  textSizePx: 24,
-  numberColor: '#ffffff',
-  textColor: '#cccccc',
-  alignH: 'center',
-  alignV: 'middle',
-  outline: null,
-  shadow: null,
-  background: null,
-  paddingPx: 8,
-};
+// painted before any StyleConfig has arrived. Imported from
+// src/shared/default-style.ts (Phase 2 final-review fix) rather than declared
+// here: the dock's own dev-hook default AND SessionController's "End & keep
+// overlay with no known style" snapshot now use the SAME constant, so a
+// frozen final frame renders byte-identically to what the audience was
+// already seeing.
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);

@@ -1,37 +1,13 @@
-// WAAPI animation helpers for the overlay renderer (Task 2.7). Every keyframe
-// list here touches ONLY `transform`/`opacity` — the two properties the
-// browser compositor can animate without triggering layout/paint on every
-// frame (PRD §8.10) — so an operator's animation choice can never tank
-// render performance on a livestream's browser source.
+// WAAPI animation helpers for the overlay renderer (Task 2.7). The keyframe
+// lists themselves now live in src/shared/animation-keyframes.ts (Phase 2
+// final-review fix, code-quality:P2-Q-05) so the dock's Setup preview and
+// this real on-stream renderer can never drift apart again — see that
+// module's doc comment for the transform/opacity-only contract (PRD §8.10)
+// and the drift this dedupe closed.
 import type { AnimationConfig } from '../engine/types.js';
+import { keyframesFor, ANIMATION_EASING } from '../shared/animation-keyframes.js';
 
-const EASING = 'ease-out';
-
-function keyframesFor(type: AnimationConfig['type']): Keyframe[] | null {
-  switch (type) {
-    case 'none':
-      return null;
-    case 'pop':
-      return [{ transform: 'scale(1)' }, { transform: 'scale(1.15)' }, { transform: 'scale(1)' }];
-    case 'fade':
-      return [{ opacity: 0 }, { opacity: 1 }];
-    case 'slideUp':
-      return [
-        { transform: 'translateY(0.35em)', opacity: 0 },
-        { transform: 'translateY(0)', opacity: 1 },
-      ];
-    case 'flip':
-      // Perspective folded into the transform value itself (rather than a
-      // separate CSS `perspective` property) so the keyframe stays
-      // transform/opacity-only, per the contract above.
-      return [
-        { transform: 'perspective(600px) rotateX(90deg)' },
-        { transform: 'perspective(600px) rotateX(0deg)' },
-      ];
-    default:
-      return null;
-  }
-}
+const EASING = ANIMATION_EASING;
 
 /**
  * Starts a WAAPI animation on `el` per `cfg`. Returns `null` for

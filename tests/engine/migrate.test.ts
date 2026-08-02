@@ -66,6 +66,23 @@ describe('migrate — session', () => {
     const r = loadSession(raw);
     expect(r).toEqual({ ok: false, reason: 'invalid' });
   });
+
+  // Phase 2 final-review fix (live-safety:F5): the end-of-session tombstone
+  // is a legitimate record of the session slot, not corruption. It carries no
+  // schemaVersion by design, so it has to be recognized BEFORE the migration
+  // chain — otherwise a deliberately ended session would be quarantined and
+  // the loader would fall back to the (stale) mirror, which is the exact
+  // resurrection the tombstone exists to prevent.
+  it('an {ended, revision} tombstone loads as a valid stored value, not corrupt/invalid', () => {
+    const r = loadSession(JSON.stringify({ ended: true, revision: 12 }));
+    expect(r).toEqual({ ok: true, value: { ended: true, revision: 12 } });
+  });
+
+  it('a tombstone-shaped object with a bad revision is still invalid', () => {
+    expect(loadSession(JSON.stringify({ ended: true, revision: -1 }))).toEqual({ ok: false, reason: 'invalid' });
+    expect(loadSession(JSON.stringify({ ended: true }))).toEqual({ ok: false, reason: 'invalid' });
+    expect(loadSession(JSON.stringify({ ended: false, revision: 3 }))).toEqual({ ok: false, reason: 'invalid' });
+  });
 });
 
 describe('migrate — presets', () => {

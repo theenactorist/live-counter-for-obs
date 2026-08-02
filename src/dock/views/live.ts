@@ -64,6 +64,12 @@ interface LiveUiState {
 
 export interface MountLiveViewOptions {
   overlaySilenceMs?: number;
+  /**
+   * "Is the dock's obs-websocket client identified right now?" — drives the
+   * status chip's UNKNOWN state (contracts:status-chip-no-unknown). Omitted
+   * = assume connected, i.e. the pre-fix SHOWING/HIDDEN-only behavior.
+   */
+  isConnected?: () => boolean;
 }
 
 interface FocusSnapshot {
@@ -99,6 +105,7 @@ export function mountLiveView(
   opts: MountLiveViewOptions = {},
 ): LiveViewHandle {
   const silenceMs = opts.overlaySilenceMs ?? OVERLAY_SILENCE_MS;
+  const isConnected = opts.isConnected ?? ((): boolean => true);
 
   const ui: LiveUiState = {
     jumpOpen: false,
@@ -136,7 +143,7 @@ export function mountLiveView(
     }
 
     const session = state.session;
-    if (session !== null && overlaySilent()) {
+    if (shouldShowOverlayBanner(session)) {
       container.appendChild(renderOverlayBanner());
     }
 
@@ -193,6 +200,35 @@ export function mountLiveView(
     return Date.now() - lastOverlaySeenAt >= silenceMs;
   }
 
+  // ONE predicate, called from both render() and the poll below — they were a
+  // literal copy-paste pair, which is precisely how a suppression rule gets
+  // learned in one place and not the other (code-quality:P2-Q-08).
+  //
+  // PRD §6 requires the overlay-disconnect banner to be suppressed when the
+  // disconnect is operator-initiated (Hide) or engine-initiated (completion
+  // hide): warning that "the audience may not see updates" about an overlay
+  // the operator DELIBERATELY hid — directly above a status chip reading
+  // HIDDEN — is noise that trains them to ignore the real thing.
+  // `!hiddenByCompletion` is strictly redundant today (the engine maintains
+  // hiddenByCompletion => !overlayVisible) and is kept only as defense
+  // against a hand-edited/legacy record that isSession would still accept.
+  function shouldShowOverlayBanner(session: Session | null): boolean {
+    if (session === null) return false;
+    if (!session.overlayVisible || session.hiddenByCompletion) return false;
+    return overlaySilent();
+  }
+
+  // SHOWING/HIDDEN describe the RENDER-level hide flag, which is only
+  // meaningful information if the dock is actually talking to OBS. With the
+  // socket down the dock knows nothing about what the audience sees, so it
+  // must say so rather than assert SHOWING (contracts:status-chip-no-unknown;
+  // the plan's DOM contract locks UNKNOWN as a Phase 2 chip state, and PRD
+  // §8.11 calls this chip "the continuous safeguard"). LIVE stays Phase 3.
+  function chipFor(session: Session): { state: string; text: string } {
+    if (!isConnected()) return { state: 'unknown', text: 'UNKNOWN' };
+    return session.overlayVisible ? { state: 'showing', text: 'SHOWING' } : { state: 'hidden', text: 'HIDDEN' };
+  }
+
   // Fix round 1 (Task 2.5 review, Critical 2): the once-a-second poll below
   // calls ONLY this — never the full render() — so an idle countdown to the
   // overlay-silence banner can never itself be the thing that steals focus
@@ -201,7 +237,7 @@ export function mountLiveView(
   // untouched.
   function updateOverlayBanner(): void {
     const session = controller.getState().session;
-    const shouldShow = session !== null && overlaySilent();
+    const shouldShow = shouldShowOverlayBanner(session);
     const existing = container.querySelector<HTMLElement>('[data-testid="banner-overlay"]');
     if (shouldShow && !existing) {
       const anchor = container.querySelector<HTMLElement>('[data-testid="live-root"], [data-testid="live-empty"]');
@@ -211,6 +247,16 @@ export function mountLiveView(
     } else if (!shouldShow && existing) {
       existing.remove();
     }
+  }
+
+  function updateStatusChip(): void {
+    const session = controller.getState().session;
+    if (session === null) return;
+    const chipEl = container.querySelector<HTMLElement>('[data-testid="status-chip"]');
+    if (!chipEl) return;
+    const chip = chipFor(session);
+    chipEl.dataset.state = chip.state;
+    chipEl.textContent = chip.text;
   }
 
   function renderRecoveredBanner(): HTMLElement {
@@ -243,9 +289,8 @@ export function mountLiveView(
       progressLabel(session) + (session.mode === 'automatic' ? ` · 1 count every ${session.intervalSeconds}s` : '');
     root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText));
 
-    const chipState = session.overlayVisible ? 'showing' : 'hidden';
-    const chipText = session.overlayVisible ? 'SHOWING' : 'HIDDEN';
-    root.appendChild(el('div', { 'data-testid': 'status-chip', 'data-state': chipState, class: 'status-chip' }, chipText));
+    const chip = chipFor(session);
+    root.appendChild(el('div', { 'data-testid': 'status-chip', 'data-state': chip.state, class: 'status-chip' }, chip.text));
 
     root.appendChild(
       el(
@@ -446,6 +491,16 @@ export function mountLiveView(
   }
 
   function onKeydown(e: KeyboardEvent): void {
+    // The listener is on `document` for the whole lifetime of the mount, but
+    // wireTabs only toggles `pane.hidden` — so before this guard, pressing
+    // '+'/'='/'-' on the Presets, Setup or Diagnostics tab (focus sitting on
+    // a tab BUTTON or any <select>, and type-to-select inside a <select> or
+    // a Cmd/Ctrl+'=' zoom chord makes that ordinary) mutated the ON-AIR count
+    // from a screen where the count is not even rendered: the audience saw
+    // the wrong number and the operator saw no feedback at all
+    // (code-quality:P2-Q-07). `container` IS the live pane (main.ts passes
+    // shell.panes.live), so its `hidden` flag is the exact predicate.
+    if (container.hidden) return;
     const target = e.target as HTMLElement | null;
     const inField = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
     if (inField) return;
@@ -464,7 +519,18 @@ export function mountLiveView(
       lastOverlaySeenAt = Date.now();
     }
   });
-  const bannerPoll = setInterval(() => updateOverlayBanner(), BANNER_POLL_MS);
+  // The chip is repainted on this poll as well as in render(), because
+  // neither of the two things that can flip it to UNKNOWN — the socket
+  // dropping, the socket coming back — produces a controller notification:
+  // the heartbeat broadcasts without notifying, so a render()-only chip would
+  // sit on a stale SHOWING for the rest of the session. Both updates are
+  // surgical, in-place mutations for the same reason the banner one is (see
+  // the module doc comment): a timer must never trigger a full rebuild and
+  // steal focus out of jump-input.
+  const bannerPoll = setInterval(() => {
+    updateOverlayBanner();
+    updateStatusChip();
+  }, BANNER_POLL_MS);
   document.addEventListener('keydown', onKeydown);
 
   render();

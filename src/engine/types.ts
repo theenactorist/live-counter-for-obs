@@ -26,6 +26,25 @@ export interface Session {
   undoStack: UndoEntry[]; completion: CompletionConfig; updatedAt: string;
 }
 
+// Phase 2 final-review fix (live-safety:F5) — the "this session was
+// deliberately ended" marker written to the session slot INSTEAD of removing
+// it. `Session` has no identity field, so the persistent-data mirror's
+// conflict rule ("higher `revision` wins") is only meaningful within one
+// session's lifetime: a ws-down "end session A (revision 200) -> start
+// session B (revision 3)" window used to leave the mirror holding A@200,
+// which then beat B on the next boot and resurrected an already-ended
+// session onto the operator's live screen. A tombstone participates in the
+// SAME revision comparison — it is written at `lastKnownRevision + 1`, so it
+// beats every stale copy of the session it ended, while a genuinely newer
+// session recorded elsewhere (higher revision) still wins.
+export interface SessionTombstone { ended: true; revision: number }
+
+export function isSessionTombstone(x: unknown): x is SessionTombstone {
+  if (!isPlainObject(x)) return false;
+  const { ended, revision } = x;
+  return ended === true && isNonNegativeInteger(revision);
+}
+
 export type Command =
   | { type: 'increment' | 'decrement' | 'undo' | 'reverse' | 'reset'
       | 'start' | 'pause' | 'resume' | 'faster' | 'slower'
