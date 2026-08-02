@@ -638,7 +638,39 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
-  test('round-trip: export, wipe storage, paste + apply restores the row with its settings (AC 21)', async ({
+  test('export clipboard failure shows export-error + a readonly fallback textarea, no false confirm', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // Monkey-patch BEFORE any page script runs, so the dock's own export
+      // handler sees a consistently-rejecting clipboard for the whole test —
+      // no permissions are granted, and this also covers browsers where
+      // simply withholding the permission doesn't make writeText() reject.
+      await page.addInitScript(() => {
+        navigator.clipboard.writeText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Fallback Needed' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+
+      await expect(page.getByTestId('export-error')).toBeVisible();
+      await expect(page.getByTestId('export-error')).toContainText('copy it manually');
+      await expect(page.getByTestId('export-confirm')).toHaveCount(0); // no false "copied" claim
+
+      const fallbackValue = await page.getByTestId('export-fallback').inputValue();
+      const envelope = JSON.parse(fallbackValue) as { app: string; presets: Array<{ title: string }> };
+      expect(envelope.app).toBe('live-counter');
+      expect(envelope.presets[0]!.title).toBe('Fallback Needed');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('round-trip: export, wipe storage, paste + apply restores every setting verbatim (AC 21)', async ({
     page,
     context,
   }) => {
@@ -655,12 +687,37 @@ test.describe('dock Setup + Presets views', () => {
       });
       await page.getByTestId('setup-mode').selectOption('automatic');
       await page.getByTestId('setup-interval').selectOption('2');
+
+      await page.getByTestId('setup-number-size').fill('120');
+      await page.getByTestId('setup-number-color').evaluate((el) => {
+        (el as HTMLInputElement).value = '#ff00ff';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.getByTestId('setup-text-color').evaluate((el) => {
+        (el as HTMLInputElement).value = '#00aaff';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.getByTestId('setup-font').selectOption('Oswald');
+      await page.getByTestId('setup-anim-type').selectOption('pop');
+      await page.getByTestId('setup-anim-target').selectOption('text');
+      await page.locator('[data-testid="setup-anim-duration"]').evaluate((el) => {
+        (el as HTMLInputElement).value = '400';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await page.getByTestId('setup-completion').selectOption('holdThenHide');
+      await page.getByTestId('setup-completion-seconds').fill('7');
+
       await page.getByTestId('setup-save').click();
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
       await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
+      const originalEnvelope = JSON.parse(clip) as {
+        presets: Array<{ createdAt: string; updatedAt: string }>;
+      };
+      const originalCreatedAt = originalEnvelope.presets[0]!.createdAt;
+      const originalUpdatedAt = originalEnvelope.presets[0]!.updatedAt;
 
       // Wipe storage entirely — the import must restore from the pasted
       // envelope alone, not from anything left over in memory or storage.
@@ -680,9 +737,33 @@ test.describe('dock Setup + Presets views', () => {
       await expect(row).toContainText('automatic');
 
       await row.getByTestId('preset-load').click();
-      await expect(page.getByTestId('setup-template')).toHaveValue('Left: {count}');
+      await expect(page.getByTestId('setup-title')).toHaveValue('Round Trip');
+      await expect(page.getByTestId('setup-description')).toHaveValue('Keeps settings');
       await expect(page.getByTestId('setup-start')).toHaveValue('2');
       await expect(page.getByTestId('setup-finish')).toHaveValue('22');
+      await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+      await expect(page.getByTestId('setup-interval')).toHaveValue('2');
+      await expect(page.getByTestId('setup-template')).toHaveValue('Left: {count}');
+      await expect(page.getByTestId('setup-number-size')).toHaveValue('120');
+      await expect(page.getByTestId('setup-number-color')).toHaveValue('#ff00ff');
+      await expect(page.getByTestId('setup-text-color')).toHaveValue('#00aaff');
+      await expect(page.getByTestId('setup-font')).toHaveValue('Oswald');
+      await expect(page.getByTestId('setup-anim-type')).toHaveValue('pop');
+      await expect(page.getByTestId('setup-anim-target')).toHaveValue('text');
+      await expect(page.getByTestId('setup-anim-duration')).toHaveValue('400');
+      await expect(page.getByTestId('setup-completion')).toHaveValue('holdThenHide');
+      await expect(page.getByTestId('setup-completion-seconds')).toHaveValue('7');
+
+      const stored = await page.evaluate(
+        () =>
+          JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as Array<{
+            createdAt: string;
+            updatedAt: string;
+          }>,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.createdAt).toBe(originalCreatedAt);
+      expect(stored[0]!.updatedAt).toBe(originalUpdatedAt);
     } finally {
       await mock.close();
     }
@@ -780,6 +861,80 @@ test.describe('dock Setup + Presets views', () => {
       await expect(rows).toHaveCount(2);
       const titles = (await rows.locator('.list-row-title').allTextContents()).sort();
       expect(titles).toEqual(['Collide', 'Collide (imported)']);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('repeated re-imports of the same title get sequentially numbered suffixes; no two presets ever share a title', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Collide' });
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+      const clip = await page.evaluate(() => navigator.clipboard.readText());
+
+      // First reimport collides with the original "Collide" -> "(imported)".
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+
+      // Second reimport (storage still never wiped) collides with BOTH
+      // "Collide" and "Collide (imported)" -> must land on "(imported 2)",
+      // not clobber/duplicate either existing title.
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+
+      const rows = page.getByTestId('preset-row');
+      await expect(rows).toHaveCount(3);
+      const titles = (await rows.locator('.list-row-title').allTextContents()).sort();
+      // .sort() applied to BOTH sides identically — plain lexicographic sort
+      // puts ")" before " 2)" (0x29 vs 0x20), so comparing against a
+      // manually-ordered literal array would fail even when every title is
+      // exactly right; sorting the expectation the same way sidesteps that.
+      expect(titles).toEqual(['Collide', 'Collide (imported)', 'Collide (imported 2)'].sort());
+      expect(new Set(titles).size).toBe(titles.length); // every title unique
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('two presets sharing a title inside one envelope land with distinct titles', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
+
+      const envelope = {
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: new Date().toISOString(),
+        presets: [
+          rawPreset({ id: 'dup-a', title: 'Dup', startValue: 0, finishValue: 10 }),
+          rawPreset({ id: 'dup-b', title: 'Dup', startValue: 0, finishValue: 20 }),
+        ],
+      };
+
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(JSON.stringify(envelope));
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+      await expect(page.getByTestId('import-confirm')).toContainText('2 presets imported');
+      const titles = (await page.getByTestId('preset-row').locator('.list-row-title').allTextContents()).sort();
+      expect(titles).toEqual(['Dup', 'Dup (imported)']);
     } finally {
       await mock.close();
     }

@@ -58,6 +58,8 @@ interface PresetsUiState {
   deleteConfirmId: string | null;
   replaceConfirm: ReplaceConfirmState | null;
   exportFeedback: string | null;
+  exportError: string | null;
+  exportFallbackText: string | null;
   importOpen: boolean;
   importText: string;
   importError: string | null;
@@ -91,6 +93,24 @@ function isPresetExportEnvelope(x: unknown): x is PresetExportEnvelope {
 
 const EXPORT_CONFIRM_MS = 2000;
 const IMPORT_CONFIRM_MS = 2000;
+
+// Idempotent, batch-aware uniqueness: try the base title, then " (imported)",
+// then " (imported 2)", " (imported 3)", ... until `seen` no longer has a
+// match. Callers add each RESULT to `seen` before computing the next one, so
+// this handles both "collides with something already on disk" and "collides
+// with a title already assigned earlier in this same import batch" the same
+// way — repeated re-imports of the same export (without wiping storage in
+// between) never produce two presets sharing a title.
+function uniqueTitle(base: string, seen: ReadonlySet<string>): string {
+  if (!seen.has(base)) return base;
+  let candidate = `${base} (imported)`;
+  let n = 2;
+  while (seen.has(candidate)) {
+    candidate = `${base} (imported ${n})`;
+    n += 1;
+  }
+  return candidate;
+}
 
 interface FocusSnapshot {
   testid: string;
@@ -157,6 +177,8 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     deleteConfirmId: null,
     replaceConfirm: null,
     exportFeedback: null,
+    exportError: null,
+    exportFallbackText: null,
     importOpen: false,
     importText: '',
     importError: null,
@@ -242,6 +264,8 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
   // re-fetches presets fresh from storage, same reasoning as onDuplicate/
   // onDelete above: this view's own `ui.presets` cache may be stale.
   async function onExport(): Promise<void> {
+    ui.exportError = null;
+    ui.exportFallbackText = null;
     const outcome = await opts.storage.loadPresets();
     const presets = outcome.value ?? [];
     const envelope: PresetExportEnvelope = {
@@ -251,11 +275,20 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       exportedAt: new Date().toISOString(),
       presets,
     };
+    const json = JSON.stringify(envelope);
     try {
-      await navigator.clipboard.writeText(JSON.stringify(envelope));
+      await navigator.clipboard.writeText(json);
     } catch {
-      // Clipboard permission denied/unavailable — nothing else to do here
-      // (mirrors diagnostics.ts's copyText()).
+      // Clipboard permission denied/unavailable. Unlike diagnostics.ts's
+      // copyText() (whose readonly <input> the operator can already
+      // select+copy manually on failure), this envelope has no other visible
+      // home yet — it only exists as this in-memory string — so silently
+      // doing nothing here would strand it. Surface a visible error AND a
+      // readonly fallback textarea with the full JSON so a manual
+      // select-all-copy still works.
+      ui.exportError = 'Copy failed — select the text below and copy it manually';
+      ui.exportFallbackText = json;
+      render();
       return;
     }
     if (exportConfirmTimer !== null) clearTimeout(exportConfirmTimer);
@@ -309,8 +342,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
     const imported: Preset[] = [];
     for (const candidate of loadResult.value) {
-      let title = candidate.title;
-      if (titles.has(title)) title = `${title} (imported)`;
+      const title = uniqueTitle(candidate.title, titles);
       titles.add(title);
       imported.push({ ...candidate, id: crypto.randomUUID(), title });
     }
@@ -506,6 +538,20 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
     if (ui.exportFeedback) {
       root.appendChild(el('div', { 'data-testid': 'export-confirm', class: 'copy-confirm' }, ui.exportFeedback));
+    }
+    if (ui.exportError) {
+      root.appendChild(el('div', { 'data-testid': 'export-error', class: 'field-error' }, ui.exportError));
+    }
+    if (ui.exportFallbackText !== null) {
+      const fallbackBox = el('div', { class: 'import-panel' });
+      const fallback = el('textarea', {
+        'data-testid': 'export-fallback',
+        readonly: 'readonly',
+        rows: '6',
+      }) as HTMLTextAreaElement;
+      fallback.value = ui.exportFallbackText;
+      fallbackBox.appendChild(fallback);
+      root.appendChild(fallbackBox);
     }
     if (ui.importOpen) root.appendChild(renderImportPanel());
 
