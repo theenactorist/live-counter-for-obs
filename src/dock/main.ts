@@ -147,8 +147,20 @@ function main(): void {
   // Task 2.8: banner-ws deep-links to the Diagnostics tab — a connectivity
   // problem's actionable fix (port/password, the checklist) lives there now
   // that Task 2.5's always-visible minimal settings row has been absorbed
-  // into it.
+  // into it. `banner-ws` is a plain <div> (see dock.html) rather than a real
+  // <button> — kept as-is to avoid re-deriving its existing banner styling
+  // from button defaults — so it needs the standard "make a div behave like
+  // a button" trio for keyboard users (review fix, Minor 4): role="button",
+  // a tab stop, and an Enter/Space handler alongside the click one.
+  shell.bannerWs.setAttribute('role', 'button');
+  shell.bannerWs.setAttribute('tabindex', '0');
   shell.bannerWs.addEventListener('click', () => tabs.activate('diagnostics'));
+  shell.bannerWs.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault(); // Space must not also scroll the page.
+      tabs.activate('diagnostics');
+    }
+  });
   shell.bannerWs.style.cursor = 'pointer';
 
   const params = new URLSearchParams(location.search);

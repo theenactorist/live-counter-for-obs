@@ -343,6 +343,16 @@
       .diag-row[data-state='fail'] .diag-row-text {
         color: #ff9a9a;
       }
+      /* Deliberately distinct from 'ok' green — a placeholder that hasn't
+         actually been verified (e.g. diag-row-hotkeys) must never read as
+         a success state. Matches .status-chip[data-state='unknown']'s own
+         neutral gray. */
+      .diag-row[data-state='neutral'] {
+        border-color: #444;
+      }
+      .diag-row[data-state='neutral'] .diag-row-text {
+        color: #c0c0c0;
+      }
       .diag-url-row {
         display: flex;
         flex-wrap: wrap;

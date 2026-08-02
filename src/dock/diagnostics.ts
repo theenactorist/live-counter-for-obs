@@ -13,7 +13,11 @@
 // interrupted by the timer. This is simpler than live.ts's capture/restore
 // dance because there is no reason here to ever tear down the static
 // structure at all (per the brief: "targeted DOM updates only ... no full-
-// container rebuild from timers").
+// container rebuild from timers"). The one exception is the event log:
+// `updateLog()` skips its own rebuild entirely (leaving the existing DOM,
+// and therefore any operator text selection inside it, untouched) whenever
+// the current document selection intersects `diag-log` — see `updateLog()`
+// below.
 import type { ObsWsClient } from '../protocol/obsws-client.js';
 import type { Bus, BusMessage } from '../protocol/bus.js';
 import type { DockStorage, DockSettings } from '../protocol/persistence.js';
@@ -39,7 +43,7 @@ export interface MountDiagnosticsViewOptions {
   refreshMs?: number;
 }
 
-type RowState = 'ok' | 'warn' | 'fail';
+type RowState = 'ok' | 'warn' | 'fail' | 'neutral';
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_OVERLAY_SILENCE_MS = 10_000;
@@ -54,7 +58,13 @@ const WS_WRONG_PASSWORD_TEXT =
 const OVERLAY_SEEN_TEXT = 'Overlay connected';
 const OVERLAY_NOT_SEEN_TEXT =
   'Overlay not seen — add the overlay Browser Source (copy its URL below) or check that its scene is loaded';
-const HOTKEYS_TEXT = 'Hotkey bridge — configured in Phase 3';
+// Review fix (Important 1): NEVER "ok" — there is no hotkey bridge to check
+// yet, so claiming success would be misleading. `HOTKEYS_COPY_TEXT` is the
+// deliberately terser line "Copy diagnostics" emits (brief: exactly
+// "Hotkeys: not built yet (Phase 3)"), distinct from the row's own longer
+// display text.
+const HOTKEYS_TEXT = 'Hotkey bridge — not built yet (coming in Phase 3)';
+const HOTKEYS_COPY_TEXT = 'Hotkeys: not built yet (Phase 3)';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
   'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
@@ -183,9 +193,12 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const checklist = el('div', { 'data-testid': 'diagnostics-checklist', class: 'diag-checklist' });
   checklist.append(rowStorage.row, rowWs.row, rowOverlay.row, rowHotkeys.row);
   root.appendChild(checklist);
-  // Static placeholder — Phase 3 gives this row a real check; it never
-  // transitions to warn/fail on its own, per the brief.
-  setRow(rowHotkeys, 'ok', HOTKEYS_TEXT);
+  // Static placeholder — Phase 3 gives this row a real check. Deliberately
+  // 'neutral', never 'ok' (review fix, Important 1): nothing has actually
+  // been verified yet, so a green "ok" would misrepresent a bridge that
+  // doesn't exist. Set once here and excluded from both updateChecklist()
+  // and the periodic poll — it never transitions on its own.
+  setRow(rowHotkeys, 'neutral', HOTKEYS_TEXT);
 
   // --- Settings (moved here from Task 2.5's always-visible minimal row) ----
   root.appendChild(el('div', { class: 'diag-section-title' }, 'Settings'));
@@ -300,7 +313,23 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const copyLogBtn = button('diag-copy-log', 'Copy diagnostics');
   root.appendChild(copyLogBtn);
 
+  // Review fix (Minor 5): a text selection the operator made inside the log
+  // (to copy a specific line, say) must survive the next poll tick instead
+  // of being silently destroyed by a `textContent = ''` rebuild mid-
+  // selection. `document.getSelection()`'s anchor node is the one reliable
+  // signal available without tracking selection state ourselves — if it
+  // sits inside `logEl`, skip the rebuild entirely this tick; the next
+  // tick (or the next explicit refresh(), e.g. after the selection is
+  // cleared) picks up whatever changed in the meantime.
+  function selectionIntersectsLog(): boolean {
+    const sel = document.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const anchorNode = sel.anchorNode;
+    return anchorNode !== null && logEl.contains(anchorNode);
+  }
+
   function updateLog(): void {
+    if (selectionIntersectsLog()) return;
     const lines = opts.storage.readLog().slice(-LOG_TAIL).reverse(); // newest-first
     logEl.textContent = '';
     for (const line of lines) {
@@ -313,9 +342,14 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       ['Storage', rowStorage],
       ['OBS WebSocket', rowWs],
       ['Overlay', rowOverlay],
-      ['Hotkeys', rowHotkeys],
     ];
-    const checklistText = rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`).join('\n');
+    const checklistText = [
+      ...rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`),
+      // Deliberately NOT the generic "label: state — text" shape (review
+      // fix, Important 1) — Hotkeys must never read "ok", and the brief
+      // locks its exact copy-diagnostics line.
+      HOTKEYS_COPY_TEXT,
+    ].join('\n');
     const lines = opts.storage.readLog().slice(-LOG_TAIL).reverse();
     return [
       `Live Counter diagnostics — v${VERSION}`,

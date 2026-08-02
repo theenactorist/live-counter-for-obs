@@ -128,14 +128,23 @@ test.describe('Diagnostics view', () => {
     }
   });
 
-  test('hotkeys row renders neutrally and never fails', async ({ page }) => {
+  test('hotkeys row renders neutrally (never ok/warn/fail)', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
       await page.getByTestId('tab-diagnostics').click();
       const row = page.getByTestId('diag-row-hotkeys');
-      await expect(row).toHaveAttribute('data-state', 'ok');
+      // Review fix (Important 1): must be its own distinct 'neutral' state,
+      // never 'ok' — nothing has actually been verified, so a green "ok"
+      // would misrepresent a bridge that doesn't exist yet.
+      await expect(row).toHaveAttribute('data-state', 'neutral');
+      await expect(row).toContainText('not built yet');
       await expect(row).toContainText('Phase 3');
+
+      // Distinct gray styling, not the 'ok' row's green.
+      const color = await row.locator('.diag-row-text').evaluate((el) => getComputedStyle(el).color);
+      expect(color).toBe('rgb(192, 192, 192)'); // #c0c0c0
+      expect(color).not.toBe('rgb(123, 228, 149)'); // #7be495, the 'ok' color
     } finally {
       await mock.close();
     }
@@ -264,6 +273,53 @@ test.describe('Diagnostics view', () => {
     }
   });
 
+  test('event log: an operator selection inside the log survives the periodic poll (no destructive rebuild)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // Shrinks the poll interval so several ticks land well within the
+      // test's own timeout — proving this isn't just "got lucky between
+      // two rebuilds" but genuinely never rebuilds while selected.
+      await openDock(page, { port: mock.port, diagRefreshMs: 100 }); // devhook on
+      await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+      await page.evaluate(() => {
+        const lc = (
+          window as unknown as { __lc: { controller: { dispatch: (c: { type: string; nonce: string }) => unknown } } }
+        ).__lc;
+        const nonce = crypto.randomUUID();
+        lc.controller.dispatch({ type: 'increment', nonce });
+        lc.controller.dispatch({ type: 'increment', nonce }); // duplicate -> a real log line to select
+      });
+
+      await page.getByTestId('tab-diagnostics').click();
+      const firstLine = page.getByTestId('diag-log').locator('.diag-log-line').first();
+      await expect(firstLine).toBeVisible();
+      const lineHandle = await firstLine.elementHandle();
+      expect(lineHandle).not.toBeNull();
+
+      await page.evaluate((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el as Node);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }, lineHandle);
+
+      // Several 100ms poll ticks pass — without the selection guard, a
+      // `textContent = ''` rebuild would have detached this exact DOM node
+      // (and destroyed the selection) many times over by now. Generous
+      // margin over the 100ms tick to stay robust under CPU contention from
+      // parallel Playwright workers.
+      await page.waitForTimeout(900);
+
+      const stillAttached = await lineHandle!.evaluate((el) => document.contains(el));
+      expect(stillAttached).toBe(true);
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('Copy diagnostics puts version + checklist states + recent log on the clipboard', async ({ page, context }) => {
     const mock = await startMockObs();
     try {
@@ -280,8 +336,90 @@ test.describe('Diagnostics view', () => {
       expect(clipboardText).toContain('OBS WebSocket: ok');
       expect(clipboardText).toContain('Storage: ok');
       expect(clipboardText).toContain('Event log');
+
+      // Review fix (Important 1): the Hotkeys line has its own fixed
+      // wording and must never claim "ok" anywhere in the copied text.
+      expect(clipboardText).toContain('Hotkeys: not built yet (Phase 3)');
+      expect(clipboardText).not.toContain('Hotkeys: ok');
     } finally {
       await mock.close();
     }
+  });
+
+  test('overlay URL generator: a password with reserved query characters (&, =, #) round-trips through the real overlay page', async ({
+    page,
+    context,
+  }) => {
+    const trickyPassword = 'a&b=c#d';
+    const mock = await startMockObs({ password: trickyPassword });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      // Fill only — do NOT click Save (that would reconnect the DOCK
+      // itself; this test is about what the GENERATED overlay URL carries,
+      // read directly off the live preview).
+      await page.getByTestId('settings-password').fill(trickyPassword);
+
+      const urlValue = await page.getByTestId('diag-overlay-url').inputValue();
+
+      const overlayPage = await context.newPage();
+      try {
+        await overlayPage.goto(urlValue);
+        // The overlay's own `?pw=` parsing (src/overlay/main.ts) hands
+        // ObsWsClient whatever it extracted. If that extraction dropped or
+        // mangled any of `&`/`=`/`#`, the mock's password check would
+        // reject the identify and the overlay would never send 'hello'.
+        await expect
+          .poll(() =>
+            mock.broadcasts.some((b) => {
+              const d = b.eventData as { kind?: string; source?: string } | undefined;
+              return d?.kind === 'hello' && d?.source === 'overlay';
+            }),
+          )
+          .toBe(true);
+      } finally {
+        await overlayPage.close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('storage row: a failing localStorage.setItem shows fail state + text', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      // Patches Storage.prototype (covers window.localStorage, since
+      // localStorage is an instance of Storage) BEFORE any page script
+      // runs, so DockStorage's own writes and the diagnostics probe both
+      // see a consistently throwing store for the whole test.
+      await page.addInitScript(() => {
+        Storage.prototype.setItem = () => {
+          throw new Error('quota exceeded (test)');
+        };
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      const row = page.getByTestId('diag-row-storage');
+      await expect(row).toHaveAttribute('data-state', 'fail');
+      await expect(row).toContainText('write failed');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('banner-ws is keyboard-accessible: focus + Enter deep-links to the Diagnostics tab', async ({ page }) => {
+    // Nothing listens on this port — banner-ws shows within its 3s grace window.
+    await openDock(page, { port: 39444, devhook: false });
+    const banner = page.getByTestId('banner-ws');
+    await expect(banner).toBeVisible({ timeout: 5000 });
+    await expect(banner).toHaveAttribute('role', 'button');
+    await expect(banner).toHaveAttribute('tabindex', '0');
+
+    await banner.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(page.getByTestId('pane-diagnostics')).toBeVisible();
+    await expect(page.getByTestId('tab-diagnostics')).toHaveClass(/active/);
   });
 });
