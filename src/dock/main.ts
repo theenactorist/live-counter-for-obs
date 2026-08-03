@@ -220,7 +220,7 @@ function main(): void {
     showBannerWs('Local storage write failed — settings and session may not be saved. See console for details.');
   }
 
-  function boot(wsPort: number, wsPassword: string): void {
+  function boot(wsPort: number, wsPassword: string, bootOpts: { justReset?: boolean } = {}): void {
     if (liveHandle) {
       liveHandle.destroy();
       liveHandle = null;
@@ -309,6 +309,19 @@ function main(): void {
       storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
       boot(port, password);
     };
+    // Task 2.14 — diagnostics.ts's guarded "Reset everything" action already
+    // cleared every `lc.*` localStorage key + the persistent-data mirror by
+    // the time this fires; re-reading settings here (rather than hardcoding
+    // a default) is what actually proves the reboot lands on first-run state
+    // — `bootStorage.loadSettings()` now finds nothing on disk and returns
+    // its own built-in defaults, the same path a genuinely fresh install
+    // takes. Never `location.reload()` (brief): Playwright cannot drive a
+    // real page navigation from inside the page that is reloading, and a
+    // reload would also discard the one-time `justReset` flag below.
+    const onResetAll = (): void => {
+      const freshSettings = bootStorage.loadSettings();
+      boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
+    };
     const connectSettings = { wsPort, wsPassword, schemaVersion: 1 as const };
 
     // exactOptionalPropertyTypes forbids `{ overlaySilenceMs: undefined }` —
@@ -350,6 +363,7 @@ function main(): void {
     const diagnosticsOpts = {
       ...(overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {}),
       ...(diagRefreshMsOverride !== undefined ? { refreshMs: diagRefreshMsOverride } : {}),
+      ...(bootOpts.justReset ? { justReset: true } : {}),
     };
     diagnosticsHandle = mountDiagnosticsView(shell.panes.diagnostics, {
       client,
@@ -357,6 +371,7 @@ function main(): void {
       storage,
       initialSettings: connectSettings,
       onSaveSettings,
+      onResetAll,
       ...diagnosticsOpts,
     });
 

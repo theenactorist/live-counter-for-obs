@@ -1,12 +1,29 @@
-// Setup view (Task 2.6) — the form that configures a session before it
-// starts: range/mode/interval, display text (template), style basics,
-// animation, completion, plus an embedded preview with a local-only Test
-// animation. Also owns creating/updating Preset records.
+// Setup view (Task 2.6; redesigned Task 2.14 — operator feedback) — the form
+// that configures a session before it starts: range/mode/interval, display
+// text (label), style basics, animation, completion, plus an always-visible
+// embedded WYSIWYG preview with a local-only Test animation. Also owns
+// creating/updating Preset records.
+//
+// Task 2.14 layout (PRD §9): preview (top, always visible) -> Counter group
+// (Start/Finish one row two columns, mode, interval) -> Layout gallery
+// (counter-perspective names, PRD §8.8) -> Label group (text, size, colour)
+// -> Counter style group (size, colour, typeface) -> Animation -> Completion
+// -> Title + Save/Start. The preview calls the SAME
+// ../../shared/overlay-presentation.js functions the real overlay renderer
+// does, against its own node set created once at mount, so the two can never
+// structurally drift (AC 25). Description has been removed entirely
+// (operator: "no use for description") — `Preset.description` stays in the
+// type/schema for compatibility (export/import still carries an older
+// preset's description through untouched) but this view never reads or
+// writes it beyond always saving `null`.
 //
 // Rendering strategy mirrors live.ts: render() rebuilds the mounted
 // container's entire subtree from local UI state on every change, capturing
 // and restoring focus (+ text selection) around the rebuild so an operator
-// mid-keystroke in any field never gets silently kicked out.
+// mid-keystroke in any field never gets silently kicked out. The preview's
+// OWN nodes are the one exception to "rebuilt every time" — they are
+// detached and re-appended, never recreated, so `applyPresentation()` is
+// always mutating the same elements across renders.
 //
 // Style/template re-derivation (the Task 2.4 gap closed in Task 2.6): this
 // view does not itself deal with session recovery — that is main.ts's job
@@ -25,7 +42,7 @@
 // session, same as `SessionController.startSession()`'s own documented
 // behavior (it unconditionally creates a fresh session).
 //
-// Escaping discipline: template text, titles, and descriptions are operator
+// Escaping discipline: template (label) text and titles are operator
 // content — every dynamic string this view renders goes through
 // `textContent`/`.value`, never `innerHTML`.
 import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout } from '../../engine/types.js';
@@ -35,6 +52,7 @@ import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 import { inlineContent, substituteLabel } from '../../shared/template-content.js';
+import { createPresentationNodes, applyPresentation, type PresentationNodes } from '../../shared/overlay-presentation.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -62,13 +80,24 @@ const FONTS = ['Inter', 'Oswald'] as const;
 // Task 2.11 — the six-layout gallery (operator feedback, PRD §8.8). Order
 // here is the order the thumbnails render in.
 const LAYOUTS: readonly OverlayLayout[] = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+// Task 2.14 (operator feedback 2026-08-02: "text after / text below are a bit
+// confusing — let's use counter as the keyword, so counter above puts the
+// number on top"). Stored enum values are UNCHANGED — display-only, per PRD
+// §8.8's table (named from the counter's own point of view, not the
+// label's):
+//   numberOnly  -> Counter only     (the number alone)
+//   textBefore  -> Counter right    (label, then counter — counter sits right of the label)
+//   textAfter   -> Counter left     (counter, then label — counter sits left of the label)
+//   textAbove   -> Counter below    (label on top, counter beneath)
+//   textBelow   -> Counter above    (counter on top, label beneath)
+//   textBehind  -> Counter in front (counter in front of an oversized ghost label)
 const LAYOUT_LABELS: Record<OverlayLayout, string> = {
-  numberOnly: 'Number only',
-  textBefore: 'Text before',
-  textAfter: 'Text after',
-  textAbove: 'Text above',
-  textBelow: 'Text below',
-  textBehind: 'Text behind',
+  numberOnly: 'Counter only',
+  textBefore: 'Counter right',
+  textAfter: 'Counter left',
+  textAbove: 'Counter below',
+  textBelow: 'Counter above',
+  textBehind: 'Counter in front',
 };
 const DEFAULT_COMPLETION_SECONDS = 5;
 
@@ -81,9 +110,12 @@ const DEFAULT_COMPLETION_SECONDS = 5;
 const MIN_SIZE_PX = 8;
 const MAX_SIZE_PX = 512;
 const DEFAULT_NUMBER_SIZE_PX = 96;
-// Not operator-editable yet (buildStyle() hardcodes it), but validated on the
-// same path so the gate is already correct when Phase 3 exposes the field.
-const TEXT_SIZE_PX = 24;
+// Task 2.14 (PRD §9 item 4: "Label — its own group: label text, size,
+// colour") — label size is now operator-editable, gated by the exact same
+// MIN/MAX rule as the counter's own number size. 24 matches what was
+// previously a hardcoded constant, so a preset saved before this landed
+// (whose textSizePx is already 24) round-trips with no visible change.
+const DEFAULT_TEXT_SIZE_PX = 24;
 
 // Which variant of the `setup-conflict` box to render, or null for none.
 //  - 'stale':   the stored preset changed since editing began (Task 2.6's
@@ -119,7 +151,6 @@ interface EditingState {
 
 interface SetupUiState {
   title: string;
-  description: string;
   startValue: string;
   finishValue: string;
   mode: Mode;
@@ -134,6 +165,9 @@ interface SetupUiState {
   // invisible counter (code-quality:P2-Q-06).
   numberSizePx: string;
   numberColor: string;
+  // A RAW string, same reasoning as numberSizePx above (Task 2.14 — label
+  // size is now operator-editable, per PRD §9's Label group).
+  textSizePx: string;
   textColor: string;
   fontFamily: string;
   animType: AnimationConfig['type'];
@@ -215,7 +249,6 @@ function parseIntStrict(raw: string): number | null {
 function defaultUiState(): SetupUiState {
   return {
     title: '',
-    description: '',
     startValue: '0',
     finishValue: '10',
     mode: 'manual',
@@ -228,6 +261,7 @@ function defaultUiState(): SetupUiState {
     layout: 'textBefore',
     numberSizePx: String(DEFAULT_NUMBER_SIZE_PX),
     numberColor: '#ffffff',
+    textSizePx: String(DEFAULT_TEXT_SIZE_PX),
     textColor: '#cccccc',
     fontFamily: 'Inter',
     animType: 'none',
@@ -252,14 +286,77 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // and Setup has no onActivate refresh hook to heal it.
   let destroyed = false;
 
+  // Task 2.14 — the embedded WYSIWYG preview's own node set, created ONCE at
+  // mount via the SAME ../../shared/overlay-presentation.js the real overlay
+  // renderer consumes (AC 25: preview and stream can never structurally
+  // drift). `render()` below rebuilds the surrounding FORM's entire subtree
+  // on every keystroke (unchanged strategy), but these specific nodes are
+  // never recreated — only detached and re-appended into the fresh tree —
+  // so `applyPresentation()` is always mutating the SAME elements Test-
+  // animation's `.animate()` call (and any test asserting on them) already
+  // has a handle to.
+  const previewNodes: PresentationNodes = createPresentationNodes();
+  previewNodes.contentRoot.dataset.testid = 'setup-preview';
+  previewNodes.contentRoot.classList.add('setup-preview');
+  previewNodes.numberEl.dataset.testid = 'setup-preview-number';
+
+  // Assigns 'setup-preview-label'/'setup-preview-label-after' to whichever
+  // node is actually carrying the label for the CURRENT layout — mirrors the
+  // pre-refactor Setup preview's own testid contract exactly (before/after
+  // inline layouts both key off before/afterEl; textAbove/textBelow always
+  // key off beforeEl; textBehind keys off behindEl, with the
+  // '.setup-preview-ghost' class marking it) — so existing specs asserting
+  // on those testids/class keep passing unchanged. `numberOnly` clears every
+  // label testid (no label node was ever appended for it, pre-refactor).
+  function updatePreviewTestids(layout: OverlayLayout): void {
+    const { beforeEl, afterEl, behindEl } = previewNodes;
+    delete beforeEl.dataset.testid;
+    delete afterEl.dataset.testid;
+    delete behindEl.dataset.testid;
+    behindEl.classList.remove('setup-preview-ghost');
+
+    switch (layout) {
+      case 'numberOnly':
+        break;
+      case 'textBefore':
+      case 'textAfter':
+        // Conditional on actual content, matching the original's `if
+        // (before)`/`if (after)` gating: a token-less label on the layout's
+        // EMPTY side produces no node at all, not an empty-but-present one.
+        if (beforeEl.textContent) beforeEl.dataset.testid = 'setup-preview-label';
+        if (afterEl.textContent) afterEl.dataset.testid = 'setup-preview-label-after';
+        break;
+      case 'textAbove':
+      case 'textBelow':
+        // Unconditional — the original always appended this labelSpan, even
+        // for an empty/null template.
+        beforeEl.dataset.testid = 'setup-preview-label';
+        break;
+      case 'textBehind':
+        behindEl.dataset.testid = 'setup-preview-label';
+        behindEl.classList.add('setup-preview-ghost');
+        break;
+    }
+  }
+
   function numberSizeValue(): number | null {
     const n = parseIntStrict(ui.numberSizePx);
     if (n === null || n < MIN_SIZE_PX || n > MAX_SIZE_PX) return null;
     return n;
   }
 
+  // Task 2.14 — label size, gated identically to the counter's own
+  // number-size field (same MIN/MAX bounds, same "clear/zero/negative is
+  // invalid" reasoning as code-quality:P2-Q-06 originally established for
+  // numberSizeValue above).
+  function textSizeValue(): number | null {
+    const n = parseIntStrict(ui.textSizePx);
+    if (n === null || n < MIN_SIZE_PX || n > MAX_SIZE_PX) return null;
+    return n;
+  }
+
   function styleValid(): boolean {
-    return numberSizeValue() !== null && TEXT_SIZE_PX >= MIN_SIZE_PX && TEXT_SIZE_PX <= MAX_SIZE_PX;
+    return numberSizeValue() !== null && textSizeValue() !== null;
   }
 
   function buildStyle(): StyleConfig {
@@ -269,7 +366,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // Non-null by construction: every caller is gated behind
       // canSave()/canStart(), both of which require styleValid().
       numberSizePx: numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX,
-      textSizePx: TEXT_SIZE_PX,
+      textSizePx: textSizeValue() ?? DEFAULT_TEXT_SIZE_PX,
       numberColor: ui.numberColor,
       textColor: ui.textColor,
       alignH: 'center',
@@ -404,7 +501,12 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       schemaVersion: PRESET_SCHEMA_VERSION,
       id: ui.editing ? ui.editing.id : crypto.randomUUID(),
       title: ui.title.trim(),
-      description: ui.description.trim().length > 0 ? ui.description.trim() : null,
+      // Task 2.14 (operator: "no use for description") — the field stays in
+      // the stored schema for compatibility (export/import still carries an
+      // OLDER preset's description through untouched — presets.ts never
+      // touches this field at all), but Setup no longer has any UI for it,
+      // so every preset this view saves (new or edited) always writes null.
+      description: null,
       startValue,
       finishValue,
       mode: ui.mode,
@@ -759,80 +861,48 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // rebuilds its subtree on every render() call (unlike the overlay's
   // stable-node discipline), so there is no animation-continuity concern in
   // rebuilding those children every keystroke.
+  // Task 2.14 (PRD §9 item 1 / AC 25) — a true WYSIWYG preview: this calls
+  // the EXACT SAME `applyPresentation` the real overlay renderer calls,
+  // against `previewNodes` (created once at mount, above), so the operator
+  // can never preview something the audience wouldn't actually see. Always
+  // visible, at the TOP of the form (per the PRD §9 order) — `render()`
+  // below appends the returned wrap wherever that order says, but this
+  // function's own job is just building it fresh each call from `nodes`'
+  // already-mutated state.
   function renderPreviewBlock(): HTMLElement {
     const wrap = el('div', { class: 'setup-preview-wrap' });
-    const preview = el('div', { 'data-testid': 'setup-preview', class: 'setup-preview' });
-    const numberSizePx = numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX;
-    preview.style.fontFamily = ui.fontFamily;
-    preview.style.fontSize = `${numberSizePx}px`;
 
-    const stacked = ui.layout === 'textAbove' || ui.layout === 'textBelow';
-    const behind = ui.layout === 'textBehind';
-    preview.classList.add(stacked ? 'setup-preview-column' : 'setup-preview-row');
-    if (behind) preview.classList.add('setup-preview-relative');
-
-    const valueText = String(previewValue());
     const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
-    const numberSpan = el('span', { 'data-testid': 'setup-preview-number' }, valueText);
-    numberSpan.style.color = ui.numberColor;
-    if (behind) numberSpan.classList.add('setup-preview-number-front');
+    applyPresentation(previewNodes, { style: buildStyle(), template, value: String(previewValue()) });
+    updatePreviewTestids(ui.layout);
 
-    // Labels use `textColor` (not `numberColor`) — matching the real overlay
-    // renderer's applyStyle(), which colors beforeEl/afterEl from
-    // `s.textColor` while numberEl gets `s.numberColor`.
-    //
-    // Gate fix wave (L6): and they use TEXT_SIZE_PX, not the number's size.
-    // The preview root carries `fontSize: numberSizePx` so the NUMBER renders
-    // at its true size; every label used to inherit that, previewing a label
-    // roughly 4x larger relative to the number than the renderer's own
-    // `s.textSizePx` produces on stream — in the one UI PRD §8.8 names as how
-    // the operator picks a layout. (The textBehind ghost keeps its own
-    // explicit oversized font size, matching the renderer's ghost branch.)
-    function labelSpan(testid: string, text: string): HTMLSpanElement {
-      const span = el('span', { 'data-testid': testid }, text);
-      span.style.color = ui.textColor;
-      span.style.fontSize = `${TEXT_SIZE_PX}px`;
-      return span;
-    }
-
-    switch (ui.layout) {
-      case 'numberOnly':
-        preview.appendChild(numberSpan);
-        break;
-      case 'textAfter': {
-        const { before, after } = inlineContent('textAfter', template);
-        if (before) preview.appendChild(labelSpan('setup-preview-label', before));
-        preview.appendChild(numberSpan);
-        if (after) preview.appendChild(labelSpan('setup-preview-label-after', after));
-        break;
-      }
-      case 'textBefore': {
-        const { before, after } = inlineContent('textBefore', template);
-        if (before) preview.appendChild(labelSpan('setup-preview-label', before));
-        preview.appendChild(numberSpan);
-        if (after) preview.appendChild(labelSpan('setup-preview-label-after', after));
-        break;
-      }
-      case 'textAbove':
-        preview.append(labelSpan('setup-preview-label', substituteLabel(template, valueText)), numberSpan);
-        break;
-      case 'textBelow':
-        preview.append(numberSpan, labelSpan('setup-preview-label', substituteLabel(template, valueText)));
-        break;
-      case 'textBehind': {
-        const ghost = labelSpan('setup-preview-label', substituteLabel(template, valueText));
-        ghost.classList.add('setup-preview-ghost');
-        ghost.style.fontSize = `${numberSizePx * 2.4}px`;
-        preview.append(ghost, numberSpan);
-        break;
-      }
-    }
-    wrap.appendChild(preview);
+    wrap.appendChild(previewNodes.contentRoot);
 
     const testBtn = button('setup-test-anim', 'Test animation', { disabled: ui.animType === 'none' });
     testBtn.addEventListener('click', () => playTestAnimation());
     wrap.appendChild(testBtn);
     return wrap;
+  }
+
+  // Task 2.14 — a `<fieldset>`/`<legend>` group with a visible heading, per
+  // the brief ("Use <fieldset>/legend or equivalent grouping with visible
+  // headings"). `testid` lets specs assert a group exists as its own
+  // distinct, labelled section without depending on DOM nesting details.
+  function group(testid: string, legend: string, children: HTMLElement[]): HTMLElement {
+    const fieldset = el('fieldset', { 'data-testid': testid, class: 'setup-group' });
+    fieldset.appendChild(el('legend', { class: 'setup-group-legend' }, legend));
+    for (const child of children) fieldset.appendChild(child);
+    return fieldset;
+  }
+
+  // PRD §9 item 2 ("Start and Finish on one row, two columns") — a plain
+  // flex row holding two `formRow`s side by side; `.two-col-row`'s CSS gives
+  // each child `flex: 1 1 0%; min-width: 0` so both comfortably fit at the
+  // 300 px dock width.
+  function twoColRow(a: HTMLElement, b: HTMLElement): HTMLElement {
+    const row = el('div', { class: 'two-col-row' });
+    row.append(a, b);
+    return row;
   }
 
   function render(): void {
@@ -851,72 +921,63 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     if (ui.conflict !== null) root.appendChild(renderConflict(ui.conflict));
     if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
 
-    root.appendChild(
-      formRow(
-        'Title',
-        inputField('setup-title', ui.title, (v) => {
-          ui.title = v;
-        }),
+    // PRD §9 item 1 — the WYSIWYG preview is always visible, at the very
+    // top: "a preview to show the person setting up what the end result
+    // looks like before they get started" (operator feedback).
+    root.appendChild(renderPreviewBlock());
+
+    // PRD §9 item 2 — Counter: Start/Finish (one row, two columns), Mode,
+    // Interval (Automatic only).
+    const startField = formRow(
+      'Start value',
+      inputField(
+        'setup-start',
+        ui.startValue,
+        (v) => {
+          ui.startValue = v;
+        },
+        'number',
+        { min: '0', max: '999999', step: '1' },
       ),
     );
-    root.appendChild(
-      formRow(
-        'Description',
-        inputField('setup-description', ui.description, (v) => {
-          ui.description = v;
-        }),
+    const finishField = formRow(
+      'Finish value',
+      inputField(
+        'setup-finish',
+        ui.finishValue,
+        (v) => {
+          ui.finishValue = v;
+        },
+        'number',
+        { min: '0', max: '999999', step: '1' },
       ),
     );
-    root.appendChild(
-      formRow(
-        'Start value',
-        inputField(
-          'setup-start',
-          ui.startValue,
-          (v) => {
-            ui.startValue = v;
-          },
-          'number',
-          { min: '0', max: '999999', step: '1' },
-        ),
-      ),
-    );
-    root.appendChild(
-      formRow(
-        'Finish value',
-        inputField(
-          'setup-finish',
-          ui.finishValue,
-          (v) => {
-            ui.finishValue = v;
-          },
-          'number',
-          { min: '0', max: '999999', step: '1' },
-        ),
-      ),
-    );
-    root.appendChild(formRow('Mode', renderModeSelect()));
+    const counterChildren = [twoColRow(startField, finishField), formRow('Mode', renderModeSelect())];
     if (ui.mode === 'automatic') {
-      root.appendChild(formRow('Interval', renderIntervalSelect()));
+      counterChildren.push(formRow('Interval', renderIntervalSelect()));
     }
+    root.appendChild(group('setup-group-counter', 'Counter', counterChildren));
 
-    root.appendChild(renderLayoutGallery());
+    // PRD §9 item 3 — Layout: the six-thumbnail gallery, counter-perspective
+    // names (LAYOUT_LABELS above).
+    root.appendChild(group('setup-group-layout', 'Layout', [renderLayoutGallery()]));
 
-    root.appendChild(
+    // PRD §9 item 4 — Label: its own group (text, size, colour).
+    const labelChildren: HTMLElement[] = [
       formRow(
         'Label text',
         inputField('setup-template', ui.template, (v) => {
           ui.template = v;
         }),
       ),
-    );
+    ];
     // Fix-wave contract correction: no layout blocks Save/Start for a
     // missing `{count}` anymore — this is a neutral, never-blocking note
     // shown only when the operator's label happens to contain the token,
     // explaining that its PRESENCE (not requirement) is what decides
     // placement for the inline layouts.
     if (templateHasToken()) {
-      root.appendChild(
+      labelChildren.push(
         el(
           'div',
           { 'data-testid': 'setup-template-token-hint', class: 'field-hint' },
@@ -924,11 +985,45 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         ),
       );
     }
-    root.appendChild(el('div', { 'data-testid': 'setup-template-example', class: 'field-hint' }, previewText()));
-
-    root.appendChild(
+    labelChildren.push(el('div', { 'data-testid': 'setup-template-example', class: 'field-hint' }, previewText()));
+    labelChildren.push(
       formRow(
-        'Number size (px)',
+        'Label size (px)',
+        inputField(
+          'setup-text-size',
+          ui.textSizePx,
+          (v) => {
+            ui.textSizePx = v;
+          },
+          'number',
+          { min: String(MIN_SIZE_PX), max: String(MAX_SIZE_PX), step: '1' },
+        ),
+      ),
+    );
+    if (textSizeValue() === null) {
+      labelChildren.push(
+        el(
+          'div',
+          { 'data-testid': 'setup-text-size-error', class: 'field-error' },
+          `Enter a whole number between ${MIN_SIZE_PX} and ${MAX_SIZE_PX}`,
+        ),
+      );
+    }
+    labelChildren.push(
+      formRow(
+        'Label color',
+        colorField('setup-text-color', ui.textColor, (v) => {
+          ui.textColor = v;
+        }),
+      ),
+    );
+    root.appendChild(group('setup-group-label', 'Label', labelChildren));
+
+    // PRD §9 item 5 — Counter style: its own group (size, colour); typeface
+    // applies to both the counter and the label but sits here per the brief.
+    const counterStyleChildren: HTMLElement[] = [
+      formRow(
+        'Counter size (px)',
         inputField(
           'setup-number-size',
           ui.numberSizePx,
@@ -939,9 +1034,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           { min: String(MIN_SIZE_PX), max: String(MAX_SIZE_PX), step: '1' },
         ),
       ),
-    );
+    ];
     if (numberSizeValue() === null) {
-      root.appendChild(
+      counterStyleChildren.push(
         el(
           'div',
           { 'data-testid': 'setup-number-size-error', class: 'field-error' },
@@ -949,31 +1044,31 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         ),
       );
     }
-    root.appendChild(
+    counterStyleChildren.push(
       formRow(
-        'Number color',
+        'Counter color',
         colorField('setup-number-color', ui.numberColor, (v) => {
           ui.numberColor = v;
         }),
       ),
     );
+    counterStyleChildren.push(formRow('Typeface', renderFontSelect()));
+    root.appendChild(group('setup-group-counter-style', 'Counter style', counterStyleChildren));
+
+    // PRD §9 item 6 — Animation: type, target, duration, Test animation
+    // (Test animation itself lives inside the preview block above).
     root.appendChild(
-      formRow(
-        'Text color',
-        colorField('setup-text-color', ui.textColor, (v) => {
-          ui.textColor = v;
-        }),
-      ),
+      group('setup-group-animation', 'Animation', [
+        formRow('Animation type', renderAnimTypeSelect()),
+        formRow('Animation target', renderAnimTargetSelect()),
+        formRow('Animation duration (ms)', renderAnimDuration()),
+      ]),
     );
-    root.appendChild(formRow('Font', renderFontSelect()));
 
-    root.appendChild(formRow('Animation type', renderAnimTypeSelect()));
-    root.appendChild(formRow('Animation target', renderAnimTargetSelect()));
-    root.appendChild(formRow('Animation duration (ms)', renderAnimDuration()));
-
-    root.appendChild(formRow('Completion', renderCompletionSelect()));
+    // PRD §9 item 7 — Completion: behaviour and seconds.
+    const completionChildren = [formRow('Completion', renderCompletionSelect())];
     if (ui.completionKind === 'holdThenHide') {
-      root.appendChild(
+      completionChildren.push(
         formRow(
           'Hold seconds',
           inputField(
@@ -988,8 +1083,21 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         ),
       );
     }
+    root.appendChild(group('setup-group-completion', 'Completion', completionChildren));
 
-    root.appendChild(renderPreviewBlock());
+    // PRD §9 item 8 — Save preset (title only) / Start session. Title has no
+    // group of its own (it is only ever needed at the moment of saving) —
+    // description has been removed entirely (operator: "no use for
+    // description"); `Preset.description` stays in the schema for
+    // compatibility, always written null by performSave() above.
+    root.appendChild(
+      formRow(
+        'Title',
+        inputField('setup-title', ui.title, (v) => {
+          ui.title = v;
+        }),
+      ),
+    );
 
     const actions = el('div', { class: 'btn-row' });
     const save = button('setup-save', ui.editing ? 'Update preset' : 'Save preset', { disabled: !canSave() });
@@ -1018,7 +1126,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     },
     loadPreset(preset: Preset): void {
       ui.title = preset.title;
-      ui.description = preset.description ?? '';
       ui.startValue = String(preset.startValue);
       ui.finishValue = String(preset.finishValue);
       ui.mode = preset.mode;
@@ -1027,6 +1134,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.layout = preset.style.layout;
       ui.numberSizePx = String(preset.style.numberSizePx);
       ui.numberColor = preset.style.numberColor;
+      ui.textSizePx = String(preset.style.textSizePx);
       ui.textColor = preset.style.textColor;
       ui.fontFamily = preset.style.fontFamily;
       ui.animType = preset.animation.type;

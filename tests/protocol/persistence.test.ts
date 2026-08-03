@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
-import { DockStorage, type StorageLike, type OverlaySnapshot } from '../../src/protocol/persistence.js';
+import { DockStorage, clearAllLcKeys, type StorageLike, type OverlaySnapshot } from '../../src/protocol/persistence.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession, serializePresets } from '../../src/engine/migrate.js';
@@ -613,5 +613,113 @@ describe('DockStorage — write failures never throw', () => {
     // neither threw, and both were reported.
     expect(errors.some((k) => k.startsWith('lc.quarantine.'))).toBe(true);
     expect(errors).toContain(KEY_SESSION);
+  });
+});
+
+// --- Task 2.14: Reset everything (PRD §9, AC 26) --------------------------
+
+/** A minimal stand-in for the real Web Storage API (window.localStorage in production) — length/key()/removeItem(), the enumeration surface clearAllLcKeys() needs and DockStorage's own minimal StorageLike deliberately lacks. */
+class FakeWebStorage {
+  private readonly map = new Map<string, string>();
+  get length(): number {
+    return this.map.size;
+  }
+  key(index: number): string | null {
+    return [...this.map.keys()][index] ?? null;
+  }
+  getItem(k: string): string | null {
+    return this.map.has(k) ? (this.map.get(k) as string) : null;
+  }
+  setItem(k: string, v: string): void {
+    this.map.set(k, v);
+  }
+  removeItem(k: string): void {
+    this.map.delete(k);
+  }
+}
+
+describe('clearAllLcKeys', () => {
+  it('removes every lc.* key (fixed and dynamically-suffixed) and leaves unrelated keys untouched', () => {
+    const store = new FakeWebStorage();
+    store.setItem('lc.session.v1', '{}');
+    store.setItem('lc.presets.v1', '[]');
+    store.setItem('lc.snapshot.v1', '{}');
+    store.setItem('lc.settings.v1', '{}');
+    store.setItem('lc.log.v1', '[]');
+    store.setItem('lc.bus.v1', '{}');
+    store.setItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd', 'garbage');
+    store.setItem('lc.diag-probe.v1', '1');
+    store.setItem('someOtherApp.settings', 'keep me');
+    store.setItem('unrelated', 'keep me too');
+
+    clearAllLcKeys(store);
+
+    expect(store.getItem('lc.session.v1')).toBeNull();
+    expect(store.getItem('lc.presets.v1')).toBeNull();
+    expect(store.getItem('lc.snapshot.v1')).toBeNull();
+    expect(store.getItem('lc.settings.v1')).toBeNull();
+    expect(store.getItem('lc.log.v1')).toBeNull();
+    expect(store.getItem('lc.bus.v1')).toBeNull();
+    expect(store.getItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd')).toBeNull();
+    expect(store.getItem('lc.diag-probe.v1')).toBeNull();
+    expect(store.getItem('someOtherApp.settings')).toBe('keep me');
+    expect(store.getItem('unrelated')).toBe('keep me too');
+  });
+
+  it('is a no-op on an empty store (never throws)', () => {
+    const store = new FakeWebStorage();
+    expect(() => clearAllLcKeys(store)).not.toThrow();
+    expect(store.length).toBe(0);
+  });
+});
+
+describe('DockStorage.resetPersistentMirror', () => {
+  it('clears both mirror slots (session + presets) so a subsequent load sees them as empty', async () => {
+    const mock = await startMockObs();
+    try {
+      const client = await connectedClient(`ws://127.0.0.1:${mock.port}`);
+      try {
+        const storage = new DockStorage(new MapStorage(), client);
+
+        const session = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+        storage.saveSession(session);
+        storage.savePresets([presetFixture()]);
+        // Both mirrors are now populated — confirm the fixture actually
+        // wrote something before proving resetPersistentMirror clears it.
+        await expect
+          .poll(async () => (await client.request('GetPersistentData', { realm: REALM, slotName: SLOT_SESSION })).slotValue)
+          .not.toBeNull();
+
+        await storage.resetPersistentMirror();
+
+        await expect
+          .poll(async () => (await client.request('GetPersistentData', { realm: REALM, slotName: SLOT_SESSION })).slotValue)
+          .toBeNull();
+        const presetsSlot = await client.request('GetPersistentData', {
+          realm: REALM,
+          slotName: 'live-counter/presets',
+        });
+        expect(presetsSlot.slotValue).toBeNull();
+      } finally {
+        client.close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it('never throws when there is no client at all', () => {
+    const storage = new DockStorage(new MapStorage(), null);
+    expect(() => storage.resetPersistentMirror()).not.toThrow();
+  });
+
+  it('never throws when the client exists but is not identified', () => {
+    const client = new ObsWsClient({ url: 'ws://127.0.0.1:1', eventSubscriptions: 0 });
+    try {
+      const storage = new DockStorage(new MapStorage(), client);
+      expect(() => storage.resetPersistentMirror()).not.toThrow();
+    } finally {
+      client.close();
+    }
   });
 });

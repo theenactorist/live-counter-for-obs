@@ -303,6 +303,38 @@
         gap: 0.25rem;
         margin-bottom: 0.6rem;
       }
+      /* Task 2.14 — Setup redesign: <fieldset>/<legend> groups (Counter,
+         Layout, Label, Counter style, Animation, Completion) with a visible
+         heading each, replacing the earlier flat field list. Reset to a
+         plain block (no default fieldset border/padding/min-width — a
+         default <fieldset>'s intrinsic min-width can force horizontal
+         overflow at the 300 px dock width all on its own) and restyled to
+         match the rest of the dark UI. */
+      .setup-group {
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        margin: 0 0 0.9rem;
+        padding: 0.75rem;
+        min-width: 0;
+      }
+      .setup-group-legend {
+        padding: 0 0.3rem;
+        font-size: 0.8rem;
+        color: #a0a0a0;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      /* PRD §9 item 2 — Start/Finish on one row, two columns. `min-width: 0`
+         on each column lets a flex child shrink below its content's natural
+         width instead of forcing the row (and the 300 px dock) to overflow. */
+      .two-col-row {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .two-col-row > .form-row {
+        flex: 1 1 0%;
+        min-width: 0;
+      }
       .form-label {
         font-size: 0.8rem;
         color: #a0a0a0;
@@ -360,40 +392,17 @@
         word-break: break-word;
         display: inline-flex;
       }
-      .setup-preview-row {
-        flex-direction: row;
-        align-items: baseline;
-        /* Fix wave (review minor): no gap for inline layouts — the real
-           overlay renderer never adds one either (spacing between the
-           label and the number comes entirely from the operator's own
-           label text), so an artificial gap here would make the preview
-           lie about what actually appears on stream. */
-      }
-      .setup-preview-column {
-        flex-direction: column;
-        align-items: center;
-        /* Gate fix wave (F7): no gap here either. The overlay renderer's
-           applyLayoutStyle() sets only flex-direction/align-items on the
-           stacked branch — no gap — so a 0.3em gap here made the preview
-           lie about the stream in exactly the way the row case above
-           documents. One owner for the spacing decision: the renderer. */
-      }
-      .setup-preview-relative {
-        position: relative;
-      }
+      /* Task 2.14 — the preview's own layout (flex-direction/align-items,
+         position/order/z-index for the textBehind ghost) is now applied
+         INLINE by ../../shared/overlay-presentation.js's applyPresentation
+         (the same function the real overlay renderer calls), not by
+         per-layout CSS classes here — see setup.ts's renderPreviewBlock().
+         '.setup-preview-ghost' survives purely as a TEST-identification
+         marker (setup.ts's updatePreviewTestids toggles it on the ghost
+         node so existing specs can assert on it); it carries no properties
+         of its own so it can never fight the inline styles the shared
+         module already applied to the exact same element. */
       .setup-preview-ghost {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        opacity: 0.18;
-        pointer-events: none;
-        white-space: nowrap;
-        z-index: 0;
-      }
-      .setup-preview-number-front {
-        position: relative;
-        z-index: 1;
       }
       /* Task 2.11 — six-layout gallery */
       .layout-gallery {

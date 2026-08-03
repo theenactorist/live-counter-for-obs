@@ -20,7 +20,7 @@
 // below.
 import type { ObsWsClient } from '../protocol/obsws-client.js';
 import type { Bus, BusMessage } from '../protocol/bus.js';
-import type { DockStorage, DockSettings } from '../protocol/persistence.js';
+import { clearAllLcKeys, type DockStorage, type DockSettings } from '../protocol/persistence.js';
 import { VERSION } from '../shared/version.js';
 
 export interface DiagnosticsViewHandle {
@@ -37,6 +37,16 @@ export interface MountDiagnosticsViewOptions {
   initialSettings: DockSettings;
   /** Persists + triggers a full reconnect via main.ts's existing boot() path. */
   onSaveSettings: (port: number, password: string) => void;
+  /**
+   * Task 2.14 — clears every `lc.*` localStorage key + the persistent-data
+   * mirror slots (this view's own `performResetAll()` does the clearing;
+   * this callback re-boots the dock through main.ts's existing `boot()`
+   * path, per the brief: never `location.reload()`, since Playwright cannot
+   * drive a real page navigation from inside the page it just reloaded).
+   */
+  onResetAll: () => void;
+  /** True for the ONE mount right after a reset-all reboot — shows the one-time confirmation banner, then behaves exactly like any other mount. */
+  justReset?: boolean;
   /** Overrides the 10s "overlay seen" threshold (test seam, mirrors mountLiveView's `overlaySilenceMs`). */
   overlaySilenceMs?: number;
   /** Overrides the 2s checklist/log poll interval (test seam — must stay well below `overlaySilenceMs` for the "ok" window to be observable at all). */
@@ -83,6 +93,21 @@ const STORAGE_FAIL_TEXT =
 // in real OBS — hence a dedicated Paste button instead of just relying on the
 // (absent) native paste gesture.
 export const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
+
+// --- Task 2.14: Reset everything (PRD §9, AC 26) --------------------------
+// Operator feedback drove the Setup redesign this task otherwise belongs to,
+// but the guarded reset lives here (Diagnostics already owns "connection
+// checklist, settings, overlay/dock URLs, event log, reset" per PRD §9).
+// `RESET_ALL_WARNING_TEXT` names EXACTLY what the confirm is about to
+// destroy — every `lc.*` localStorage key (settings, presets, session,
+// snapshot, log, quarantine records, the local-bus transport key) plus the
+// persistent-data mirror when connected — never a vague "are you sure?".
+export const RESET_ALL_WARNING_TEXT =
+  'This permanently deletes every setting, preset, session, snapshot, and log entry stored on this device — plus the mirrored backup on OBS if connected. This cannot be undone.';
+// Brief's exact confirm text, shown once the reboot (through main.ts's
+// existing boot() path, never location.reload()) has landed back on
+// first-run state.
+export const RESET_ALL_DONE_TEXT = 'Everything cleared — the dock is back to first-run.';
 // Review fold-in (L4 / AC 23, "a clipboard denial surfaces the select-to-copy
 // fallback rather than a false success") — the WRITE-side counterpart of
 // CLIPBOARD_BLOCKED_TEXT above. Shown next to whichever Copy button was
@@ -1136,6 +1161,54 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     // The log element itself is the manual fallback here — it holds the same
     // lines the copied text does, and it is already selectable.
     void copyText(buildDiagnosticsText(), logEl);
+  });
+
+  // --- Task 2.14: Reset everything (PRD §9, AC 26) -----------------------
+  root.appendChild(el('div', { class: 'diag-section-title' }, 'Reset'));
+  const resetAllBtn = button('diag-reset-all', 'Reset everything');
+  root.appendChild(resetAllBtn);
+
+  const resetAllConfirmBox = el('div', { 'data-testid': 'diag-reset-all-confirm', class: 'confirm-box' });
+  resetAllConfirmBox.appendChild(el('span', {}, RESET_ALL_WARNING_TEXT));
+  const resetAllConfirmBtn = button('reset-all-confirm', 'Yes, reset everything');
+  const resetAllCancelBtn = button('reset-all-cancel', 'Cancel');
+  resetAllConfirmBox.append(resetAllConfirmBtn, resetAllCancelBtn);
+  resetAllConfirmBox.hidden = true;
+  root.appendChild(resetAllConfirmBox);
+
+  // Shown once, right after a reset-all reboot lands back on this same
+  // Diagnostics pane (main.ts's boot() never touches tab activation) — a
+  // plain in-memory flag passed through THIS mount's own options, not
+  // anything persisted, since the whole point is that storage was just
+  // wiped.
+  const resetAllDone = el('div', { 'data-testid': 'diag-reset-done', class: 'copy-confirm' }, RESET_ALL_DONE_TEXT);
+  resetAllDone.hidden = !(opts.justReset ?? false);
+  root.appendChild(resetAllDone);
+
+  resetAllBtn.addEventListener('click', () => {
+    resetAllConfirmBox.hidden = false;
+  });
+  resetAllCancelBtn.addEventListener('click', () => {
+    resetAllConfirmBox.hidden = true;
+  });
+  resetAllConfirmBtn.addEventListener('click', () => {
+    resetAllConfirmBox.hidden = true;
+    // Local half first (clearAllLcKeys — every `lc.*` key, including the
+    // dynamically-suffixed quarantine records and the local-bus transport
+    // key), then AWAIT the persistent-data mirror clear (never throwing —
+    // see DockStorage.resetPersistentMirror's own doc comment) before
+    // handing off to main.ts to re-boot the dock through its EXISTING
+    // boot() path — never `location.reload()` (brief: Playwright cannot
+    // drive a real page navigation initiated from inside the page that is
+    // reloading). Awaiting matters: re-booting before the mirror clear
+    // lands would let the FRESH boot's own GetPersistentData read race
+    // against (and possibly lose to) our own SetPersistentData(null),
+    // resurrecting the just-reset session/presets from a mirror that had
+    // not actually cleared yet.
+    clearAllLcKeys(window.localStorage);
+    void opts.storage.resetPersistentMirror().then(() => {
+      opts.onResetAll();
+    });
   });
 
   // --- Refresh wiring ----------------------------------------------------

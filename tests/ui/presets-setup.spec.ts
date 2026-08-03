@@ -3,9 +3,29 @@ import type { Page } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
+import { ObsWsClient } from '../../src/protocol/obsws-client.js';
+import { Bus } from '../../src/protocol/bus.js';
+import { createSession } from '../../src/engine/counter.js';
+import type { OverlayLayout, StyleConfig } from '../../src/engine/types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
+const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
+
+/** Test-side "second client" on the mock obs-websocket server — mirrors overlay.spec.ts's own connectTestBus, driving the REAL overlay page directly over the real transport for the preview-parity test below. */
+async function connectTestBus(port: number): Promise<{ bus: Bus; close: () => void }> {
+  const client = new ObsWsClient({ url: `ws://127.0.0.1:${port}`, eventSubscriptions: 0 });
+  const identified = new Promise<void>((resolve) => {
+    const unsub = client.on('identified', () => {
+      unsub();
+      resolve();
+    });
+  });
+  client.connect();
+  await identified;
+  const bus = new Bus(client, 'test');
+  return { bus, close: () => client.close() };
+}
 
 async function openDock(page: Page, opts: { port: number; devhook?: boolean }): Promise<void> {
   const params = new URLSearchParams();
@@ -26,11 +46,10 @@ function stateBroadcasts(mock: MockObs): BroadcastEnvelope[] {
 /** Fills the Setup form's core fields (range/mode/template) for the "create a preset" flow. */
 async function fillCoreSetupFields(
   page: Page,
-  opts: { start: number; finish: number; title: string; description?: string; template?: string },
+  opts: { start: number; finish: number; title: string; template?: string },
 ): Promise<void> {
   await page.getByTestId('tab-setup').click();
   await page.getByTestId('setup-title').fill(opts.title);
-  if (opts.description !== undefined) await page.getByTestId('setup-description').fill(opts.description);
   await page.getByTestId('setup-start').fill(String(opts.start));
   await page.getByTestId('setup-finish').fill(String(opts.finish));
   if (opts.template !== undefined) await page.getByTestId('setup-template').fill(opts.template);
@@ -41,7 +60,7 @@ test.describe('dock Setup + Presets views', () => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
-      await fillCoreSetupFields(page, { start: 0, finish: 25, title: 'Marathon Countdown', description: 'Main event' });
+      await fillCoreSetupFields(page, { start: 0, finish: 25, title: 'Marathon Countdown' });
       await page.getByTestId('setup-mode').selectOption('automatic');
       await page.getByTestId('setup-interval').selectOption('2');
       await page.getByTestId('setup-template').fill('{count} laps left');
@@ -52,7 +71,6 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('tab-presets').click();
       const row = page.getByTestId('preset-row').filter({ hasText: 'Marathon Countdown' });
       await expect(row).toBeVisible();
-      await expect(row).toContainText('Main event');
       await expect(row).toContainText('0→25');
       await expect(row).toContainText('automatic');
     } finally {
@@ -691,13 +709,13 @@ test.describe('dock Setup + Presets views', () => {
         start: 2,
         finish: 22,
         title: 'Round Trip',
-        description: 'Keeps settings',
         template: 'Left: {count}',
       });
       await page.getByTestId('setup-mode').selectOption('automatic');
       await page.getByTestId('setup-interval').selectOption('2');
 
       await page.getByTestId('setup-number-size').fill('120');
+      await page.getByTestId('setup-text-size').fill('30');
       await page.getByTestId('setup-number-color').evaluate((el) => {
         (el as HTMLInputElement).value = '#ff00ff';
         el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -746,19 +764,18 @@ test.describe('dock Setup + Presets views', () => {
 
       const row = page.getByTestId('preset-row').filter({ hasText: 'Round Trip' });
       await expect(row).toBeVisible();
-      await expect(row).toContainText('Keeps settings');
       await expect(row).toContainText('2→22');
       await expect(row).toContainText('automatic');
 
       await row.getByTestId('preset-load').click();
       await expect(page.getByTestId('setup-title')).toHaveValue('Round Trip');
-      await expect(page.getByTestId('setup-description')).toHaveValue('Keeps settings');
       await expect(page.getByTestId('setup-start')).toHaveValue('2');
       await expect(page.getByTestId('setup-finish')).toHaveValue('22');
       await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
       await expect(page.getByTestId('setup-interval')).toHaveValue('2');
       await expect(page.getByTestId('setup-template')).toHaveValue('Left: {count}');
       await expect(page.getByTestId('setup-number-size')).toHaveValue('120');
+      await expect(page.getByTestId('setup-text-size')).toHaveValue('30');
       await expect(page.getByTestId('setup-number-color')).toHaveValue('#ff00ff');
       await expect(page.getByTestId('setup-text-color')).toHaveValue('#00aaff');
       await expect(page.getByTestId('setup-font')).toHaveValue('Oswald');
@@ -1456,8 +1473,21 @@ test.describe('dock Setup + Presets views', () => {
   // --- Task 2.11: six-layout overlay gallery (operator feedback, PRD §8.8) ---
 
   const ALL_LAYOUTS = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+  // Task 2.14 — counter-perspective names (PRD §8.8's table). Stored enum
+  // values (the map's own keys, above) are UNCHANGED; only these
+  // operator-facing captions differ.
+  const LAYOUT_CAPTIONS: Record<string, string> = {
+    numberOnly: 'Counter only',
+    textBefore: 'Counter right',
+    textAfter: 'Counter left',
+    textAbove: 'Counter below',
+    textBelow: 'Counter above',
+    textBehind: 'Counter in front',
+  };
 
-  test('layout gallery: six thumbnails render, defaulting to Text before selected', async ({ page }) => {
+  test('layout gallery: six thumbnails render with counter-perspective names, defaulting to Counter right selected', async ({
+    page,
+  }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
@@ -1465,11 +1495,16 @@ test.describe('dock Setup + Presets views', () => {
 
       await expect(page.getByTestId('setup-layout-gallery')).toBeVisible();
       for (const layout of ALL_LAYOUTS) {
-        await expect(page.getByTestId(`setup-layout-${layout}`)).toBeVisible();
+        const btn = page.getByTestId(`setup-layout-${layout}`);
+        await expect(btn).toBeVisible();
+        await expect(btn).toContainText(LAYOUT_CAPTIONS[layout]!);
       }
 
+      // Default layout is still 'textBefore' (stored value unchanged) —
+      // captioned 'Counter right' now.
       await expect(page.getByTestId('setup-layout-textBefore')).toHaveAttribute('aria-pressed', 'true');
       await expect(page.getByTestId('setup-layout-textBefore')).toHaveClass(/selected/);
+      await expect(page.getByTestId('setup-layout-textBefore')).toContainText('Counter right');
       await expect(page.getByTestId('setup-layout-numberOnly')).toHaveAttribute('aria-pressed', 'false');
       await expect(page.getByTestId('setup-layout-numberOnly')).not.toHaveClass(/selected/);
     } finally {
@@ -1640,6 +1675,315 @@ test.describe('dock Setup + Presets views', () => {
         .getByTestId('setup-preview-label')
         .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
       expect(labelFontSize).toBeGreaterThan(numberFontSize);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 2.14: Setup redesign — shared WYSIWYG preview, grouped controls,
+  // description removal, counter-perspective layouts (operator feedback,
+  // PRD §8.8/§9, AC 25/26) ------------------------------------------------
+
+  test('preview parity (AC 25): for every layout, the Setup preview and the real overlay agree on node presence and geometry relationships', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const overlayPage = await context.newPage();
+      await overlayPage.goto(`${OVERLAY_URL}?port=${mock.port}`);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+
+        const commonStyle: Omit<StyleConfig, 'layout'> = {
+          fontFamily: 'Inter',
+          fontWeight: 700,
+          numberSizePx: 96,
+          textSizePx: 24,
+          numberColor: '#ffffff',
+          textColor: '#cccccc',
+          alignH: 'center',
+          alignV: 'middle',
+          outline: null,
+          shadow: null,
+          background: null,
+          paddingPx: 8,
+        };
+        const session = createSession({ startValue: 0, finishValue: 1000, mode: 'manual' }, Date.now());
+
+        const layouts: OverlayLayout[] = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+
+        for (const layout of layouts) {
+          const template = layout === 'numberOnly' ? null : 'Score';
+
+          // Drive the REAL overlay directly, over the wire — exactly like
+          // overlay.spec.ts's own six-layout gallery tests.
+          await bus.send('state', {
+            session: { ...session, currentValue: 5 },
+            snapshot: null,
+            style: { ...commonStyle, layout },
+            template,
+            animation: null,
+            heartbeat: 1,
+          });
+          await expect(overlayPage.getByTestId('overlay-number')).toHaveText('5');
+
+          // Drive Setup's preview to the SAME inputs, via the real form.
+          await page.getByTestId(`setup-layout-${layout}`).click();
+          await page.getByTestId('setup-template').fill(template ?? '');
+          await expect(page.getByTestId('setup-preview-number')).toHaveText('5');
+
+          if (layout === 'numberOnly') {
+            // Neither page has a label node showing anything.
+            await expect(overlayPage.getByTestId('overlay-text-before')).toHaveText('');
+            await expect(overlayPage.getByTestId('overlay-text-after')).toHaveText('');
+            await expect(overlayPage.getByTestId('overlay-text-behind')).toHaveText('');
+            await expect(page.getByTestId('setup-preview-label')).toHaveCount(0);
+            await expect(page.getByTestId('setup-preview-label-after')).toHaveCount(0);
+            continue;
+          }
+
+          if (layout === 'textBefore' || layout === 'textAfter') {
+            const overlayBefore = await overlayPage.getByTestId('overlay-text-before').boundingBox();
+            const overlayNumber = await overlayPage.getByTestId('overlay-number').boundingBox();
+            const overlayAfter = await overlayPage.getByTestId('overlay-text-after').boundingBox();
+            expect(overlayBefore).not.toBeNull();
+            expect(overlayNumber).not.toBeNull();
+            expect(overlayAfter).not.toBeNull();
+
+            if (layout === 'textBefore') {
+              // Label (a token-less "Score") sits BEFORE the number in both.
+              expect(overlayNumber!.x).toBeGreaterThanOrEqual(overlayBefore!.x + overlayBefore!.width - 1);
+              const setupLabel = await page.getByTestId('setup-preview-label').boundingBox();
+              const setupNumber = await page.getByTestId('setup-preview-number').boundingBox();
+              expect(setupLabel).not.toBeNull();
+              expect(setupNumber).not.toBeNull();
+              expect(setupNumber!.x).toBeGreaterThanOrEqual(setupLabel!.x + setupLabel!.width - 1);
+            } else {
+              // Label sits AFTER the number in both — the opposite side.
+              expect(overlayAfter!.x).toBeGreaterThanOrEqual(overlayNumber!.x + overlayNumber!.width - 1);
+              const setupLabel = await page.getByTestId('setup-preview-label-after').boundingBox();
+              const setupNumber = await page.getByTestId('setup-preview-number').boundingBox();
+              expect(setupLabel).not.toBeNull();
+              expect(setupNumber).not.toBeNull();
+              expect(setupLabel!.x).toBeGreaterThanOrEqual(setupNumber!.x + setupNumber!.width - 1);
+            }
+          }
+
+          if (layout === 'textAbove' || layout === 'textBelow') {
+            const overlayLabel = await overlayPage.getByTestId('overlay-text-before').boundingBox();
+            const overlayNumber = await overlayPage.getByTestId('overlay-number').boundingBox();
+            const setupLabel = await page.getByTestId('setup-preview-label').boundingBox();
+            const setupNumber = await page.getByTestId('setup-preview-number').boundingBox();
+            expect(overlayLabel).not.toBeNull();
+            expect(overlayNumber).not.toBeNull();
+            expect(setupLabel).not.toBeNull();
+            expect(setupNumber).not.toBeNull();
+
+            if (layout === 'textAbove') {
+              expect(overlayLabel!.y + overlayLabel!.height).toBeLessThanOrEqual(overlayNumber!.y + 1);
+              expect(setupLabel!.y + setupLabel!.height).toBeLessThanOrEqual(setupNumber!.y + 1);
+            } else {
+              expect(overlayLabel!.y + 1).toBeGreaterThanOrEqual(overlayNumber!.y + overlayNumber!.height - 1);
+              expect(setupLabel!.y + 1).toBeGreaterThanOrEqual(setupNumber!.y + setupNumber!.height - 1);
+            }
+          }
+
+          if (layout === 'textBehind') {
+            const overlayGhost = await overlayPage.getByTestId('overlay-text-behind').boundingBox();
+            const overlayNumber = await overlayPage.getByTestId('overlay-number').boundingBox();
+            const setupGhost = await page.getByTestId('setup-preview-label').boundingBox();
+            const setupNumber = await page.getByTestId('setup-preview-number').boundingBox();
+            expect(overlayGhost).not.toBeNull();
+            expect(overlayNumber).not.toBeNull();
+            expect(setupGhost).not.toBeNull();
+            expect(setupNumber).not.toBeNull();
+
+            // Overlaps the number on both axes, in both pages.
+            expect(overlayGhost!.x).toBeLessThan(overlayNumber!.x + overlayNumber!.width);
+            expect(overlayNumber!.x).toBeLessThan(overlayGhost!.x + overlayGhost!.width);
+            expect(setupGhost!.x).toBeLessThan(setupNumber!.x + setupNumber!.width);
+            expect(setupNumber!.x).toBeLessThan(setupGhost!.x + setupGhost!.width);
+
+            // Renders larger than the number, in both.
+            const overlayGhostFontSize = await overlayPage
+              .getByTestId('overlay-text-behind')
+              .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+            const overlayNumberFontSize = await overlayPage
+              .getByTestId('overlay-number')
+              .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+            const setupGhostFontSize = await page
+              .getByTestId('setup-preview-label')
+              .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+            const setupNumberFontSize = await page
+              .getByTestId('setup-preview-number')
+              .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+            expect(overlayGhostFontSize).toBeGreaterThan(overlayNumberFontSize);
+            expect(setupGhostFontSize).toBeGreaterThan(setupNumberFontSize);
+          }
+        }
+      } finally {
+        close();
+        await overlayPage.close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('preview liveness: typing in the label field updates the WYSIWYG preview on every keystroke, with no state broadcast', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('3');
+
+      const beforeCount = stateBroadcasts(mock).length;
+
+      // pressSequentially fires one native keystroke ('input' event) at a
+      // time — checking the preview after each character proves the update
+      // is genuinely per-keystroke, not merely "eventually correct".
+      const template = page.getByTestId('setup-template');
+      await template.pressSequentially('S');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('S');
+      await template.pressSequentially('c');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('Sc');
+      await template.pressSequentially('ore');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('Score');
+
+      // Isolation contract (same as Test-animation / layout-gallery clicks
+      // above): a pure local UI change, never a 'state' broadcast.
+      await page.waitForTimeout(150);
+      expect(stateBroadcasts(mock).length).toBe(beforeCount);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('Counter group: Start and Finish render on one row, as two columns (bounding boxes share a row)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      const startBox = await page.getByTestId('setup-start').boundingBox();
+      const finishBox = await page.getByTestId('setup-finish').boundingBox();
+      expect(startBox).not.toBeNull();
+      expect(finishBox).not.toBeNull();
+
+      // Two columns of the SAME row: vertically overlapping (same row), and
+      // Finish sits to the right of Start (never above/below it, never
+      // overlapping horizontally).
+      expect(Math.abs(startBox!.y - finishBox!.y)).toBeLessThan(4);
+      expect(finishBox!.x).toBeGreaterThanOrEqual(startBox!.x + startBox!.width);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('Label and Counter style groups exist as distinct, labelled sections (PRD §9 items 4/5)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      const labelGroup = page.getByTestId('setup-group-label');
+      const counterStyleGroup = page.getByTestId('setup-group-counter-style');
+      await expect(labelGroup).toBeVisible();
+      await expect(counterStyleGroup).toBeVisible();
+
+      // Distinct sections — not the same element, each with its own visible
+      // heading.
+      await expect(labelGroup.locator('legend')).toHaveText('Label');
+      await expect(counterStyleGroup.locator('legend')).toHaveText('Counter style');
+
+      // Label's own parameters (text/size/colour) live inside its group...
+      await expect(labelGroup.getByTestId('setup-template')).toBeVisible();
+      await expect(labelGroup.getByTestId('setup-text-size')).toBeVisible();
+      await expect(labelGroup.getByTestId('setup-text-color')).toBeVisible();
+      // ...and the counter's own (size/colour/typeface) live inside ITS
+      // group — no overlap between the two.
+      await expect(counterStyleGroup.getByTestId('setup-number-size')).toBeVisible();
+      await expect(counterStyleGroup.getByTestId('setup-number-color')).toBeVisible();
+      await expect(counterStyleGroup.getByTestId('setup-font')).toBeVisible();
+      await expect(labelGroup.getByTestId('setup-number-size')).toHaveCount(0);
+      await expect(counterStyleGroup.getByTestId('setup-template')).toHaveCount(0);
+
+      // The Counter (range/mode/interval) group is its own distinct section too.
+      const counterGroup = page.getByTestId('setup-group-counter');
+      await expect(counterGroup.locator('legend')).toHaveText('Counter');
+      await expect(counterGroup.getByTestId('setup-start')).toBeVisible();
+      await expect(counterGroup.getByTestId('setup-finish')).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('description is gone: no Setup input exists, and no description text ever renders in the Presets list', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+
+      // Seed an OLDER preset (created before this change) that DOES carry a
+      // description, directly into storage — proving the Presets list never
+      // renders it, even for a preset that actually has one.
+      await page.evaluate(() => {
+        const now = new Date().toISOString();
+        const preset = {
+          schemaVersion: 2,
+          id: 'legacy-with-description',
+          title: 'Legacy With Description',
+          description: 'An old description that must never appear on screen',
+          startValue: 0,
+          finishValue: 10,
+          mode: 'manual',
+          intervalSeconds: 1,
+          template: null,
+          style: {
+            fontFamily: 'Inter',
+            fontWeight: 700,
+            numberSizePx: 96,
+            textSizePx: 24,
+            numberColor: '#ffffff',
+            textColor: '#cccccc',
+            alignH: 'center',
+            alignV: 'middle',
+            outline: null,
+            shadow: null,
+            background: null,
+            paddingPx: 8,
+            layout: 'numberOnly',
+          },
+          animation: { type: 'none', target: 'number', durationMs: 300 },
+          completion: { kind: 'hold' },
+          createdAt: now,
+          updatedAt: now,
+        };
+        window.localStorage.setItem('lc.presets.v1', JSON.stringify([preset]));
+      });
+
+      await page.getByTestId('tab-setup').click();
+      await expect(page.getByTestId('setup-description')).toHaveCount(0);
+      await expect(page.getByText('Description', { exact: true })).toHaveCount(0);
+
+      await page.getByTestId('tab-presets').click();
+      const row = page.getByTestId('preset-row').filter({ hasText: 'Legacy With Description' });
+      await expect(row).toBeVisible();
+      await expect(row).not.toContainText('An old description that must never appear on screen');
+
+      // Loading it into Setup and re-saving still writes no description UI
+      // — the field never resurfaces during editing either.
+      await row.getByTestId('preset-load').click();
+      await expect(page.getByTestId('setup-description')).toHaveCount(0);
     } finally {
       await mock.close();
     }

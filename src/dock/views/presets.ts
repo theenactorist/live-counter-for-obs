@@ -419,7 +419,11 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
   function renderRow(preset: Preset): HTMLElement {
     const row = el('div', { 'data-testid': 'preset-row', class: 'list-row' });
     row.appendChild(el('div', { class: 'list-row-title' }, preset.title));
-    if (preset.description) row.appendChild(el('div', { class: 'list-row-desc' }, preset.description));
+    // Task 2.14 (operator: "no use for description") — descriptions no
+    // longer render anywhere in this list. `Preset.description` stays in
+    // the type/schema for compatibility (export/import still carries an
+    // older preset's description through untouched), it just never reaches
+    // the screen.
     row.appendChild(
       el(
         'div',

@@ -63,6 +63,33 @@ const LOG_MAX_ENTRIES = 500;
 
 const DEFAULT_SETTINGS: DockSettings = { wsPort: 4455, wsPassword: '', schemaVersion: 1 };
 
+/**
+ * Removes every `lc.*` key from a real Web-Storage-shaped store (production:
+ * `window.localStorage`) — the local half of Task 2.14's guarded "Reset
+ * everything" diagnostics action (PRD §9, AC 26). Deliberately typed against
+ * the standard `Storage` shape (`.length`/`.key()`/`.removeItem()`), NOT this
+ * module's own minimal `StorageLike` — enumerating every key the store
+ * happens to hold (not just the fixed handful this class already knows the
+ * name of) needs the full Web Storage API, which DockStorage's own
+ * read/write paths were never meant to require. This is what makes the reset
+ * genuinely exhaustive: fixed keys (session/presets/snapshot/settings/log),
+ * the local-bus transport's `lc.bus.v1`, and every dynamically-suffixed
+ * `lc.quarantine.<suffix>` record, with no risk of the list drifting out of
+ * sync with this file as new `lc.*` keys are added later.
+ *
+ * Collects matching keys into an array FIRST, then removes them in a second
+ * pass — removing while iterating by index would shift every subsequent
+ * index and silently skip keys.
+ */
+export function clearAllLcKeys(store: Pick<Storage, 'length' | 'key' | 'removeItem'>): void {
+  const keys: string[] = [];
+  for (let i = 0; i < store.length; i++) {
+    const k = store.key(i);
+    if (k !== null && k.startsWith('lc.')) keys.push(k);
+  }
+  for (const k of keys) store.removeItem(k);
+}
+
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
 }
@@ -382,6 +409,27 @@ export class DockStorage {
 
   saveSettings(s: DockSettings): void {
     this.safeSet(KEY_SETTINGS, JSON.stringify(s));
+  }
+
+  /**
+   * The mirror half of "Reset everything" (Task 2.14, AC 26): clears both
+   * persistent-data slots this class ever writes to, and (unlike the fire-
+   * and-forget `mirrorSet` every other write uses) resolves only once both
+   * attempts have SETTLED — never rejecting, even when there is no client or
+   * it is not currently identified. The caller (diagnostics.ts) awaits this
+   * before re-booting a fresh DockStorage instance: without that ordering, a
+   * still-in-flight clear could lose a race against the FRESH instance's own
+   * GetPersistentData read on the very next boot, which would resurrect the
+   * just-reset session/presets from a mirror that had not actually cleared
+   * yet.
+   */
+  async resetPersistentMirror(): Promise<void> {
+    if (this.client === null) return;
+    const client = this.client;
+    await Promise.allSettled([
+      client.request('SetPersistentData', { realm: MIRROR_REALM, slotName: MIRROR_SLOT_SESSION, slotValue: null }),
+      client.request('SetPersistentData', { realm: MIRROR_REALM, slotName: MIRROR_SLOT_PRESETS, slotValue: null }),
+    ]);
   }
 
   private readLogRaw(): string[] {

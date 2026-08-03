@@ -1055,4 +1055,164 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.14: Reset everything (PRD §9, AC 26) ------------------------
+
+  async function allLcKeys(page: Page): Promise<string[]> {
+    return page.evaluate(() => Object.keys(window.localStorage).filter((k) => k.startsWith('lc.')));
+  }
+
+  test('reset-all: the button is guarded by an inline confirm naming what will be destroyed; Cancel changes nothing', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port }); // devhook on
+      await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+      await page.evaluate((cfg) => {
+        (window as unknown as { __lc: { startSession: (c: unknown) => void } }).__lc.startSession(cfg);
+      }, { startValue: 0, finishValue: 10, mode: 'manual' as const });
+
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-reset-all-confirm')).toBeHidden();
+
+      await page.getByTestId('diag-reset-all').click();
+      const confirm = page.getByTestId('diag-reset-all-confirm');
+      await expect(confirm).toBeVisible();
+      // Names what is destroyed — settings, presets, session, snapshot, log.
+      await expect(confirm).toContainText('setting');
+      await expect(confirm).toContainText('preset');
+      await expect(confirm).toContainText('session');
+      await expect(confirm).toContainText('snapshot');
+      await expect(confirm).toContainText('log');
+
+      await page.getByTestId('reset-all-cancel').click();
+      await expect(confirm).toBeHidden();
+
+      // Nothing was cleared — the session created above is still there.
+      const keysAfterCancel = await allLcKeys(page);
+      expect(keysAfterCancel.some((k) => k === 'lc.session.v1')).toBe(true);
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('current-value')).toHaveText('0');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('reset-all: confirming clears every lc.* key, clears the persistent mirror, and re-boots to first-run state without a page navigation', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port }); // devhook on
+      await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+      await page.evaluate((cfg) => {
+        (window as unknown as { __lc: { startSession: (c: unknown) => void } }).__lc.startSession(cfg);
+      }, { startValue: 0, finishValue: 10, mode: 'manual' as const });
+
+      // Seed a preset too, so lc.presets.v1 (+ its own mirror slot) is
+      // populated alongside the session.
+      await page.evaluate(() => {
+        const now = new Date().toISOString();
+        const preset = {
+          schemaVersion: 2,
+          id: 'reset-test-preset',
+          title: 'Reset Test',
+          description: null,
+          startValue: 0,
+          finishValue: 10,
+          mode: 'manual',
+          intervalSeconds: 1,
+          template: null,
+          style: {
+            fontFamily: 'Inter',
+            fontWeight: 700,
+            numberSizePx: 96,
+            textSizePx: 24,
+            numberColor: '#ffffff',
+            textColor: '#cccccc',
+            alignH: 'center',
+            alignV: 'middle',
+            outline: null,
+            shadow: null,
+            background: null,
+            paddingPx: 8,
+            layout: 'numberOnly',
+          },
+          animation: { type: 'none', target: 'number', durationMs: 300 },
+          completion: { kind: 'hold' },
+          createdAt: now,
+          updatedAt: now,
+        };
+        window.localStorage.setItem('lc.presets.v1', JSON.stringify([preset]));
+      });
+
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      const keysBefore = await allLcKeys(page);
+      expect(keysBefore.length).toBeGreaterThan(0);
+
+      // A marker on `window` itself — survives an in-place JS re-boot but is
+      // wiped by any real page navigation (location.reload() included). This
+      // is the test-visible proof the brief requires: "re-boot through the
+      // existing boot() path — do not location.reload()".
+      await page.evaluate(() => {
+        (window as unknown as { __resetTestMarker?: string }).__resetTestMarker = 'still-here';
+      });
+
+      await page.getByTestId('diag-reset-all').click();
+      await page.getByTestId('reset-all-confirm').click();
+
+      // Every lc.* key is gone.
+      await expect.poll(() => allLcKeys(page)).toEqual([]);
+
+      // The persistent-data mirror (both slots) was cleared too.
+      await expect
+        .poll(() => mock.persistent.get('OBS_WEBSOCKET_DATA_REALM_GLOBAL/live-counter/session'))
+        .toBeNull();
+      expect(mock.persistent.get('OBS_WEBSOCKET_DATA_REALM_GLOBAL/live-counter/presets')).toBeNull();
+
+      // Still the same `window` — an in-place re-boot, never a navigation.
+      const marker = await page.evaluate(() => (window as unknown as { __resetTestMarker?: string }).__resetTestMarker);
+      expect(marker).toBe('still-here');
+
+      // Back to first-run: the confirmation banner shows (still on the
+      // Diagnostics tab — boot() never touches tab activation), the
+      // connection settings reset to the built-in default too (so the fresh
+      // boot no longer targets this test's mock port at all — a genuinely
+      // untouched install's own experience), Live shows the first-run
+      // connect card instead of any session, and the preset list is empty.
+      await expect(page.getByTestId('diag-reset-done')).toBeVisible();
+      await expect(page.getByTestId('diag-reset-done')).toHaveText('Everything cleared — the dock is back to first-run.');
+
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('connect-card')).toBeVisible();
+      await expect(page.getByTestId('current-value')).toHaveCount(0);
+
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('reset-all: never throws and still clears local storage when OBS is unreachable (mirror clearing degrades silently)', async ({
+    page,
+  }) => {
+    // Nothing listens on this port — the client never identifies, so the
+    // mirror half of the reset has nothing to talk to.
+    await openDock(page, { port: 39477 }); // devhook on
+    await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+    await page.evaluate((cfg) => {
+      (window as unknown as { __lc: { startSession: (c: unknown) => void } }).__lc.startSession(cfg);
+    }, { startValue: 0, finishValue: 10, mode: 'manual' as const });
+
+    await page.getByTestId('tab-diagnostics').click();
+    await page.getByTestId('diag-reset-all').click();
+    await page.getByTestId('reset-all-confirm').click();
+
+    await expect.poll(() => allLcKeys(page)).toEqual([]);
+    await expect(page.getByTestId('diag-reset-done')).toBeVisible();
+  });
 });
