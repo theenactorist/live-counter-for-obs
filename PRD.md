@@ -174,14 +174,16 @@ The dock continuously shows: current value (dominant), `X of Y` (Y = configured 
 
 **Layout gallery (added to scope 2026-08-02, operator feedback).** The overlay's shape is chosen from a visual gallery of six layouts, each shown as a clickable thumbnail in Setup with the live preview updating on selection:
 
-| Layout | Shape | Label text |
-|---|---|---|
-| `numberOnly` | `23` | ignored |
-| `textBefore` | `HALLELUJAH × 23` — label then number | plain label |
-| `textAfter` | `23 TIMES` — number then label | plain label |
-| `textAbove` | label stacked over the number | plain label |
-| `textBelow` | number stacked over the label | plain label |
-| `textBehind` | number in front, oversized ghost label behind | plain label |
+Layouts are **named from the counter's point of view** (operator feedback 2026-08-02: "text after / text below are a bit confusing — let's use counter as the keyword, so counter above puts the number on top"). Stored enum values are unchanged so no migration is needed; only the operator-facing names differ.
+
+| Stored value | Operator-facing name | Shape | Label text |
+|---|---|---|---|
+| `numberOnly` | **Counter only** | `23` | ignored |
+| `textBefore` | **Counter right** | `HALLELUJAH × 23` — label, then counter | plain label |
+| `textAfter` | **Counter left** | `23 TIMES` — counter, then label | plain label |
+| `textAbove` | **Counter below** | label on top, counter beneath | plain label |
+| `textBelow` | **Counter above** | counter on top, label beneath | plain label |
+| `textBehind` | **Counter in front** | counter in front, oversized ghost label behind | plain label |
 
 - **The label is always plain text and `{count}` is never required** (corrected 2026-08-02 — the earlier rule made `textBefore` and `textAfter` render identically, defeating the gallery). The layout alone decides where the number sits relative to the label, so the Setup field reads "Label text" and no layout blocks Save or Start for a missing token.
 - **Token as a power/compatibility path:** if the label does contain `{count}`, it is honoured — inline layouts split on it (the token then dictates placement) and stacked/behind layouts substitute it. Setup shows a neutral note when a token is present, explaining that it sets where the number goes. This keeps pre-gallery presets (whose templates carry the token) rendering exactly as before.
@@ -223,7 +225,20 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 
 ## 9. Interface structure
 
-Four dock views — **Presets** (search, create, load, duplicate, edit, delete, export/import; shows title, description, range, mode, updated date), **Setup** (counter, layout gallery, text, style, animation config; embedded preview + Test animation; save/update preset; start session), **Live** (below), **Diagnostics** (connection checklist, settings, overlay/dock URLs, event log).
+Four dock views — **Presets** (search, create, load, duplicate, edit, delete, export/import; shows title, range, mode, updated date), **Setup** (below), **Live** (below), **Diagnostics** (connection checklist, settings, overlay/dock URLs, event log, reset).
+
+**Setup view structure (specified 2026-08-02, operator feedback: "I need the setup to be very simple and to have a preview to show the person setting up what the end result looks like before they get started").** Top to bottom:
+
+1. **Live preview, always visible** — a true WYSIWYG rendering of the overlay at the current settings, updating on every keystroke and every control change. It must be produced by the **same rendering code as the overlay itself** (a shared presentation module), not a lookalike, so the two can never drift.
+2. **Counter** — Start and Finish on one row, two columns; mode; interval when Automatic.
+3. **Layout** — the six-thumbnail gallery, named from the counter's point of view (§8.8).
+4. **Label** — its own group: label text, size, colour.
+5. **Counter style** — its own group: size, colour. Typeface applies to both and sits with the counter group.
+6. **Animation** — type, target, duration, Test animation.
+7. **Completion** — behaviour and seconds.
+8. Save preset (title only) / Start session.
+
+**Preset descriptions are not exposed** (operator: "no use for description"). The field remains in the stored schema for compatibility and is always null for presets created after this change; the Presets list shows title, range, mode and updated date.
 
 **Live view control hierarchy (specified 2026-08-02, operator feedback).** Ordered by frequency of use under pressure, with slip-resistance for destructive actions:
 
@@ -275,6 +290,8 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 22. Each of the six layouts (§8.8) renders its documented shape on the overlay with the same value and style; switching layout in Setup updates the preview without touching the live session or broadcasting state. With a token-less label, `textBefore` places the number after the label and `textAfter` places it before — the two are visibly different. No layout blocks Save or Start for a missing `{count}`; a label containing one still renders per the compatibility path.
 23. With the OS clipboard shortcuts unavailable (OBS dock), the Paste buttons populate the websocket-password and preset-import fields, and the Copy buttons place the overlay URL and the preset export on the clipboard; a clipboard denial surfaces the select-to-copy fallback rather than a false success.
 24. A preset saved before the layout gallery existed (schema v1) loads after upgrade with a sensible layout inferred (inline when its template carries `{count}`, number-only when it has no template) and all other settings intact.
+25. The Setup preview is generated by the same presentation code as the overlay: for every layout, and for label text, sizes, colours and typeface, what Setup shows matches what the overlay renders. Typing in the label updates the preview on each keystroke.
+26. Diagnostics offers a guarded **Reset everything** action that clears all stored counter data (settings, presets, session, snapshot, log, and the persistent-data mirror when connected) and returns the dock to its first-run state, so a first-time setup can be rehearsed from scratch.
 
 ## 12. Test plan
 

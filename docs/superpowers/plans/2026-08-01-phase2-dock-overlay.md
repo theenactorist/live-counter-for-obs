@@ -275,9 +275,27 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(protocol): direct BroadcastChannel transport, obs-websocket optional`
 
+### Task 2.14: Setup redesign — WYSIWYG preview, counter-perspective layout names, grouped controls (operator feedback 2026-08-02 — PRD §8.8, §9, AC 25 + 26)
+
+**Driver (verbatim):** "Text after, text below etc are a bit confusing — let's use counter as the keyword, so counter above will put the number on top" · "No use for description" · "Start value and finish value can be in a single row, 2 columns" · "A preview of the actual render should be visible when I edit label text" · "The different setup parameters for the label and counter can be grouped together" · "I need the setup to be very simple and to have a preview to show the person setting up what the end result looks like before they get started."
+
+**Files:** Create `src/shared/overlay-presentation.ts`; modify `src/overlay/renderer.ts` (consume it), `src/dock/views/setup.ts` (rebuild), `src/dock/views/presets.ts` (drop description), `src/dock/diagnostics.ts` (reset action), `src/dock/dock.html` (styles); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/diagnostics.spec.ts`, `tests/protocol/*`.
+
+**Contract:**
+1. **Shared presentation module** — extract the node creation + layout/content/style application currently inside `renderer.ts` into `src/shared/overlay-presentation.ts`, exporting something like `createPresentationNodes(): PresentationNodes` and `applyPresentation(nodes, { style, template, value })`. The overlay renderer keeps ownership of everything else (bus, cache, coalescing, watchdog, fonts gate, animations, stable-node discipline) and must behave identically — its existing tests are the regression fence. Setup's preview uses the SAME two functions, so preview and stream cannot drift (this retires the gap/font-size drift findings).
+2. **Counter-perspective names** in the gallery, per PRD §8.8's table: Counter only / Counter right / Counter left / Counter below / Counter above / Counter in front. Stored enum values unchanged — display-only. Thumbnails must match their new names.
+3. **Description removed** from the Setup form and the Presets rows. `Preset.description` stays in the type/schema (no migration); new presets store `null`. Export/import keeps carrying whatever an older preset had.
+4. **Setup layout** rebuilt in the PRD §9 order: always-visible preview at the top; Counter (Start | Finish on one row as two columns, then mode, then interval when Automatic); Layout gallery; **Label group** (text, size, colour); **Counter style group** (size, colour, typeface); Animation; Completion; Save/Start. Use `<fieldset>`/legend or equivalent grouping with visible headings.
+5. **Preview liveness** — updates on every keystroke in the label field (an `input` listener, not blur) and on every other control change, without broadcasting state or touching the live session.
+6. **`diag-reset-all`** — guarded by an inline confirm (`reset-all-confirm` / `reset-all-cancel`) naming exactly what is destroyed; on confirm, remove every `lc.*` key from localStorage, clear the persistent-data mirror slots when identified, and re-boot the dock to first-run state. Confirm text: "Everything cleared — the dock is back to first-run."
+
+**Mandatory tests:** preview parity — for each of the six layouts, the Setup preview's structural shape matches the overlay's for the same inputs (assert via the shared module's output: same node order/classes, and geometry relationships mirroring the overlay tests); typing in the label updates the preview within the same test tick and issues no `state` broadcast; the gallery shows the six counter-perspective names; start/finish render as one row with two columns (bounding boxes share a row); Label and Counter groups exist as distinct labelled sections; no description input exists in Setup and no description text renders in Presets rows; Setup remains usable at 300 px (all controls reachable, no horizontal scroll); reset-all clears storage and returns the first-run state, cancel changes nothing; every existing overlay test still passes against the refactored renderer.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): setup redesign — shared WYSIWYG preview, counter-perspective layouts, grouped controls, reset`
+
 ---
 
-## Phase gate checklist (after Task 2.13)
+## Phase gate checklist (after Task 2.14)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)
