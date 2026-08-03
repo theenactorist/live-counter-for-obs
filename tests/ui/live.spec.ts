@@ -421,13 +421,19 @@ test.describe('dock Live view', () => {
     }
   });
 
-  test('no OBS server: banner-ws appears, empty state shown', async ({ page }) => {
+  // Task 2.12: updated — with no active session AND no connection, "useful
+  // session UI" no longer means the plain empty state; it means the Connect
+  // card (the whole point of the one-card-connect feature is that an
+  // operator who has never connected lands here, not on a dead end that
+  // just says "create one in Setup" with no way to fix the actual problem).
+  test('no OBS server: banner-ws appears, Connect card shown (not the plain empty state)', async ({ page }) => {
     // Nothing listens on this port — the client will never identify.
     await openDock(page, { port: 39217, devhook: false });
 
     await expect(page.getByTestId('banner-ws')).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId('banner-ws')).toContainText('WebSocket Server Settings');
-    await expect(page.getByTestId('live-empty')).toBeVisible();
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+    await expect(page.getByTestId('live-empty')).toHaveCount(0);
   });
 
   test('recovered banner shows after restoring a session from storage, status is paused', async ({ page }) => {
@@ -737,6 +743,130 @@ test.describe('dock Live view', () => {
       expect(positions.dividerAfterShowHide).toBe(true);
       expect(positions.resetAfterDivider).toBe(true);
       expect(positions.endAfterDivider).toBe(true);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 2.12: one-card connect flow -----------------------------------
+  // Driver (operator feedback after testing in real OBS): "that's a lot of
+  // steps to copy password, paste, connect websocket server, going to
+  // diagnostics etc" — the Connect card collapses that to one paste + two
+  // clicks (Connect, then Add overlay).
+
+  test('connect-card: visible while not identified, gone once identified', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      // Holds back Identified so there's a real window to observe the card
+      // in its 'connecting' state before it disappears.
+      mock.delayIdentify(1500);
+      await openDock(page, { port: mock.port, devhook: false });
+
+      await expect(page.getByTestId('connect-card')).toBeVisible();
+      // Pre-filled from the settings this boot is CURRENTLY using — here
+      // that's mock.port (openDock's `?wsPort=` override), not the
+      // DockStorage default of 4455 an untouched install would show.
+      await expect(page.getByTestId('connect-port')).toHaveValue(String(mock.port));
+      await expect(page.getByTestId('connect-password')).toBeFocused();
+      await expect(page.getByTestId('connect-state')).toContainText('Connecting');
+
+      await expect(page.getByTestId('connect-card')).toHaveCount(0, { timeout: 5000 });
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('connect-card: wrong password shows the auth-failed text', async ({ page }) => {
+    const mock = await startMockObs({ password: 'correct-horse-battery-staple' });
+    try {
+      // Dock connects with the default EMPTY password; the mock requires one.
+      await openDock(page, { port: mock.port, devhook: false });
+
+      await expect(page.getByTestId('connect-card')).toBeVisible();
+      await expect(page.getByTestId('connect-state')).toContainText("wasn't accepted", { timeout: 5000 });
+      await expect(page.getByTestId('connect-state')).toContainText('Show Connect Info');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('connect-card: server absent shows the unreachable text + connect-retry', async ({ page }) => {
+    // Nothing listens on this port — the client will never identify.
+    await openDock(page, { port: 39462, devhook: false });
+
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+    await expect(page.getByTestId('connect-state')).toContainText('OBS WebSocket server is off', { timeout: 5000 });
+    await expect(page.getByTestId('connect-retry')).toBeVisible();
+  });
+
+  test('connect-card: successful connect persists settings and reaches identified', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      // Opens against a dead port so the card shows immediately.
+      await openDock(page, { port: 39463, devhook: false });
+      await expect(page.getByTestId('connect-card')).toBeVisible();
+
+      await page.getByTestId('connect-port').fill(String(mock.port));
+      await page.getByTestId('connect-password').fill('new-pass');
+      await page.getByTestId('connect-submit').click();
+
+      const stored = await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'));
+      expect(JSON.parse(stored ?? '{}')).toMatchObject({ wsPort: mock.port, wsPassword: 'new-pass' });
+
+      await expect(page.getByTestId('connect-card')).toHaveCount(0, { timeout: 5000 });
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+      await expect.poll(() => mock.clients()).toBeGreaterThan(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('connect-card: typing slowly into connect-password survives the periodic re-render (no lost characters)', async ({
+    page,
+  }) => {
+    // Nothing listening — the card's own state-line poll keeps re-rendering
+    // roughly once a second (see live.ts's bannerPoll) the whole time.
+    await openDock(page, { port: 39464, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+
+    const passwordInput = page.getByTestId('connect-password');
+    await passwordInput.focus();
+    // 11 chars * 150ms > 1.2s, guaranteeing at least one poll tick lands
+    // mid-entry.
+    await passwordInput.pressSequentially('sekret-pass', { delay: 150 });
+
+    await expect(passwordInput).toHaveValue('sekret-pass');
+    const activeTestId = await page.evaluate(() => document.activeElement?.getAttribute('data-testid'));
+    expect(activeTestId).toBe('connect-password');
+  });
+
+  test('connect-card: Paste fills connect-password from the clipboard', async ({ page, context }) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openDock(page, { port: 39465, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+
+    await page.evaluate(() => navigator.clipboard.writeText('sekret-from-clipboard'));
+    await page.getByTestId('connect-paste').click();
+
+    await expect(page.getByTestId('connect-password')).toHaveValue('sekret-from-clipboard');
+    await expect(page.getByTestId('connect-paste-error')).toBeHidden();
+  });
+
+  test('live-empty mirrors add-overlay: creates the overlay once identified with no session, without visiting Diagnostics', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('live-empty')).toBeVisible({ timeout: 5000 });
+
+      const btn = page.getByTestId('live-add-overlay');
+      await expect(btn).toBeEnabled();
+      await btn.click();
+
+      await expect(page.getByTestId('live-add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
     } finally {
       await mock.close();
     }

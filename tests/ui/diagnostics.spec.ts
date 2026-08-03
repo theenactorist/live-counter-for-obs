@@ -545,4 +545,144 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.12: add-overlay-to-scene ------------------------------------
+  // Driver: operator feedback after testing in real OBS — once connected,
+  // the dock can add + configure the overlay Browser Source itself instead
+  // of making the operator do it by hand.
+
+  test('add-overlay: disabled while not identified', async ({ page }) => {
+    // Nothing listens on this port — the client never identifies.
+    await openDock(page, { port: 39461, devhook: false });
+    await page.getByTestId('tab-diagnostics').click();
+    await expect(page.getByTestId('add-overlay')).toBeDisabled();
+  });
+
+  test('add-overlay: creates exactly one CreateInput with the expected settings payload', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay')).toBeEnabled();
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-confirm')).toContainText('Overlay added to');
+
+      const creates = mock.requestPayloads.filter((r) => r.type === 'CreateInput');
+      expect(creates).toHaveLength(1);
+      const payload = creates[0]!.data;
+      expect(payload.inputKind).toBe('browser_source');
+      expect(payload.inputName).toBe('Live Counter Overlay');
+      const settings = payload.inputSettings as Record<string, unknown>;
+      expect(String(settings.url)).toContain('overlay.html');
+      expect(settings.width).toBe(1920);
+      expect(settings.height).toBe(1080);
+      expect(settings.shutdown).toBe(false);
+      expect(settings.is_local_file).toBe(false);
+      expect(settings.restart_when_active).toBe(false);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: width/height follow a non-default GetVideoSettings', async ({ page }) => {
+    const mock = await startMockObs({ videoSettings: { baseWidth: 2560, baseHeight: 1440 } });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+
+      const creates = mock.requestPayloads.filter((r) => r.type === 'CreateInput');
+      const settings = creates[0]!.data.inputSettings as Record<string, unknown>;
+      expect(settings.width).toBe(2560);
+      expect(settings.height).toBe(1440);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: a second click finds the just-created overlay and updates it instead of duplicating', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toHaveText('Overlay settings updated', { timeout: 5000 });
+
+      // Still exactly one CreateInput ever — the second click went through
+      // SetInputSettings instead, having found the overlay it just made.
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings').length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: a name collision with an unrelated existing input suffixes " 2"', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          // Deliberately NOT the overlay — no overlay.html in its URL — so
+          // detection genuinely misses it and a create is genuinely
+          // attempted (and genuinely rejected) against this name.
+          inputSettings: { url: 'https://example.com/unrelated', width: 640, height: 480 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+
+      const creates = mock.requestPayloads.filter((r) => r.type === 'CreateInput');
+      expect(creates.length).toBeGreaterThanOrEqual(2);
+      expect(creates[0]!.data.inputName).toBe('Live Counter Overlay');
+      expect(creates[creates.length - 1]!.data.inputName).toBe('Live Counter Overlay 2');
+      expect(mock.inputs.has('Live Counter Overlay 2')).toBe(true);
+      // The unrelated original input was left alone, not overwritten.
+      expect(mock.inputs.get('Live Counter Overlay')?.inputSettings.url).toBe('https://example.com/unrelated');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: a failing CreateInput (not a name collision) surfaces add-overlay-error, nothing partially created', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      mock.failNext('CreateInput', 500, 'boom (test)');
+      await page.getByTestId('add-overlay').click();
+
+      await expect(page.getByTestId('add-overlay-error')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-error')).toContainText('boom (test)');
+      await expect(page.getByTestId('add-overlay-confirm')).toBeHidden();
+      expect(mock.inputs.size).toBe(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

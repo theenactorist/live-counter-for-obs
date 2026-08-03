@@ -11,8 +11,24 @@ const OP_EVENT = 5;
 const OP_REQUEST = 6;
 const OP_REQUEST_RESPONSE = 7;
 
+// Task 2.12 — a scene's Browser Source input, as tracked by the mock's
+// in-memory "OBS state" for GetInputList/GetInputSettings/SetInputSettings/
+// CreateInput. Real obs-websocket tracks far more per input; this mock only
+// carries what the dock's add-overlay-to-scene flow actually reads/writes.
+export interface MockInputSeed {
+  inputName: string;
+  inputKind: string;
+  inputSettings: Record<string, unknown>;
+}
+
 export interface MockObsOptions {
   password?: string;
+  /** Seeds GetVideoSettings' response — default 1920x1080 (Task 2.12). */
+  videoSettings?: { baseWidth: number; baseHeight: number };
+  /** Seeds GetCurrentProgramScene's response — default 'Scene' (Task 2.12). */
+  programScene?: string;
+  /** Seeds the inputs GetInputList/GetInputSettings see from the start (Task 2.12) — e.g. a pre-existing overlay Browser Source, or a same-named-but-unrelated input for collision tests. */
+  inputs?: MockInputSeed[];
 }
 
 export interface MockObs {
@@ -34,10 +50,22 @@ export interface MockObs {
    * broadcasting on its own, when "the next request" is a coin flip.
    */
   delayResponsesFor(requestType: string, ms: number): void;
+  /**
+   * Test hook (Task 2.12): forces the NEXT request of `requestType` to fail
+   * with a genuine obs-websocket-shaped error response (`result:false`) —
+   * used to exercise the add-overlay flow's error path independent of the
+   * name-collision case (which CreateInput already rejects on its own; see
+   * below). Consumed after one use, same convention as `swallowNext()`.
+   */
+  failNext(requestType: string, code?: number, comment?: string): void;
   persistent: Map<string, unknown>;
   broadcasts: Array<{ from: number; eventData: unknown }>;
   /** Every requestType this server has ever received, in arrival order — lets a test assert NO scene/source-mutation request type was ever sent (only BroadcastCustomEvent/SetPersistentData/GetPersistentData). */
   requestLog: string[];
+  /** Every request's full payload, in arrival order — lets a test assert the EXACT requestData a call carried (Task 2.12: CreateInput/SetInputSettings payload assertions). */
+  requestPayloads: Array<{ type: string; data: Record<string, unknown> }>;
+  /** Current scene/input state as the mock sees it (Task 2.12) — read directly for assertions instead of round-tripping through another request. */
+  inputs: Map<string, { inputKind: string; inputSettings: Record<string, unknown> }>;
   close(): Promise<void>;
 }
 
@@ -69,6 +97,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   const persistent = new Map<string, unknown>();
   const broadcasts: Array<{ from: number; eventData: unknown }> = [];
   const requestLog: string[] = [];
+  const requestPayloads: Array<{ type: string; data: Record<string, unknown> }> = [];
   const identifiedClients = new Set<WsSocket>();
   const clientIds = new WeakMap<WsSocket, number>();
   let nextClientId = 1;
@@ -76,6 +105,16 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   let identifyDelayMs = 0;
   let nextResponseDelayMs = 0;
   const perTypeDelayMs = new Map<string, number>();
+  const forcedFailures = new Map<string, { code: number; comment: string }>();
+
+  // Task 2.12 — scene/input state for the add-overlay-to-scene flow.
+  const videoSettings = opts.videoSettings ?? { baseWidth: 1920, baseHeight: 1080 };
+  const programScene = opts.programScene ?? 'Scene';
+  const inputs = new Map<string, { inputKind: string; inputSettings: Record<string, unknown> }>();
+  for (const seed of opts.inputs ?? []) {
+    inputs.set(seed.inputName, { inputKind: seed.inputKind, inputSettings: { ...seed.inputSettings } });
+  }
+  let nextSceneItemId = 1;
 
   function send(socket: WsSocket, op: number, d: Record<string, unknown>): void {
     socket.send(JSON.stringify({ op, d }));
@@ -88,42 +127,111 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     }
     const { requestType, requestId, requestData } = msg.d;
     requestLog.push(requestType);
+    requestPayloads.push({ type: requestType, data: requestData ?? {} });
     let result = true;
     let code = 100;
+    let comment: string | undefined;
     let responseData: Record<string, unknown> = {};
 
-    switch (requestType) {
-      case 'BroadcastCustomEvent': {
-        const eventData = (requestData?.eventData ?? {}) as unknown;
-        broadcasts.push({ from: clientId, eventData });
-        for (const c of identifiedClients) {
-          send(c, OP_EVENT, { eventType: 'CustomEvent', eventData });
+    const forced = forcedFailures.get(requestType);
+    if (forced) {
+      forcedFailures.delete(requestType);
+      result = false;
+      code = forced.code;
+      comment = forced.comment;
+    } else {
+      switch (requestType) {
+        case 'BroadcastCustomEvent': {
+          const eventData = (requestData?.eventData ?? {}) as unknown;
+          broadcasts.push({ from: clientId, eventData });
+          for (const c of identifiedClients) {
+            send(c, OP_EVENT, { eventType: 'CustomEvent', eventData });
+          }
+          break;
         }
-        break;
-      }
-      case 'SetPersistentData': {
-        const realm = requestData?.realm as string;
-        const slotName = requestData?.slotName as string;
-        const slotValue = requestData?.slotValue;
-        persistent.set(`${realm}/${slotName}`, slotValue);
-        break;
-      }
-      case 'GetPersistentData': {
-        const realm = requestData?.realm as string;
-        const slotName = requestData?.slotName as string;
-        const value = persistent.get(`${realm}/${slotName}`);
-        responseData = { slotValue: value === undefined ? null : value };
-        break;
-      }
-      default: {
-        result = false;
-        code = 204;
-        break;
+        case 'SetPersistentData': {
+          const realm = requestData?.realm as string;
+          const slotName = requestData?.slotName as string;
+          const slotValue = requestData?.slotValue;
+          persistent.set(`${realm}/${slotName}`, slotValue);
+          break;
+        }
+        case 'GetPersistentData': {
+          const realm = requestData?.realm as string;
+          const slotName = requestData?.slotName as string;
+          const value = persistent.get(`${realm}/${slotName}`);
+          responseData = { slotValue: value === undefined ? null : value };
+          break;
+        }
+        // --- Task 2.12: add-overlay-to-scene ------------------------------
+        case 'GetVideoSettings': {
+          responseData = { baseWidth: videoSettings.baseWidth, baseHeight: videoSettings.baseHeight };
+          break;
+        }
+        case 'GetCurrentProgramScene': {
+          responseData = { currentProgramSceneName: programScene };
+          break;
+        }
+        case 'GetInputList': {
+          responseData = {
+            inputs: Array.from(inputs.entries()).map(([inputName, input]) => ({
+              inputName,
+              inputKind: input.inputKind,
+              unversionedInputKind: input.inputKind,
+            })),
+          };
+          break;
+        }
+        case 'GetInputSettings': {
+          const inputName = requestData?.inputName as string;
+          const input = inputs.get(inputName);
+          if (!input) {
+            result = false;
+            code = 600; // OBS_WEBSOCKET_ERROR_RESOURCE_NOT_FOUND semantics
+            comment = `No source was found by the name of \`${inputName}\`.`;
+          } else {
+            responseData = { inputSettings: input.inputSettings, inputKind: input.inputKind };
+          }
+          break;
+        }
+        case 'SetInputSettings': {
+          const inputName = requestData?.inputName as string;
+          const input = inputs.get(inputName);
+          if (!input) {
+            result = false;
+            code = 600;
+            comment = `No source was found by the name of \`${inputName}\`.`;
+          } else {
+            input.inputSettings = { ...(requestData?.inputSettings as Record<string, unknown>) };
+          }
+          break;
+        }
+        case 'CreateInput': {
+          const inputName = requestData?.inputName as string;
+          if (inputs.has(inputName)) {
+            result = false;
+            code = 601; // OBS_WEBSOCKET_ERROR_RESOURCE_ALREADY_EXISTS semantics
+            comment = 'A source already exists by that name.';
+          } else {
+            const inputKind = (requestData?.inputKind as string) ?? 'browser_source';
+            const inputSettings = { ...((requestData?.inputSettings as Record<string, unknown>) ?? {}) };
+            inputs.set(inputName, { inputKind, inputSettings });
+            responseData = { sceneItemId: nextSceneItemId++ };
+          }
+          break;
+        }
+        default: {
+          result = false;
+          code = 204;
+          break;
+        }
       }
     }
 
     const respond = (): void => {
-      send(socket, OP_REQUEST_RESPONSE, { requestId, requestStatus: { result, code }, responseData });
+      const requestStatus: { result: boolean; code: number; comment?: string } = { result, code };
+      if (comment !== undefined) requestStatus.comment = comment;
+      send(socket, OP_REQUEST_RESPONSE, { requestId, requestStatus, responseData });
     };
     const typeDelay = perTypeDelayMs.get(requestType) ?? 0;
     if (nextResponseDelayMs > 0 || typeDelay > 0) {
@@ -222,9 +330,14 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
       if (ms <= 0) perTypeDelayMs.delete(requestType);
       else perTypeDelayMs.set(requestType, ms);
     },
+    failNext(requestType, code = 500, comment = 'forced failure (test)') {
+      forcedFailures.set(requestType, { code, comment });
+    },
     persistent,
     broadcasts,
     requestLog,
+    requestPayloads,
+    inputs,
     close() {
       return new Promise<void>((resolve, reject) => {
         for (const c of wss.clients) c.terminate();

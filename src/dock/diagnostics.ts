@@ -74,7 +74,138 @@ const STORAGE_FAIL_TEXT =
 // the websocket password is otherwise impossible for an operator testing this
 // in real OBS — hence a dedicated Paste button instead of just relying on the
 // (absent) native paste gesture.
-const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
+export const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
+
+// --- Task 2.12: one-card connect + add-overlay-to-scene -------------------
+// Driver: operator feedback after testing in real OBS — 6 manual steps
+// (copy password, paste, connect websocket server, go to diagnostics, copy
+// overlay URL, add a Browser Source by hand) collapse to one paste + two
+// clicks. This module owns the shared, non-duplicated logic both the
+// Diagnostics tab's own button and the Live tab's Connect-card/empty-state
+// mirror call into (controller clarification: "one implementation, two
+// entry points").
+const ADD_OVERLAY_BASE_NAME = 'Live Counter Overlay';
+const OVERLAY_URL_MARKER = 'overlay.html';
+const BROWSER_SOURCE_KIND = 'browser_source';
+// obs-websocket's real code for "a source already exists by that name" —
+// the mock (tests/helpers/mock-obsws.ts) rejects CreateInput with exactly
+// this code on a genuine name collision, so checking for it in the request's
+// rejected Error message (ObsWsClient.request() has no structured error
+// shape) reliably distinguishes "try the next suffix" from "give up and
+// surface add-overlay-error".
+const NAME_TAKEN_CODE = '601';
+// Guards against a pathological/looping server response — no real scene
+// will ever have this many same-prefixed inputs.
+const MAX_NAME_SUFFIX_ATTEMPTS = 50;
+
+export type AddOverlayResult =
+  | { ok: true; action: 'created' | 'updated'; sceneName: string }
+  | { ok: false; message: string };
+
+interface InputListEntry {
+  inputName: string;
+  inputKind: string;
+}
+
+function isNameTakenError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(NAME_TAKEN_CODE);
+}
+
+/**
+ * Scans every browser_source input in the current program scene for one
+ * already pointed at overlay.html (found by settings, NOT by name — so an
+ * overlay the operator added by hand under a different name is still
+ * detected per the controller clarification) and either updates it in place
+ * or creates a fresh one, retrying with a numeric suffix on a genuine
+ * CreateInput name collision (exercised for real against the mock server,
+ * not merely assumed). Never leaves anything partially created: any
+ * request's failure short-circuits immediately with `ok: false`.
+ */
+export async function addOverlayToScene(client: ObsWsClient, port: number, password: string): Promise<AddOverlayResult> {
+  try {
+    const videoSettings = await client.request('GetVideoSettings');
+    const baseWidth = videoSettings.baseWidth as number;
+    const baseHeight = videoSettings.baseHeight as number;
+
+    const sceneResp = await client.request('GetCurrentProgramScene');
+    const sceneName = String(sceneResp.currentProgramSceneName);
+
+    const listResp = await client.request('GetInputList');
+    const inputs = (listResp.inputs ?? []) as InputListEntry[];
+
+    const settings = {
+      is_local_file: false,
+      url: overlayUrlFor(port, password),
+      width: baseWidth,
+      height: baseHeight,
+      shutdown: false,
+      restart_when_active: false,
+    };
+
+    let existingName: string | null = null;
+    for (const input of inputs) {
+      if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
+      const settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
+      const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
+      if (existingUrl.includes(OVERLAY_URL_MARKER)) {
+        existingName = input.inputName;
+        break;
+      }
+    }
+
+    if (existingName !== null) {
+      await client.request('SetInputSettings', { inputName: existingName, inputSettings: settings });
+      return { ok: true, action: 'updated', sceneName };
+    }
+
+    let candidate = ADD_OVERLAY_BASE_NAME;
+    for (let attempt = 1; attempt <= MAX_NAME_SUFFIX_ATTEMPTS; attempt++) {
+      try {
+        await client.request('CreateInput', {
+          sceneName,
+          inputName: candidate,
+          inputKind: BROWSER_SOURCE_KIND,
+          inputSettings: settings,
+        });
+        return { ok: true, action: 'created', sceneName };
+      } catch (err) {
+        if (!isNameTakenError(err)) throw err;
+        candidate = `${ADD_OVERLAY_BASE_NAME} ${attempt + 1}`;
+      }
+    }
+    return { ok: false, message: `Could not find a free name after ${MAX_NAME_SUFFIX_ATTEMPTS} attempts` };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Task 2.10's clipboard-paste mechanism, extracted so the Diagnostics
+ * settings form AND the Live tab's Connect card (Task 2.12) share one
+ * implementation instead of two copies of the same rejection/empty-read
+ * handling. On success, dispatches a real 'input' event on `input` so
+ * whatever listener is already wired to it (validation, live preview, error
+ * clearing) reacts exactly as if the operator had typed the value in.
+ */
+export async function pasteIntoField(
+  input: HTMLInputElement,
+  hooks: { onBlocked: () => void; onFilled: () => void },
+): Promise<void> {
+  let text: string;
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    hooks.onBlocked();
+    return;
+  }
+  if (text.length === 0) {
+    hooks.onBlocked();
+    return;
+  }
+  input.value = text;
+  hooks.onFilled();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -109,7 +240,7 @@ function parsePort(raw: string): number | null {
 // correctly percent-encoded in the result, and so the query string's `pw`
 // value is safely encoded regardless of what characters the operator's
 // password contains.
-function overlayUrlFor(port: number, password: string): string {
+export function overlayUrlFor(port: number, password: string): string {
   const overlayUrl = new URL('overlay.html', location.href);
   overlayUrl.search = '';
   overlayUrl.hash = '';
@@ -282,27 +413,20 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   // the field is left completely untouched and an inline hint takes over —
   // never a silent no-op an operator could mistake for "it worked."
   passwordPasteBtn.addEventListener('click', () => {
-    void (async () => {
-      settingsPasteError.hidden = true;
-      let text: string;
-      try {
-        text = await navigator.clipboard.readText();
-      } catch {
+    settingsPasteError.hidden = true;
+    void pasteIntoField(passwordInput, {
+      onBlocked: () => {
         settingsPasteError.hidden = false;
         settingsPasteError.textContent = CLIPBOARD_BLOCKED_TEXT;
-        return;
-      }
-      if (text.length === 0) {
-        settingsPasteError.hidden = false;
-        settingsPasteError.textContent = CLIPBOARD_BLOCKED_TEXT;
-        return;
-      }
-      passwordInput.value = text;
-      // Dispatched (not called directly) so the existing 'input' listener
-      // above — and any future one — updates state exactly as if the
-      // operator had typed it, with no separate code path to keep in sync.
-      passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
-    })();
+      },
+      // pasteIntoField() dispatches the 'input' event itself (not called
+      // directly) so the existing 'input' listener above — and any future
+      // one — updates state exactly as if the operator had typed it, with
+      // no separate code path to keep in sync.
+      onFilled: () => {
+        settingsPasteError.hidden = true;
+      },
+    });
   });
 
   // --- Version ---------------------------------------------------------
@@ -316,6 +440,51 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const copyOverlayUrlBtn = button('diag-copy-overlay-url', 'Copy overlay URL');
   overlayUrlRow.appendChild(copyOverlayUrlBtn);
   root.appendChild(overlayUrlRow);
+
+  // --- Task 2.12: add overlay to scene -----------------------------------
+  // The operator-feedback-driven shortcut ("that's a lot of steps ... going
+  // to diagnostics etc"): once connected, skip manually adding + configuring
+  // a Browser Source entirely. Enabled only while identified — every request
+  // it issues needs a live, authenticated socket. `addOverlayInFlight` guards
+  // against a double-click racing two concurrent scans/creates; the periodic
+  // poll below (`updateAddOverlayEnabled`) re-derives `disabled` from BOTH
+  // that flag and connectivity on every tick, so neither a slow request nor
+  // a connectivity drop mid-flight can leave the button wrongly enabled.
+  let addOverlayInFlight = false;
+  const addOverlayBtn = button('add-overlay', 'Add overlay to my scene');
+  root.appendChild(addOverlayBtn);
+  const addOverlayConfirm = el('div', { 'data-testid': 'add-overlay-confirm', class: 'copy-confirm' });
+  addOverlayConfirm.hidden = true;
+  root.appendChild(addOverlayConfirm);
+  const addOverlayError = el('div', { 'data-testid': 'add-overlay-error', class: 'field-error' });
+  addOverlayError.hidden = true;
+  root.appendChild(addOverlayError);
+
+  function updateAddOverlayEnabled(): void {
+    addOverlayBtn.disabled = addOverlayInFlight || opts.client.state !== 'identified';
+  }
+
+  addOverlayBtn.addEventListener('click', () => {
+    addOverlayConfirm.hidden = true;
+    addOverlayError.hidden = true;
+    addOverlayInFlight = true;
+    updateAddOverlayEnabled();
+    void addOverlayToScene(opts.client, opts.initialSettings.wsPort, opts.initialSettings.wsPassword).then((result) => {
+      addOverlayInFlight = false;
+      updateAddOverlayEnabled();
+      if (result.ok) {
+        // A source is now known to exist either way (just created, or found
+        // and fixed) — the button's own verb should reflect that from here.
+        addOverlayBtn.textContent = 'Fix overlay settings';
+        addOverlayConfirm.hidden = false;
+        addOverlayConfirm.textContent =
+          result.action === 'created' ? `Overlay added to ${result.sceneName}` : 'Overlay settings updated';
+      } else {
+        addOverlayError.hidden = false;
+        addOverlayError.textContent = result.message;
+      }
+    });
+  });
 
   root.appendChild(el('div', { class: 'diag-section-title' }, 'Dock URL (for re-adding)'));
   const dockUrlRow = el('div', { class: 'diag-url-row' });
@@ -431,6 +600,8 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
 
     const overlayResult = overlayRowState(lastOverlaySeenAt, silenceMs);
     setRow(rowOverlay, overlayResult.state, overlayResult.text);
+
+    updateAddOverlayEnabled();
   }
 
   function refresh(): void {

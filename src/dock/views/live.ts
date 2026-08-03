@@ -37,6 +37,9 @@ import { progressLabel, formatValue } from '../../engine/format.js';
 import type { SessionController, ControllerState } from '../controller.js';
 import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
+import type { ObsWsClient } from '../../protocol/obsws-client.js';
+import type { DockSettings } from '../../protocol/persistence.js';
+import { addOverlayToScene, pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../diagnostics.js';
 
 export interface LiveViewHandle {
   destroy(): void;
@@ -51,8 +54,21 @@ const OVERLAY_SILENCE_MS = 10_000;
 // Poll tick for the overlay-silence banner (it has no other event to hang
 // off of — nothing about the bus or the controller "ticks" once a second on
 // its own). Deliberately does NOT call the full render() — see the module
-// doc comment above.
+// doc comment above. Task 2.12 reuses this SAME tick to refresh the Connect
+// card's state line (see the module doc comment addition below) instead of
+// adding a second timer.
 const BANNER_POLL_MS = 1000;
+
+// Task 2.12 (one-card connect flow) — how long the Connect card shows
+// "Connecting…" before giving up and calling it unreachable. Matches
+// main.ts's own WS_BANNER_GRACE_MS so the card's own verdict and the
+// shell-wide banner-ws never visibly disagree about when a connection
+// attempt has gone on "too long".
+const CONNECT_GRACE_MS = 3000;
+const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry';
+const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from Show Connect Info";
+const CONNECT_CONNECTING_TEXT = 'Connecting…';
+const DEFAULT_CONNECT_PORT = 4455;
 
 interface LiveUiState {
   jumpOpen: boolean;
@@ -60,6 +76,39 @@ interface LiveUiState {
   resetConfirmOpen: boolean;
   endConfirmOpen: boolean;
   recoveredDismissed: boolean;
+}
+
+// Task 2.12 — the Connect card's own local form state (kept separate from
+// LiveUiState above: this is the one-card-connect feature's own concern, not
+// the counting session's). `portRaw`/`password` mirror the live <input>
+// values the same way jump-input's `ui.jumpValue` does, so a value the
+// operator typed survives the periodic render() the card's state line needs
+// (see CONNECT_GRACE_MS above) without needing anything beyond the existing
+// capture/restore focus mechanism.
+interface ConnectUiState {
+  portRaw: string;
+  password: string;
+  pasteErrorVisible: boolean;
+  portErrorVisible: boolean;
+}
+
+// Task 2.12 — the Live-empty state's mirror of Diagnostics' add-overlay
+// button (controller clarification: reachable without a trip to the
+// Diagnostics tab, completing the "one paste + two clicks" flow — Connect,
+// then Add overlay). Uses a DISTINCT testid (`live-add-overlay`) from
+// Diagnostics' own `add-overlay` (not `add-overlay` itself): both views stay
+// mounted simultaneously (main.ts mounts every tab's view at boot(), only
+// toggling `pane.hidden`), so sharing one testid would make every
+// `getByTestId('add-overlay')` lookup ambiguous (a strict-mode violation)
+// the instant both panes exist in the DOM at once — which is always, here.
+// The underlying request logic (`addOverlayToScene`) is still the single
+// shared implementation; only the DOM wiring differs per view, same as each
+// view already keeping its own local `el()`/`button()` helpers.
+interface LiveAddOverlayUiState {
+  inFlight: boolean;
+  hasOverlay: boolean;
+  confirmText: string | null;
+  errorText: string | null;
 }
 
 export interface MountLiveViewOptions {
@@ -70,6 +119,22 @@ export interface MountLiveViewOptions {
    * = assume connected, i.e. the pre-fix SHOWING/HIDDEN-only behavior.
    */
   isConnected?: () => boolean;
+  /**
+   * Task 2.12 — the live obs-websocket client. Needed for the Connect
+   * card's own state text (connecting/unreachable/auth-failed) and Retry
+   * button, and for the Live-empty mirror of add-overlay. Omitted (as in
+   * any caller that doesn't pass it) simply disables both — the view falls
+   * back to the pre-2.12 plain empty state while disconnected.
+   */
+  client?: ObsWsClient;
+  /** Seeds the Connect card's port field and the add-overlay mirror's overlay URL. */
+  initialSettings?: DockSettings;
+  /**
+   * Persists + reboots — the EXACT SAME callback main.ts hands to the
+   * Diagnostics settings form (controller clarification: "one
+   * implementation, two entry points" — no second reconnect path).
+   */
+  onSaveSettings?: (port: number, password: string) => void;
 }
 
 interface FocusSnapshot {
@@ -115,10 +180,65 @@ export function mountLiveView(
     recoveredDismissed: false,
   };
 
+  // Task 2.12 — Connect card + its Live-empty add-overlay mirror. Whether
+  // either feature is even reachable is fixed for this mount's whole
+  // lifetime (main.ts always passes all three together in production; a
+  // caller that omits them just gets the pre-2.12 behavior throughout).
+  const connectCardEnabled = opts.client !== undefined && opts.onSaveSettings !== undefined;
+  const client = opts.client;
+
+  const connectUi: ConnectUiState = {
+    portRaw: String(opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT),
+    password: opts.initialSettings?.wsPassword ?? '',
+    pasteErrorVisible: false,
+    portErrorVisible: false,
+  };
+  // Tracks whether the connect-password field has already received its
+  // mount-time autofocus, so a periodic re-render (the card's state line
+  // ticks every second — see CONNECT_GRACE_MS) never steals focus back into
+  // the field a second time; the generic capture/restore mechanism below
+  // handles preserving whatever the operator has ALREADY focused instead.
+  let connectCardEverShown = false;
+  // Wall-clock start of the current "trying to connect" window — reset
+  // whenever a fresh disconnect begins (see refreshConnectTiming()) or the
+  // operator clicks Retry, so "Connecting…" always gets a fresh
+  // CONNECT_GRACE_MS window rather than instantly reading as unreachable.
+  let connectSince = Date.now();
+  let wasConnected = isConnected();
+
+  const addOverlayUi: LiveAddOverlayUiState = {
+    inFlight: false,
+    hasOverlay: false,
+    confirmText: null,
+    errorText: null,
+  };
+
   // Initialized "now" rather than 0: a freshly-mounted view with a session
   // already present must not immediately claim overlay silence before it has
   // had any chance to hear from the overlay at all.
   let lastOverlaySeenAt = Date.now();
+
+  // Re-derives connectSince whenever a NEW disconnect begins (transition
+  // from connected -> not), so the grace window always measures from the
+  // most recent drop rather than however long the dock has been running.
+  // Called at the top of every render() — regardless of what triggered it —
+  // so the timing stays correct whether the trigger was the periodic poll,
+  // a client lifecycle event, or an ordinary controller notification.
+  function refreshConnectTiming(): void {
+    const nowConnected = isConnected();
+    if (!nowConnected && wasConnected) connectSince = Date.now();
+    wasConnected = nowConnected;
+  }
+
+  function connectPhase(): 'connecting' | 'unreachable' | 'auth-failed' {
+    if (client && client.state === 'auth-failed') return 'auth-failed';
+    return Date.now() - connectSince >= CONNECT_GRACE_MS ? 'unreachable' : 'connecting';
+  }
+
+  function parseConnectPort(raw: string): number | null {
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  }
 
   function dispatch(cmd: Command): void {
     controller.dispatch(cmd);
@@ -133,6 +253,7 @@ export function mountLiveView(
   }
 
   function render(): void {
+    refreshConnectTiming();
     const focusSnapshot = captureFocus();
 
     const state = controller.getState();
@@ -147,15 +268,172 @@ export function mountLiveView(
       container.appendChild(renderOverlayBanner());
     }
 
-    if (session === null) {
-      container.appendChild(
-        el('div', { 'data-testid': 'live-empty', class: 'live-empty' }, 'No active session — create one in Setup'),
-      );
+    // Task 2.12: while there's no active session, "useful session UI" IS the
+    // empty state — so the Connect card only ever displaces THAT, never the
+    // live-root counting screen a session already in progress still renders
+    // regardless of connectivity (the operator keeps counting offline; the
+    // status chip/banner-overlay already cover that story).
+    if (session === null && !isConnected() && connectCardEnabled) {
+      container.appendChild(renderConnectCard());
+      if (!connectCardEverShown) {
+        connectCardEverShown = true;
+        const password = container.querySelector<HTMLInputElement>('[data-testid="connect-password"]');
+        password?.focus();
+      }
     } else {
-      container.appendChild(renderLive(session, state));
+      connectCardEverShown = false;
+      if (session === null) {
+        container.appendChild(renderLiveEmpty());
+      } else {
+        container.appendChild(renderLive(session, state));
+      }
     }
 
     restoreFocus(focusSnapshot);
+  }
+
+  function renderLiveEmpty(): HTMLElement {
+    const wrap = el('div', { 'data-testid': 'live-empty', class: 'live-empty' });
+    wrap.appendChild(el('div', {}, 'No active session — create one in Setup'));
+
+    // Task 2.12 — mirrors Diagnostics' add-overlay button here so the "one
+    // paste + two clicks" flow never requires a trip to the Diagnostics tab:
+    // paste the password into the Connect card (1), click Connect (click 1),
+    // land here once identified, click Add overlay (click 2).
+    const settingsAtMount = opts.initialSettings;
+    if (client !== undefined && settingsAtMount !== undefined) {
+      const btn = button('live-add-overlay', addOverlayUi.hasOverlay ? 'Fix overlay settings' : 'Add overlay to my scene');
+      btn.disabled = addOverlayUi.inFlight || client.state !== 'identified';
+      btn.addEventListener('click', () => {
+        addOverlayUi.inFlight = true;
+        addOverlayUi.confirmText = null;
+        addOverlayUi.errorText = null;
+        render();
+        void addOverlayToScene(client, settingsAtMount.wsPort, settingsAtMount.wsPassword).then((result) => {
+          addOverlayUi.inFlight = false;
+          if (result.ok) {
+            addOverlayUi.hasOverlay = true;
+            addOverlayUi.confirmText = result.action === 'created' ? `Overlay added to ${result.sceneName}` : 'Overlay settings updated';
+          } else {
+            addOverlayUi.errorText = result.message;
+          }
+          render();
+        });
+      });
+      wrap.appendChild(btn);
+
+      if (addOverlayUi.confirmText !== null) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-confirm', class: 'copy-confirm' }, addOverlayUi.confirmText));
+      }
+      if (addOverlayUi.errorText !== null) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-error', class: 'field-error' }, addOverlayUi.errorText));
+      }
+    }
+
+    return wrap;
+  }
+
+  function connectStateText(phase: ReturnType<typeof connectPhase>): string {
+    switch (phase) {
+      case 'auth-failed':
+        return CONNECT_AUTH_FAILED_TEXT;
+      case 'unreachable':
+        return CONNECT_UNREACHABLE_TEXT;
+      case 'connecting':
+      default:
+        return CONNECT_CONNECTING_TEXT;
+    }
+  }
+
+  function renderConnectCard(): HTMLElement {
+    const card = el('div', { 'data-testid': 'connect-card', class: 'connect-card' });
+    card.appendChild(el('div', { class: 'diag-section-title' }, 'Connect to OBS'));
+
+    const portLabel = el('label', {});
+    portLabel.append('Port ');
+    const portInput = el('input', { 'data-testid': 'connect-port', type: 'number', min: '1', max: '65535' }) as HTMLInputElement;
+    portInput.value = connectUi.portRaw;
+    portInput.addEventListener('input', () => {
+      connectUi.portRaw = portInput.value;
+    });
+    portLabel.appendChild(portInput);
+    card.appendChild(portLabel);
+
+    const passwordLabel = el('label', {});
+    passwordLabel.append('Password ');
+    const passwordInput = el('input', { 'data-testid': 'connect-password', type: 'password' }) as HTMLInputElement;
+    passwordInput.value = connectUi.password;
+    passwordInput.addEventListener('input', () => {
+      connectUi.password = passwordInput.value;
+      connectUi.pasteErrorVisible = false;
+      render();
+    });
+    passwordLabel.appendChild(passwordInput);
+    card.appendChild(passwordLabel);
+
+    // Task 2.10's paste mechanism (shared with Diagnostics — see
+    // diagnostics.ts's pasteIntoField doc comment), reused rather than
+    // reimplemented: OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to
+    // page content, so this is the operator's only way to get a copied
+    // password in here at all.
+    const pasteBtn = button('connect-paste', 'Paste');
+    pasteBtn.addEventListener('click', () => {
+      connectUi.pasteErrorVisible = false;
+      void pasteIntoField(passwordInput, {
+        onBlocked: () => {
+          connectUi.pasteErrorVisible = true;
+          render();
+        },
+        onFilled: () => {
+          connectUi.password = passwordInput.value;
+          connectUi.pasteErrorVisible = false;
+          render();
+        },
+      });
+    });
+    card.appendChild(pasteBtn);
+
+    const pasteError = el('div', { 'data-testid': 'connect-paste-error', class: 'field-error' }, CLIPBOARD_BLOCKED_TEXT);
+    pasteError.hidden = !connectUi.pasteErrorVisible;
+    card.appendChild(pasteError);
+
+    const portError = el('div', { 'data-testid': 'connect-port-error', class: 'field-error' }, 'Enter a port between 1 and 65535.');
+    portError.hidden = !connectUi.portErrorVisible;
+    card.appendChild(portError);
+
+    const submitBtn = button('connect-submit', 'Connect');
+    submitBtn.addEventListener('click', () => {
+      const port = parseConnectPort(portInput.value);
+      if (port === null) {
+        connectUi.portErrorVisible = true;
+        render();
+        return;
+      }
+      connectUi.portErrorVisible = false;
+      // Same reconnect path the Diagnostics settings form uses (controller
+      // clarification: one implementation, two entry points) — persists via
+      // DockStorage.saveSettings and reboots through main.ts's boot(),
+      // which disposes the old controller/closes the old client first (Task
+      // 2.5 dispose discipline), so no zombie writer survives a reconnect
+      // triggered from here.
+      opts.onSaveSettings?.(port, passwordInput.value);
+    });
+    card.appendChild(submitBtn);
+
+    const phase = connectPhase();
+    card.appendChild(el('div', { 'data-testid': 'connect-state', class: 'connect-state' }, connectStateText(phase)));
+
+    if (phase === 'unreachable') {
+      const retryBtn = button('connect-retry', 'Retry');
+      retryBtn.addEventListener('click', () => {
+        connectSince = Date.now();
+        client?.connect();
+        render();
+      });
+      card.appendChild(retryBtn);
+    }
+
+    return card;
   }
 
   // Captures the currently-focused element's data-testid (+ text selection,
@@ -582,10 +860,30 @@ export function mountLiveView(
   // the module doc comment): a timer must never trigger a full rebuild and
   // steal focus out of jump-input.
   const bannerPoll = setInterval(() => {
-    updateOverlayBanner();
-    updateStatusChip();
+    // Task 2.12: the Connect card's state line is a WALL-CLOCK verdict
+    // (connecting vs. unreachable — see CONNECT_GRACE_MS) with no event to
+    // hang off of, exactly like the overlay-silence banner below it, so it
+    // needs this same tick to stay current. Unlike that banner, though, the
+    // card is rendered through the ordinary full render() pipeline (reusing
+    // its capture/restore focus mechanism, per the controller clarification)
+    // rather than a surgical in-place update — safe here specifically
+    // because the card only ever shows while session === null, so there is
+    // no live-root state for a full rebuild to disturb.
+    const showingConnectCard = controller.getState().session === null && !isConnected() && connectCardEnabled;
+    if (showingConnectCard) {
+      render();
+    } else {
+      updateOverlayBanner();
+      updateStatusChip();
+    }
   }, BANNER_POLL_MS);
   document.addEventListener('keydown', onKeydown);
+  // Instant feedback on the two lifecycle events the client actually emits
+  // (see obsws-client.ts — 'connecting' has none of its own, which is why
+  // the poll above exists at all) rather than waiting out up to one full
+  // BANNER_POLL_MS tick to notice.
+  const unsubIdentified = client?.on('identified', () => render());
+  const unsubAuthFailed = client?.on('auth-failed', () => render());
 
   render();
 
@@ -593,6 +891,8 @@ export function mountLiveView(
     destroy(): void {
       unsubController();
       unsubBus();
+      unsubIdentified?.();
+      unsubAuthFailed?.();
       clearInterval(bannerPoll);
       document.removeEventListener('keydown', onKeydown);
     },

@@ -96,6 +96,42 @@
         color: #a0a0a0;
         font-size: 1.1rem;
       }
+      .live-empty button.ctl {
+        margin-top: 0.75rem;
+      }
+      /* Task 2.12 — one-card connect flow. Mirrors .settings-row's own
+         input/label styling (Diagnostics' Settings section) so the two
+         forms that persist through the SAME onSaveSettings path also look
+         like the same feature. */
+      .connect-card {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: flex-start;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 0.9rem;
+        margin-top: 0.5rem;
+      }
+      .connect-card label {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .connect-card input {
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.35rem 0.5rem;
+        min-height: 40px;
+        width: 10rem;
+      }
+      .connect-state {
+        color: #ffd699;
+        font-size: 0.9rem;
+      }
       .current-value {
         font-size: clamp(2.5rem, 14vw, 5rem);
         font-weight: 700;

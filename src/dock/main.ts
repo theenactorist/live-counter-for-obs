@@ -288,6 +288,20 @@ function main(): void {
       }
     }, WS_BANNER_POLL_MS);
 
+    // Task 2.12 (controller clarification: "one implementation, two entry
+    // points") — the Connect card's Connect button and the Diagnostics
+    // settings form's Save button persist + reboot through this EXACT SAME
+    // callback, not two copies of the same reconnect logic. Captures THIS
+    // boot()'s `storage` (the outer binding is reassigned by a later
+    // reconnect, and both callers are torn down and remounted by that same
+    // boot() call anyway).
+    const storageForSave = storage;
+    const onSaveSettings = (port: number, password: string): void => {
+      storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
+      boot(port, password);
+    };
+    const connectSettings = { wsPort, wsPassword, schemaVersion: 1 as const };
+
     // exactOptionalPropertyTypes forbids `{ overlaySilenceMs: undefined }` —
     // build the options object conditionally so the key is omitted entirely
     // when there's no override, letting mountLiveView fall back to its own
@@ -299,6 +313,9 @@ function main(): void {
       // reassigned by a later settings-save reconnect, and this view is torn
       // down and remounted by that same call anyway).
       isConnected: (): boolean => bootedClient.state === 'identified',
+      client: bootedClient,
+      initialSettings: connectSettings,
+      onSaveSettings,
     };
     liveHandle = mountLiveView(shell.panes.live, controller, bus, liveOpts);
 
@@ -329,11 +346,8 @@ function main(): void {
       client,
       bus,
       storage,
-      initialSettings: { wsPort, wsPassword, schemaVersion: 1 },
-      onSaveSettings: (port, password) => {
-        storage.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
-        boot(port, password);
-      },
+      initialSettings: connectSettings,
+      onSaveSettings,
       ...diagnosticsOpts,
     });
 
