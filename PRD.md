@@ -176,14 +176,15 @@ The dock continuously shows: current value (dominant), `X of Y` (Y = configured 
 
 | Layout | Shape | Label text |
 |---|---|---|
-| `numberOnly` | `23` | none |
-| `textBefore` | `HALLELUJAH × 23` (inline) | template with `{count}` |
-| `textAfter` | `23 TIMES` (inline) | template with `{count}` |
-| `textAbove` | label stacked over the number | plain label, no token |
-| `textBelow` | number stacked over the label | plain label, no token |
-| `textBehind` | number in front, oversized ghost label behind | plain label, no token |
+| `numberOnly` | `23` | ignored |
+| `textBefore` | `HALLELUJAH × 23` — label then number | plain label |
+| `textAfter` | `23 TIMES` — number then label | plain label |
+| `textAbove` | label stacked over the number | plain label |
+| `textBelow` | number stacked over the label | plain label |
+| `textBehind` | number in front, oversized ghost label behind | plain label |
 
-- **Token rule by layout:** inline layouts (`textBefore`, `textAfter`) require `{count}` in the template and show an inline error without it. Stacked and behind layouts (`textAbove`, `textBelow`, `textBehind`) take a plain label and must NOT require a token; a `{count}` present in those is still substituted rather than shown literally. `numberOnly` ignores the label entirely.
+- **The label is always plain text and `{count}` is never required** (corrected 2026-08-02 — the earlier rule made `textBefore` and `textAfter` render identically, defeating the gallery). The layout alone decides where the number sits relative to the label, so the Setup field reads "Label text" and no layout blocks Save or Start for a missing token.
+- **Token as a power/compatibility path:** if the label does contain `{count}`, it is honoured — inline layouts split on it (the token then dictates placement) and stacked/behind layouts substitute it. Setup shows a neutral note when a token is present, explaining that it sets where the number goes. This keeps pre-gallery presets (whose templates carry the token) rendering exactly as before.
 - Live example renders with the current value in the chosen layout.
 - Templates are plain text, HTML-escaped before rendering. A hostile template (e.g. containing `<img onerror=…>`) renders inert as literal text — covered by an acceptance test.
 - MVP glyph coverage is the bundled fonts' Latin repertoire; the editor warns when template characters fall outside it.
@@ -271,7 +272,7 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 19. Dock closed during automatic run → overlay shows "control panel closed" hint within 6 s and holds the last value; dock reopened → session Paused at that value.
 20. Storage quota exhausted (fault injection) → session continues in memory with a visible warning; no crash; event log records it.
 21. Export copies a JSON block containing all presets; on a fresh profile, importing that block restores every preset with all settings intact (per AC 15); importing malformed JSON or a block containing any invalid preset changes nothing and shows an inline error.
-22. Each of the six layouts (§8.8) renders its documented shape on the overlay with the same value and style; switching layout in Setup updates the preview without touching the live session; inline layouts block save/start without `{count}`, stacked/behind layouts accept a plain label.
+22. Each of the six layouts (§8.8) renders its documented shape on the overlay with the same value and style; switching layout in Setup updates the preview without touching the live session or broadcasting state. With a token-less label, `textBefore` places the number after the label and `textAfter` places it before — the two are visibly different. No layout blocks Save or Start for a missing `{count}`; a label containing one still renders per the compatibility path.
 23. With the OS clipboard shortcuts unavailable (OBS dock), the Paste buttons populate the websocket-password and preset-import fields, and the Copy buttons place the overlay URL and the preset export on the clipboard; a clipboard denial surfaces the select-to-copy fallback rather than a false success.
 24. A preset saved before the layout gallery existed (schema v1) loads after upgrade with a sensible layout inferred (inline when its template carries `{count}`, number-only when it has no template) and all other settings intact.
 
