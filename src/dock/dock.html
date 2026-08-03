@@ -293,6 +293,108 @@
         font-variant-numeric: tabular-nums;
         margin-bottom: 0.6rem;
         word-break: break-word;
+        display: inline-flex;
+        gap: 0.3em;
+      }
+      .setup-preview-row {
+        flex-direction: row;
+        align-items: baseline;
+      }
+      .setup-preview-column {
+        flex-direction: column;
+        align-items: center;
+      }
+      .setup-preview-relative {
+        position: relative;
+      }
+      .setup-preview-ghost {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        opacity: 0.18;
+        pointer-events: none;
+        white-space: nowrap;
+        z-index: 0;
+      }
+      .setup-preview-number-front {
+        position: relative;
+        z-index: 1;
+      }
+      /* Task 2.11 — six-layout gallery */
+      .layout-gallery {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+      .layout-thumb-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.3rem;
+        background: #1a1a1a;
+        border: 1px solid #3a3a3a;
+        border-radius: 6px;
+        padding: 0.5rem 0.6rem;
+        min-width: 64px;
+        min-height: 64px;
+        cursor: pointer;
+        color: #e8e8e8;
+      }
+      .layout-thumb-btn.selected {
+        border-color: #4da3ff;
+        background: #123a52;
+      }
+      .layout-thumb {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        width: 40px;
+        height: 28px;
+        position: relative;
+      }
+      .layout-thumb-row {
+        flex-direction: row;
+      }
+      .layout-thumb-column {
+        flex-direction: column;
+      }
+      .layout-thumb-overlap {
+        display: block;
+      }
+      .layout-thumb-overlap .layout-thumb-bar-number {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+      }
+      .layout-thumb-bar {
+        background: #6ab0ff;
+        border-radius: 2px;
+      }
+      .layout-thumb-bar-label {
+        width: 14px;
+        height: 5px;
+      }
+      .layout-thumb-bar-number {
+        width: 20px;
+        height: 12px;
+      }
+      .layout-thumb-bar-ghost {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 32px;
+        height: 22px;
+        opacity: 0.35;
+      }
+      .layout-thumb-caption {
+        font-size: 0.7rem;
+        color: #a0a0a0;
+        text-align: center;
       }
       .list-header {
         margin-bottom: 0.75rem;

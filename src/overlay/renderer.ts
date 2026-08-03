@@ -53,11 +53,12 @@
 //  - Animation triggers on VALUE CHANGE only, never on every broadcast (a
 //    heartbeat re-broadcast of an unchanged value must not re-animate).
 import type { Bus, BusMessage } from '../protocol/bus.js';
-import type { Session, StyleConfig, AnimationConfig } from '../engine/types.js';
+import type { Session, StyleConfig, AnimationConfig, OverlayLayout } from '../engine/types.js';
 import type { OverlaySnapshot } from '../protocol/persistence.js';
 import { formatValue } from '../engine/format.js';
 import { interruptAndAnimate } from './animations.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
+import { splitTemplate, substituteLabel } from '../shared/template-content.js';
 
 export interface StatePayload {
   session: Session | null;
@@ -127,16 +128,9 @@ function toStatePayload(payload: unknown): StatePayload | null {
   };
 }
 
-// Splits operator-authored template text around the FIRST `{count}` token
-// into the parts that flank the rendered number. Absent `{count}` (should
-// never happen for a saved template — setup.ts requires it — but handled
-// defensively) folds the whole string into `before`.
-function splitTemplate(template: string | null): { before: string; after: string } {
-  if (template === null) return { before: '', after: '' };
-  const idx = template.indexOf('{count}');
-  if (idx === -1) return { before: template, after: '' };
-  return { before: template.slice(0, idx), after: template.slice(idx + '{count}'.length) };
-}
+// splitTemplate/substituteLabel now live in ../shared/template-content.js —
+// shared with the Setup view's own layout preview (Task 2.11) so the two
+// never drift, the same reason ../shared/animation-keyframes.js exists.
 
 export function mountOverlayRenderer(
   container: HTMLElement,
@@ -158,7 +152,24 @@ export function mountOverlayRenderer(
   numberEl.dataset.testid = 'overlay-number';
   const afterEl = document.createElement('span');
   afterEl.dataset.testid = 'overlay-text-after';
-  contentRoot.append(beforeEl, numberEl, afterEl);
+  // Task 2.11 — the `textBehind` layout's ghost label. A genuinely NEW node
+  // (per the brief: "if a layout needs an extra node, create it once at
+  // mount and toggle its visibility") rather than repurposing beforeEl/afterEl,
+  // since the ghost's positioning (absolute, centered, oversized, low-opacity)
+  // would otherwise have to be fully reset for every other layout that reuses
+  // those same two nodes for their own, very different purpose (inline/stacked
+  // label text). Always present in the DOM from mount; `display` toggles with
+  // the layout, never removed/rebuilt.
+  const behindEl = document.createElement('span');
+  behindEl.dataset.testid = 'overlay-text-behind';
+  behindEl.style.position = 'absolute';
+  behindEl.style.top = '50%';
+  behindEl.style.left = '50%';
+  behindEl.style.transform = 'translate(-50%, -50%)';
+  behindEl.style.pointerEvents = 'none';
+  behindEl.style.whiteSpace = 'nowrap';
+  behindEl.style.display = 'none';
+  contentRoot.append(beforeEl, numberEl, afterEl, behindEl);
 
   // Minors: small, low-opacity, fixed-corner, subtle gray — must never
   // compete visually with the counter itself, and must sit outside
@@ -254,6 +265,7 @@ export function mountOverlayRenderer(
     beforeEl.textContent = '';
     numberEl.textContent = '';
     afterEl.textContent = '';
+    behindEl.textContent = '';
     cancelAllAnimations();
   }
 
@@ -292,6 +304,43 @@ export function mountOverlayRenderer(
     }, watchdogMs);
   }
 
+  // Task 2.11 — the six layouts' STRUCTURAL differences: which axis
+  // contentRoot stacks along, visual order of the label vs. the number (via
+  // the `order` property, never DOM reordering — the stable-node discipline
+  // applies to ordering too, not just presence/absence), and the ghost
+  // label's stacking/flow-participation for textBehind. Deliberately kept
+  // separate from applyStyle() below: these depend only on `layout`, while
+  // the numeric/color properties below depend only on the rest of
+  // StyleConfig — factoring them apart means neither has to re-derive the
+  // other's inputs.
+  function applyLayoutStyle(layout: OverlayLayout): void {
+    const stacked = layout === 'textAbove' || layout === 'textBelow';
+    const behind = layout === 'textBehind';
+
+    contentRoot.style.flexDirection = stacked ? 'column' : 'row';
+    contentRoot.style.alignItems = stacked ? 'center' : 'baseline';
+    // A containing block for behindEl's `position: absolute` centering
+    // (top/left: 50% below) — only needed while textBehind is active; left at
+    // '' otherwise so it never leaks into an unrelated ancestor's own
+    // positioning context.
+    contentRoot.style.position = behind ? 'relative' : '';
+
+    // textBelow's label (beforeEl) must appear AFTER the number visually
+    // despite being the FIRST DOM child (mount-time append order, unchanged)
+    // — `order` reorders the flex layout without moving a single node.
+    beforeEl.style.order = layout === 'textBelow' ? '1' : '0';
+    numberEl.style.order = '0';
+
+    // textBehind: the number must paint ABOVE the ghost label, and the ghost
+    // must not affect layout flow (brief) — numberEl needs `position:
+    // relative` for its own z-index to take effect at all (z-index is a
+    // no-op on statically-positioned elements), stacked above behindEl's
+    // `position: absolute` + z-index 0 set once at mount.
+    numberEl.style.position = behind ? 'relative' : '';
+    numberEl.style.zIndex = behind ? '1' : '';
+    behindEl.style.display = behind ? 'block' : 'none';
+  }
+
   function applyStyle(style: StyleConfig | null): void {
     const s = style ?? DEFAULT_STYLE;
 
@@ -305,7 +354,6 @@ export function mountOverlayRenderer(
     contentRoot.style.fontFamily = s.fontFamily;
     contentRoot.style.fontWeight = String(s.fontWeight);
     contentRoot.style.display = 'inline-flex';
-    contentRoot.style.alignItems = 'baseline';
     contentRoot.style.padding = `${s.paddingPx}px`;
     contentRoot.style.backgroundColor = s.background ? s.background.color : '';
 
@@ -321,6 +369,61 @@ export function mountOverlayRenderer(
     for (const textEl of [beforeEl, afterEl]) {
       textEl.style.fontSize = `${s.textSizePx}px`;
       textEl.style.color = s.textColor;
+    }
+
+    // textBehind ghost (controller clarification): ~2.4x the number's
+    // font-size, ~0.18 opacity, same color as the number so it reads as a
+    // "shadow" of it. Set unconditionally (cheap) — `display` in
+    // applyLayoutStyle above is what actually gates visibility per layout.
+    behindEl.style.fontSize = `${s.numberSizePx * 2.4}px`;
+    behindEl.style.color = s.numberColor;
+    behindEl.style.opacity = '0.18';
+    behindEl.style.zIndex = '0';
+
+    applyLayoutStyle(s.layout);
+  }
+
+  // Task 2.11 — the six layouts' CONTENT differences. numberEl always shows
+  // the formatted value regardless of layout; the label text's source and
+  // destination node vary:
+  //  - numberOnly ignores the label/template entirely (brief).
+  //  - textBefore/textAfter keep today's split-on-`{count}` rendering
+  //    (splitTemplate), which REQUIRES the token (setup.ts's validation).
+  //  - textAbove/textBelow/textBehind render the label verbatim via
+  //    substituteLabel (does NOT require the token) — the only difference
+  //    between them is WHICH node gets it (beforeEl for the stacked
+  //    layouts, whose visual order applyLayoutStyle above already handles;
+  //    behindEl for the ghost).
+  function applyLayoutContent(layout: OverlayLayout, template: string | null, valueText: string): void {
+    numberEl.textContent = valueText;
+    switch (layout) {
+      case 'numberOnly':
+        beforeEl.textContent = '';
+        afterEl.textContent = '';
+        behindEl.textContent = '';
+        break;
+      case 'textBefore':
+      case 'textAfter': {
+        const { before, after } = splitTemplate(template);
+        // Operator content: textContent only, never innerHTML — a hostile
+        // template (e.g. an <img onerror=...> payload) must render as inert
+        // literal text, not markup (AC 11).
+        beforeEl.textContent = before;
+        afterEl.textContent = after;
+        behindEl.textContent = '';
+        break;
+      }
+      case 'textAbove':
+      case 'textBelow':
+        beforeEl.textContent = substituteLabel(template, valueText);
+        afterEl.textContent = '';
+        behindEl.textContent = '';
+        break;
+      case 'textBehind':
+        beforeEl.textContent = '';
+        afterEl.textContent = '';
+        behindEl.textContent = substituteLabel(template, valueText);
+        break;
     }
   }
 
@@ -343,13 +446,8 @@ export function mountOverlayRenderer(
     animation: AnimationConfig | null,
   ): void {
     applyStyle(style);
-    const { before, after } = splitTemplate(template);
-    // Operator content: textContent only, never innerHTML — a hostile
-    // template (e.g. an <img onerror=...> payload) must render as inert
-    // literal text, not markup (AC 11).
-    beforeEl.textContent = before;
-    numberEl.textContent = formatValue(session.currentValue);
-    afterEl.textContent = after;
+    const s = style ?? DEFAULT_STYLE;
+    applyLayoutContent(s.layout, template, formatValue(session.currentValue));
     showContent();
 
     const changed = lastPaintedValue !== null && lastPaintedValue !== session.currentValue;
@@ -359,10 +457,7 @@ export function mountOverlayRenderer(
 
   function renderSnapshot(snapshot: OverlaySnapshot): void {
     applyStyle(snapshot.style);
-    const { before, after } = splitTemplate(snapshot.template);
-    beforeEl.textContent = before;
-    numberEl.textContent = formatValue(snapshot.value);
-    afterEl.textContent = after;
+    applyLayoutContent(snapshot.style.layout, snapshot.template, formatValue(snapshot.value));
     showContent();
     lastPaintedValue = snapshot.value;
   }

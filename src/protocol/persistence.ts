@@ -11,6 +11,7 @@ import {
   serializeSession,
   loadPresets as engineLoadPresets,
   serializePresets,
+  inferLayout,
   type LoadResult,
   type StoredSession,
 } from '../engine/migrate.js';
@@ -30,7 +31,12 @@ export interface OverlaySnapshot {
   template: string | null;
   value: number;
   style: StyleConfig;
-  schemaVersion: 1;
+  // Task 2.11: bumped 1 -> 2 alongside PRESET_SCHEMA_VERSION for StyleConfig's
+  // new required `layout` field. See `migrateSnapshotV1` below for the
+  // upgrade path — a v1 snapshot on disk (e.g. from operator testing before
+  // this landed) is migrated the same way a v1 preset is (engine/migrate.ts's
+  // `inferLayout`), not merely rejected.
+  schemaVersion: 2;
 }
 
 export interface DockSettings {
@@ -62,9 +68,28 @@ function isOverlaySnapshot(x: unknown): x is OverlaySnapshot {
   const { template, value, style, schemaVersion } = x;
   if (!(template === null || typeof template === 'string')) return false;
   if (typeof value !== 'number') return false;
-  if (schemaVersion !== 1) return false;
+  if (schemaVersion !== 2) return false;
   if (!isPlainObject(style)) return false;
   return true;
+}
+
+// Task 2.11 — OverlaySnapshot's own v1 -> v2 upgrade path. Snapshots are
+// validated on a separate path from Preset (loadSnapshot() below, not
+// engine/migrate.ts's loadPresets()/PRESET_MIGRATIONS), so this is a second,
+// deliberately-parallel migration rather than a call into that table — but it
+// infers `layout` via the EXACT SAME `inferLayout` rule (imported from
+// engine/migrate.ts) so a v1 snapshot from operator testing the night before
+// this landed upgrades identically to a v1 preset would. A non-plain-object
+// `style`, or a `schemaVersion` that is not exactly 1, is left untouched —
+// isOverlaySnapshot rejects the former just below, and the latter is either
+// already current (2) or an unknown future version, neither of which this
+// step should touch.
+function migrateSnapshotV1(x: unknown): unknown {
+  if (!isPlainObject(x)) return x;
+  const { schemaVersion, template, style } = x;
+  if (schemaVersion !== 1) return x;
+  if (!isPlainObject(style)) return { ...x, schemaVersion: 2 };
+  return { ...x, schemaVersion: 2, style: { ...style, layout: inferLayout(template) } };
 }
 
 function isDockSettings(x: unknown): x is DockSettings {
@@ -325,7 +350,8 @@ export class DockStorage {
     if (raw === null) return null;
     try {
       const parsed = JSON.parse(raw) as unknown;
-      return isOverlaySnapshot(parsed) ? parsed : null;
+      const migrated = migrateSnapshotV1(parsed);
+      return isOverlaySnapshot(migrated) ? migrated : null;
     } catch {
       return null;
     }

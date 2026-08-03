@@ -73,12 +73,13 @@ function styleFixture(): StyleConfig {
     shadow: null,
     background: null,
     paddingPx: 8,
+    layout: 'numberOnly',
   };
 }
 
 function presetFixture(overrides: Partial<Preset> = {}): Preset {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'preset-1',
     title: 'My Preset',
     description: null,
@@ -418,7 +419,7 @@ describe('DockStorage — snapshot', () => {
   it('round-trips an overlay snapshot, including clearing it with null', () => {
     const local = new MapStorage();
     const storage = new DockStorage(local, null);
-    const snapshot: OverlaySnapshot = { template: '{count} left', value: 42, style: styleFixture(), schemaVersion: 1 };
+    const snapshot: OverlaySnapshot = { template: '{count} left', value: 42, style: styleFixture(), schemaVersion: 2 };
 
     expect(storage.loadSnapshot()).toBeNull();
 
@@ -427,6 +428,59 @@ describe('DockStorage — snapshot', () => {
 
     storage.saveSnapshot(null);
     expect(storage.loadSnapshot()).toBeNull();
+  });
+
+  // Task 2.11 (PRD §8.8): a v1 snapshot — e.g. from an "End & keep overlay"
+  // the operator triggered testing the night before this schema bump landed
+  // — has no `layout` on its `style` at all. loadSnapshot() must migrate it
+  // to v2 by inferring one from `template`, the exact same rule
+  // engine/migrate.ts's PRESET_MIGRATIONS[1] uses for presets, rather than
+  // treating it as corrupt/invalid.
+  it('migrates a hand-written v1 snapshot to v2, inferring layout from its template', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const v1Style = {
+      fontFamily: 'Inter', fontWeight: 700, numberSizePx: 96, textSizePx: 24,
+      numberColor: '#ffffff', textColor: '#cccccc',
+      alignH: 'center', alignV: 'middle',
+      outline: null, shadow: null, background: null, paddingPx: 8,
+      // no `layout` — this is the pre-2.11 v1 shape.
+    };
+    local.setItem(
+      'lc.snapshot.v1',
+      JSON.stringify({ template: 'Final: {count}', value: 42, style: v1Style, schemaVersion: 1 }),
+    );
+
+    const loaded = storage.loadSnapshot();
+
+    expect(loaded).toEqual({
+      template: 'Final: {count}',
+      value: 42,
+      style: { ...v1Style, layout: 'textBefore' },
+      schemaVersion: 2,
+    });
+  });
+
+  it('migrates a v1 snapshot with a null template to numberOnly', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const v1Style = {
+      fontFamily: 'Inter', fontWeight: 700, numberSizePx: 96, textSizePx: 24,
+      numberColor: '#ffffff', textColor: '#cccccc',
+      alignH: 'center', alignV: 'middle',
+      outline: null, shadow: null, background: null, paddingPx: 8,
+    };
+    local.setItem(
+      'lc.snapshot.v1',
+      JSON.stringify({ template: null, value: 7, style: v1Style, schemaVersion: 1 }),
+    );
+
+    expect(storage.loadSnapshot()).toEqual({
+      template: null,
+      value: 7,
+      style: { ...v1Style, layout: 'numberOnly' },
+      schemaVersion: 2,
+    });
   });
 });
 
@@ -507,7 +561,7 @@ describe('DockStorage — write failures never throw', () => {
     const storage = new DockStorage(local, null, (key) => errors.push(key));
 
     expect(() => storage.savePresets([presetFixture()])).not.toThrow();
-    expect(() => storage.saveSnapshot({ template: null, value: 1, style: styleFixture(), schemaVersion: 1 })).not.toThrow();
+    expect(() => storage.saveSnapshot({ template: null, value: 1, style: styleFixture(), schemaVersion: 2 })).not.toThrow();
     expect(() => storage.saveSettings({ wsPort: 4455, wsPassword: '', schemaVersion: 1 })).not.toThrow();
 
     expect(errors).toEqual([KEY_PRESETS, 'lc.snapshot.v1', 'lc.settings.v1']);

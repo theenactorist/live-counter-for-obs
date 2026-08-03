@@ -1,9 +1,17 @@
 export type Mode = 'manual' | 'automatic';
 export type Status = 'idle' | 'running' | 'paused' | 'complete';
 export type Direction = 'up' | 'down';
+// Task 2.11 (operator feedback, PRD §8.8) — six overlay presentation shapes.
+// See the module doc on `StyleConfig.layout` below for what each one means.
+export type OverlayLayout = 'numberOnly' | 'textBefore' | 'textAfter' | 'textAbove' | 'textBelow' | 'textBehind';
 
 export const SESSION_SCHEMA_VERSION = 1;
-export const PRESET_SCHEMA_VERSION = 1;
+// Task 2.11: bumped 1 -> 2 for StyleConfig's new required `layout` field. A v1
+// preset/snapshot on disk (e.g. from operator testing the night before this
+// landed) lacks `layout` entirely — see engine/migrate.ts's PRESET_MIGRATIONS[1]
+// and protocol/persistence.ts's snapshot-loading migration, both of which infer
+// it from the record's `template` so nothing already saved is lost (AC 24).
+export const PRESET_SCHEMA_VERSION = 2;
 export const MAX_VALUE = 999_999;
 export const UNDO_DEPTH = 20;
 export const SPEED_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10] as const;
@@ -71,6 +79,17 @@ export interface StyleConfig {
   outline: { color: string; widthPx: number } | null;
   shadow: { color: string; blurPx: number; offsetX: number; offsetY: number } | null;
   background: { color: string; opacity: number } | null; paddingPx: number;
+  // Task 2.11 (operator feedback, PRD §8.8) — which of the six overlay
+  // presentation shapes to render:
+  //  - numberOnly:  the counter alone, template/label ignored entirely.
+  //  - textBefore/textAfter: today's inline template rendering, split on the
+  //    FIRST `{count}` token (unchanged) — still REQUIRE the token.
+  //  - textAbove/textBelow: the label stacked above/below the number, does
+  //    NOT require `{count}` (a plain label), substituted in if present.
+  //  - textBehind: the label rendered as a large, low-opacity ghost centered
+  //    behind the number; same non-token-requiring substitution as
+  //    above/below.
+  layout: OverlayLayout;
 }
 export interface Preset {
   schemaVersion: number; id: string; title: string; description: string | null;
@@ -119,6 +138,7 @@ const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
 const ALIGN_H = ['left', 'center', 'right'] as const;
 const ALIGN_V = ['top', 'middle', 'bottom'] as const;
+const LAYOUTS = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'] as const;
 
 function isUndoEntry(x: unknown): x is UndoEntry {
   if (!isPlainObject(x)) return false;
@@ -157,7 +177,7 @@ function isStyleConfig(x: unknown): x is StyleConfig {
   if (!isPlainObject(x)) return false;
   const {
     fontFamily, fontWeight, numberSizePx, textSizePx, numberColor, textColor,
-    alignH, alignV, outline, shadow, background, paddingPx,
+    alignH, alignV, outline, shadow, background, paddingPx, layout,
   } = x;
   return (
     typeof fontFamily === 'string' &&
@@ -171,7 +191,8 @@ function isStyleConfig(x: unknown): x is StyleConfig {
     isNullOr(outline, isOutline) &&
     isNullOr(shadow, isShadow) &&
     isNullOr(background, isBackground) &&
-    isFiniteNumber(paddingPx)
+    isFiniteNumber(paddingPx) &&
+    isOneOf(layout, LAYOUTS)
   );
 }
 

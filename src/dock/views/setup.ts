@@ -28,12 +28,13 @@
 // Escaping discipline: template text, titles, and descriptions are operator
 // content — every dynamic string this view renders goes through
 // `textContent`/`.value`, never `innerHTML`.
-import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode } from '../../engine/types.js';
-import { SPEED_LEVELS, isValidCountValue, isPreset } from '../../engine/types.js';
+import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout } from '../../engine/types.js';
+import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION } from '../../engine/types.js';
 import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
+import { splitTemplate, substituteLabel } from '../../shared/template-content.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -57,6 +58,23 @@ const ANIMATION_TARGET_LABELS: Record<(typeof ANIMATION_TARGETS)[number], string
 };
 const COMPLETION_KINDS = ['hold', 'hide', 'holdThenHide'] as const;
 const FONTS = ['Inter', 'Oswald'] as const;
+
+// Task 2.11 — the six-layout gallery (operator feedback, PRD §8.8). Order
+// here is the order the thumbnails render in.
+const LAYOUTS: readonly OverlayLayout[] = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+const LAYOUT_LABELS: Record<OverlayLayout, string> = {
+  numberOnly: 'Number only',
+  textBefore: 'Text before',
+  textAfter: 'Text after',
+  textAbove: 'Text above',
+  textBelow: 'Text below',
+  textBehind: 'Text behind',
+};
+// Only these two require the operator's template to contain `{count}` —
+// every other layout takes a plain label (PRD §8.8 amendment).
+function isInlineLayout(layout: OverlayLayout): boolean {
+  return layout === 'textBefore' || layout === 'textAfter';
+}
 
 const DEFAULT_COMPLETION_SECONDS = 5;
 
@@ -113,6 +131,9 @@ interface SetupUiState {
   mode: Mode;
   intervalSeconds: number;
   template: string;
+  // Task 2.11 — which of the six overlay presentation shapes this preset/
+  // session uses; see engine/types.ts's OverlayLayout doc comment.
+  layout: OverlayLayout;
   // A RAW string, like startValue/finishValue — not a number. As a number,
   // the field could never represent "cleared": Number('') is 0, which
   // round-tripped back into the input as a literal "0" and shipped an
@@ -206,6 +227,11 @@ function defaultUiState(): SetupUiState {
     mode: 'manual',
     intervalSeconds: 1,
     template: '',
+    // 'textBefore' (an inline layout) matches the pre-2.11 default behavior
+    // (an operator-authored template always required `{count}`) exactly, so
+    // every template-validation test written before this gallery existed
+    // keeps passing unchanged.
+    layout: 'textBefore',
     numberSizePx: String(DEFAULT_NUMBER_SIZE_PX),
     numberColor: '#ffffff',
     textColor: '#cccccc',
@@ -258,6 +284,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       shadow: null,
       background: null,
       paddingPx: 8,
+      layout: ui.layout,
     };
   }
 
@@ -271,10 +298,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       : { kind: ui.completionKind };
   }
 
+  // Task 2.11 — layout-aware (PRD §8.8 amendment): only the inline layouts
+  // (textBefore/textAfter) require `{count}`. Every other layout (numberOnly,
+  // and the stacked/ghost layouts) takes a plain label or ignores it
+  // entirely, so there is nothing to validate here for them.
   function templateError(): string | null {
+    if (!isInlineLayout(ui.layout)) return null;
     const t = ui.template.trim();
     if (t.length === 0) return null;
     return t.includes('{count}') ? null : 'Template must include {count}';
+  }
+
+  function templateFieldLabel(): string {
+    return isInlineLayout(ui.layout) ? 'Template (must contain {count})' : 'Label text';
   }
 
   function rangeValid(): boolean {
@@ -308,8 +344,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return s !== null && isValidCountValue(s) ? s : 0;
   }
 
+  // Feeds the `setup-template-example` hint only (a single-line "what would
+  // this look like" indicator) — the actual per-layout shape is what
+  // renderPreviewBlock()'s `setup-preview` element itself renders, below.
   function previewText(): string {
     const v = previewValue();
+    // numberOnly ignores the label entirely (PRD §8.8) — same rule
+    // applyLayoutContent() enforces in the real overlay renderer.
+    if (ui.layout === 'numberOnly') return String(v);
     const t = ui.template.trim();
     return t.length > 0 ? t.replaceAll('{count}', String(v)) : String(v);
   }
@@ -347,7 +389,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const finishValue = parseIntStrict(ui.finishValue)!;
 
     const preset: Preset = {
-      schemaVersion: 1,
+      schemaVersion: PRESET_SCHEMA_VERSION,
       id: ui.editing ? ui.editing.id : crypto.randomUUID(),
       title: ui.title.trim(),
       description: ui.description.trim().length > 0 ? ui.description.trim() : null,
@@ -591,6 +633,73 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return select;
   }
 
+  // Task 2.11 — a tiny CSS/DOM thumbnail of the layout's shape (no images):
+  // a small "label" bar and a bigger "number" bar, arranged/overlapped to
+  // match what the real overlay renderer does for this layout.
+  function layoutThumbnail(layout: OverlayLayout): HTMLElement {
+    const thumb = el('div', { class: 'layout-thumb' });
+    const numberBar = el('div', { class: 'layout-thumb-bar layout-thumb-bar-number' });
+    const labelBar = el('div', { class: 'layout-thumb-bar layout-thumb-bar-label' });
+    switch (layout) {
+      case 'numberOnly':
+        thumb.appendChild(numberBar);
+        break;
+      case 'textBefore':
+        thumb.classList.add('layout-thumb-row');
+        thumb.appendChild(labelBar);
+        thumb.appendChild(numberBar);
+        break;
+      case 'textAfter':
+        thumb.classList.add('layout-thumb-row');
+        thumb.appendChild(numberBar);
+        thumb.appendChild(labelBar);
+        break;
+      case 'textAbove':
+        thumb.classList.add('layout-thumb-column');
+        thumb.appendChild(labelBar);
+        thumb.appendChild(numberBar);
+        break;
+      case 'textBelow':
+        thumb.classList.add('layout-thumb-column');
+        thumb.appendChild(numberBar);
+        thumb.appendChild(labelBar);
+        break;
+      case 'textBehind':
+        thumb.classList.add('layout-thumb-overlap');
+        labelBar.classList.add('layout-thumb-bar-ghost');
+        thumb.appendChild(labelBar);
+        thumb.appendChild(numberBar);
+        break;
+    }
+    return thumb;
+  }
+
+  // Task 2.11 — six `setup-layout-<name>` buttons inside `setup-layout-
+  // gallery`. Clicking is a pure local UI-state change (same isolation
+  // contract as Test-animation, below): it must never call
+  // controller/storage/bus, so it can never broadcast state or touch the
+  // live session.
+  function renderLayoutGallery(): HTMLElement {
+    const gallery = el('div', { 'data-testid': 'setup-layout-gallery', class: 'layout-gallery' });
+    for (const layout of LAYOUTS) {
+      const selected = ui.layout === layout;
+      const btn = el('button', {
+        'data-testid': `setup-layout-${layout}`,
+        type: 'button',
+        class: `layout-thumb-btn${selected ? ' selected' : ''}`,
+        'aria-pressed': String(selected),
+      });
+      btn.appendChild(layoutThumbnail(layout));
+      btn.appendChild(el('span', { class: 'layout-thumb-caption' }, LAYOUT_LABELS[layout]));
+      btn.addEventListener('click', () => {
+        ui.layout = layout;
+        render();
+      });
+      gallery.appendChild(btn);
+    }
+    return gallery;
+  }
+
   // One box, two variants — same testids (`setup-conflict`,
   // `conflict-overwrite`, `conflict-cancel`), relabelled per `kind`, because
   // the operator's decision has the same shape either way: proceed, or back
@@ -628,17 +737,69 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return box;
   }
 
+  // Task 2.11 — the embedded preview now mirrors the CHOSEN LAYOUT's actual
+  // shape (stacking direction, ghost-behind positioning), not just a flat
+  // text string, using the same splitTemplate/substituteLabel rules the real
+  // overlay renderer uses (../../shared/template-content.js) so the operator
+  // previews the same substitution the audience will see. `setup-preview`
+  // itself stays a single element Test-animation can `.animate()` directly
+  // (unchanged) — only its CHILDREN vary per layout; Setup already fully
+  // rebuilds its subtree on every render() call (unlike the overlay's
+  // stable-node discipline), so there is no animation-continuity concern in
+  // rebuilding those children every keystroke.
   function renderPreviewBlock(): HTMLElement {
     const wrap = el('div', { class: 'setup-preview-wrap' });
     const preview = el('div', { 'data-testid': 'setup-preview', class: 'setup-preview' });
+    const numberSizePx = numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX;
     preview.style.fontFamily = ui.fontFamily;
-    preview.style.color = ui.numberColor;
-    // Falls back to the default while the field is mid-edit/invalid rather
-    // than mirroring a 0 or negative into the preview: the field's own inline
-    // error is the feedback channel, and a preview that vanishes just makes
-    // the form harder to fix.
-    preview.style.fontSize = `${numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX}px`;
-    preview.textContent = previewText();
+    preview.style.fontSize = `${numberSizePx}px`;
+
+    const stacked = ui.layout === 'textAbove' || ui.layout === 'textBelow';
+    const behind = ui.layout === 'textBehind';
+    preview.classList.add(stacked ? 'setup-preview-column' : 'setup-preview-row');
+    if (behind) preview.classList.add('setup-preview-relative');
+
+    const valueText = String(previewValue());
+    const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
+    const numberSpan = el('span', { 'data-testid': 'setup-preview-number' }, valueText);
+    numberSpan.style.color = ui.numberColor;
+    if (behind) numberSpan.classList.add('setup-preview-number-front');
+
+    // Labels use `textColor` (not `numberColor`) — matching the real overlay
+    // renderer's applyStyle(), which colors beforeEl/afterEl from
+    // `s.textColor` while numberEl gets `s.numberColor`.
+    function labelSpan(testid: string, text: string): HTMLSpanElement {
+      const span = el('span', { 'data-testid': testid }, text);
+      span.style.color = ui.textColor;
+      return span;
+    }
+
+    switch (ui.layout) {
+      case 'numberOnly':
+        preview.appendChild(numberSpan);
+        break;
+      case 'textBefore':
+      case 'textAfter': {
+        const { before, after } = splitTemplate(template);
+        if (before) preview.appendChild(labelSpan('setup-preview-label', before));
+        preview.appendChild(numberSpan);
+        if (after) preview.appendChild(labelSpan('setup-preview-label-after', after));
+        break;
+      }
+      case 'textAbove':
+        preview.append(labelSpan('setup-preview-label', substituteLabel(template, valueText)), numberSpan);
+        break;
+      case 'textBelow':
+        preview.append(numberSpan, labelSpan('setup-preview-label', substituteLabel(template, valueText)));
+        break;
+      case 'textBehind': {
+        const ghost = labelSpan('setup-preview-label', substituteLabel(template, valueText));
+        ghost.classList.add('setup-preview-ghost');
+        ghost.style.fontSize = `${numberSizePx * 2.4}px`;
+        preview.append(ghost, numberSpan);
+        break;
+      }
+    }
     wrap.appendChild(preview);
 
     const testBtn = button('setup-test-anim', 'Test animation', { disabled: ui.animType === 'none' });
@@ -712,9 +873,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       root.appendChild(formRow('Interval', renderIntervalSelect()));
     }
 
+    root.appendChild(renderLayoutGallery());
+
     root.appendChild(
       formRow(
-        'Template',
+        templateFieldLabel(),
         inputField('setup-template', ui.template, (v) => {
           ui.template = v;
         }),
@@ -822,6 +985,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.mode = preset.mode;
       ui.intervalSeconds = preset.intervalSeconds;
       ui.template = preset.template ?? '';
+      ui.layout = preset.style.layout;
       ui.numberSizePx = String(preset.style.numberSizePx);
       ui.numberColor = preset.style.numberColor;
       ui.textColor = preset.style.textColor;

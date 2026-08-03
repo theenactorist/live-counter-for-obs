@@ -1,4 +1,4 @@
-import type { Session, SessionTombstone, Preset, Command, Mode } from './types.js';
+import type { Session, SessionTombstone, Preset, Command, Mode, OverlayLayout } from './types.js';
 import { isSession, isSessionTombstone, isPreset, SESSION_SCHEMA_VERSION, PRESET_SCHEMA_VERSION } from './types.js';
 import { createSession, applyCommand } from './counter.js';
 
@@ -31,6 +31,34 @@ const PRESET_MIGRATIONS: Migrations = {};
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
 }
+
+// Task 2.11 (PRD §8.8, schema v1 -> v2): a v1 preset/snapshot's `style` has no
+// `layout` field. Infers one from the record's `template` so an operator's
+// already-saved presets (and end-of-session snapshots) survive the bump
+// instead of failing validation (AC 24), per the controller-clarified rule:
+// template contains `{count}` -> textBefore; template null -> numberOnly;
+// template present without `{count}` -> textAbove. Exported because
+// protocol/persistence.ts's OverlaySnapshot loader needs the exact same
+// inference — snapshots are validated on a separate path (loadSnapshot(), not
+// loadPresets()/PRESET_MIGRATIONS below) but must migrate identically.
+export function inferLayout(template: unknown): OverlayLayout {
+  if (template === null) return 'numberOnly';
+  if (typeof template === 'string' && template.includes('{count}')) return 'textBefore';
+  return 'textAbove';
+}
+
+// v1 -> v2: bump schemaVersion and backfill `style.layout` via inferLayout()
+// above. `style` is expected to be a plain object on any genuinely v1 preset
+// (isPreset would have rejected it otherwise before this schema bump existed)
+// but the migration itself must never throw on a malformed record — a
+// non-object `style` is left untouched and isPreset rejects the result
+// afterward, same as any other structurally-invalid migrated record.
+PRESET_MIGRATIONS[1] = (old: unknown): unknown => {
+  if (!isPlainObject(old)) return old;
+  const { style, template } = old;
+  if (!isPlainObject(style)) return { ...old, schemaVersion: 2 };
+  return { ...old, schemaVersion: 2, style: { ...style, layout: inferLayout(template) } };
+};
 
 function extractVersion(x: unknown): number | undefined {
   if (!isPlainObject(x)) return undefined;

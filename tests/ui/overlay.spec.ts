@@ -54,6 +54,12 @@ function styleFixture(overrides: Partial<StyleConfig> = {}): StyleConfig {
     shadow: null,
     background: null,
     paddingPx: 8,
+    // Task 2.11: 'textBefore' (an inline layout) preserves every EXISTING
+    // test's assertions unchanged — they all rely on today's split-on-token
+    // template rendering (before/after around {count}), which is exactly
+    // what textBefore/textAfter keep doing. Tests exercising the OTHER five
+    // layouts pass `layout` explicitly via `overrides`.
+    layout: 'textBefore',
     ...overrides,
   };
 }
@@ -226,7 +232,7 @@ test.describe('overlay renderer', () => {
           template: 'Final: {count}',
           value: 42,
           style: styleFixture(),
-          schemaVersion: 1,
+          schemaVersion: 2,
         };
         await bus.send('state', {
           session: null,
@@ -920,5 +926,245 @@ test.describe('overlay renderer', () => {
     } finally {
       await mock.close();
     }
+  });
+
+  // --- Task 2.11: six-layout overlay gallery (PRD §8.8, AC 22) -----------
+
+  test.describe('six-layout gallery', () => {
+    test('numberOnly ignores the label entirely, even when a template is present', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'numberOnly' }),
+            template: 'Score: {count} pts',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('');
+          await expect(page.getByTestId('overlay-text-after')).toHaveText('');
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textAfter splits on {count} the same way textBefore does', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAfter' }),
+            template: '{count} pts',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('');
+          await expect(page.getByTestId('overlay-text-after')).toHaveText(' pts');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textAbove: label renders above the number, and does NOT require {count}', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAbove' }),
+            template: 'Lives remaining', // deliberately no {count}
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Lives remaining');
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+
+          const labelBox = await page.getByTestId('overlay-text-before').boundingBox();
+          const numberBox = await page.getByTestId('overlay-number').boundingBox();
+          expect(labelBox).not.toBeNull();
+          expect(numberBox).not.toBeNull();
+          // The label's bottom edge sits at or above the number's top edge.
+          expect(labelBox!.y + labelBox!.height).toBeLessThanOrEqual(numberBox!.y + 1);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textBelow: label renders below the number', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBelow' }),
+            template: 'Lives remaining',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Lives remaining');
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+
+          const labelBox = await page.getByTestId('overlay-text-before').boundingBox();
+          const numberBox = await page.getByTestId('overlay-number').boundingBox();
+          expect(labelBox).not.toBeNull();
+          expect(numberBox).not.toBeNull();
+          // The label's top edge sits at or below the number's bottom edge —
+          // the inverse of textAbove's assertion above.
+          expect(labelBox!.y + 1).toBeGreaterThanOrEqual(numberBox!.y + numberBox!.height - 1);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('template substitution: stacked layouts substitute {count} when present, but do not require it', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 12 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAbove' }),
+            template: 'Round {count} of 20',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Round 12 of 20');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textBehind: ghost label overlaps the number, renders larger, and sits behind it', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 7 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind', numberSizePx: 80 }),
+            template: 'Combo',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('Combo');
+          await expect(page.getByTestId('overlay-number')).toHaveText('7');
+
+          const numberBox = await page.getByTestId('overlay-number').boundingBox();
+          const ghostBox = await page.getByTestId('overlay-text-behind').boundingBox();
+          expect(numberBox).not.toBeNull();
+          expect(ghostBox).not.toBeNull();
+
+          // The boxes overlap (neither sits entirely outside the other on
+          // either axis).
+          expect(ghostBox!.x).toBeLessThan(numberBox!.x + numberBox!.width);
+          expect(numberBox!.x).toBeLessThan(ghostBox!.x + ghostBox!.width);
+          expect(ghostBox!.y).toBeLessThan(numberBox!.y + numberBox!.height);
+          expect(numberBox!.y).toBeLessThan(ghostBox!.y + ghostBox!.height);
+
+          // The ghost's computed font-size is larger than the number's.
+          const numberFontSize = await page
+            .getByTestId('overlay-number')
+            .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+          const ghostFontSize = await page
+            .getByTestId('overlay-text-behind')
+            .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+          expect(ghostFontSize).toBeGreaterThan(numberFontSize);
+
+          // The ghost sits BEHIND the number (painted below it): the number
+          // element is topmost at its own center point.
+          const topElementTestid = await page.evaluate(({ x, y }) => {
+            const el = document.elementFromPoint(x, y);
+            return el instanceof HTMLElement ? el.dataset.testid ?? null : null;
+          }, { x: numberBox!.x + numberBox!.width / 2, y: numberBox!.y + numberBox!.height / 2 });
+          expect(topElementTestid).toBe('overlay-number');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textBehind: the ghost never affects the number\'s own layout position', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 9 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'numberOnly' }),
+            template: null,
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('9');
+          const baselineBox = await page.getByTestId('overlay-number').boundingBox();
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 9 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'A Very Long Ghost Label Behind The Number',
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('A Very Long Ghost Label Behind The Number');
+          const behindBox = await page.getByTestId('overlay-number').boundingBox();
+
+          expect(Math.abs(behindBox!.x - baselineBox!.x)).toBeLessThan(2);
+          expect(Math.abs(behindBox!.y - baselineBox!.y)).toBeLessThan(2);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
   });
 });

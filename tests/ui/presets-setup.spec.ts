@@ -1308,4 +1308,152 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.11: six-layout overlay gallery (operator feedback, PRD §8.8) ---
+
+  const ALL_LAYOUTS = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+
+  test('layout gallery: six thumbnails render, defaulting to Text before selected', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      await expect(page.getByTestId('setup-layout-gallery')).toBeVisible();
+      for (const layout of ALL_LAYOUTS) {
+        await expect(page.getByTestId(`setup-layout-${layout}`)).toBeVisible();
+      }
+
+      await expect(page.getByTestId('setup-layout-textBefore')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('setup-layout-textBefore')).toHaveClass(/selected/);
+      await expect(page.getByTestId('setup-layout-numberOnly')).toHaveAttribute('aria-pressed', 'false');
+      await expect(page.getByTestId('setup-layout-numberOnly')).not.toHaveClass(/selected/);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('layout gallery: clicking selects the new layout, updates the preview, and never broadcasts state (isolation)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('7');
+      await page.getByTestId('setup-template').fill('Score: {count}');
+
+      const beforeCount = stateBroadcasts(mock).length;
+      await page.getByTestId('setup-layout-numberOnly').click();
+
+      // Selection moved.
+      await expect(page.getByTestId('setup-layout-numberOnly')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('setup-layout-numberOnly')).toHaveClass(/selected/);
+      await expect(page.getByTestId('setup-layout-textBefore')).toHaveAttribute('aria-pressed', 'false');
+
+      // Preview updated immediately: numberOnly ignores the label entirely.
+      await expect(page.getByTestId('setup-preview-label')).toHaveCount(0);
+      await expect(page.getByTestId('setup-preview-number')).toHaveText('7');
+
+      // Same isolation contract as Test-animation: a pure local UI change,
+      // no 'state' broadcast during the window.
+      await page.waitForTimeout(150);
+      expect(stateBroadcasts(mock).length).toBe(beforeCount);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('layout-aware template validation: only textBefore/textAfter require {count}; the field label switches accordingly', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-title').fill('Layout Aware');
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('10');
+
+      const templateLabel = page
+        .locator('.form-row', { has: page.getByTestId('setup-template') })
+        .locator('.form-label');
+
+      // Default layout (textBefore) requires {count}, same as before this task.
+      await expect(templateLabel).toHaveText('Template (must contain {count})');
+      await page.getByTestId('setup-template').fill('no token here');
+      await expect(page.getByTestId('setup-template-error')).toBeVisible();
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+
+      // Switching to a stacked layout: the error clears (no token required),
+      // the field's label switches to "Label text", and Save re-enables —
+      // the SAME (still tokenless) text is now valid.
+      await page.getByTestId('setup-layout-textAbove').click();
+      await expect(templateLabel).toHaveText('Label text');
+      await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+
+      // numberOnly: also no error, regardless of field content.
+      await page.getByTestId('setup-layout-numberOnly').click();
+      await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+
+      // Switching BACK to an inline layout re-requires the token — the
+      // tokenless text left in the field is invalid again.
+      await page.getByTestId('setup-layout-textAfter').click();
+      await expect(templateLabel).toHaveText('Template (must contain {count})');
+      await expect(page.getByTestId('setup-template-error')).toBeVisible();
+      await expect(page.getByTestId('setup-save')).toBeDisabled();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('layout gallery: saved preset round-trips its layout through Save -> Load', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Behind Preset', template: 'Streak' });
+      await page.getByTestId('setup-layout-textBehind').click();
+      await page.getByTestId('setup-save').click();
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-load').click();
+
+      await expect(page.getByTestId('setup-layout-textBehind')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('setup-preview-label')).toHaveClass(/setup-preview-ghost/);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('layout gallery: textBehind preview renders the ghost label larger than, and overlapping, the number', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('3');
+      await page.getByTestId('setup-template').fill('Streak');
+      await page.getByTestId('setup-layout-textBehind').click();
+
+      const numberBox = await page.getByTestId('setup-preview-number').boundingBox();
+      const labelBox = await page.getByTestId('setup-preview-label').boundingBox();
+      expect(numberBox).not.toBeNull();
+      expect(labelBox).not.toBeNull();
+      expect(labelBox!.x).toBeLessThan(numberBox!.x + numberBox!.width);
+      expect(numberBox!.x).toBeLessThan(labelBox!.x + labelBox!.width);
+
+      const numberFontSize = await page
+        .getByTestId('setup-preview-number')
+        .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+      const labelFontSize = await page
+        .getByTestId('setup-preview-label')
+        .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+      expect(labelFontSize).toBeGreaterThan(numberFontSize);
+    } finally {
+      await mock.close();
+    }
+  });
 });

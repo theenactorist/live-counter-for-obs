@@ -102,6 +102,7 @@ function styleFixture(): StyleConfig {
     shadow: null,
     background: null,
     paddingPx: 8,
+    layout: 'numberOnly',
   };
 }
 
@@ -471,7 +472,7 @@ describe('SessionController — endSession', () => {
     expect(result.accepted).toBe(true);
     const state = controller.getState();
     expect(state.session).toBeNull();
-    expect(state.snapshot).toEqual({ template: '{count} left', value: 2, style, schemaVersion: 1 });
+    expect(state.snapshot).toEqual({ template: '{count} left', value: 2, style, schemaVersion: 2 });
     expect(storage.loadSnapshot()).toEqual(state.snapshot);
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
@@ -524,7 +525,7 @@ describe('SessionController — endSession', () => {
 
     expect(result.accepted).toBe(true);
     const snapshot = controller.getState().snapshot;
-    expect(snapshot).toEqual({ template: null, value: 42, style: DEFAULT_STYLE, schemaVersion: 1 });
+    expect(snapshot).toEqual({ template: null, value: 42, style: DEFAULT_STYLE, schemaVersion: 2 });
     expect(storage.loadSnapshot()).toEqual(snapshot);
 
     // The broadcast the overlay renders from carries it, so the frozen final

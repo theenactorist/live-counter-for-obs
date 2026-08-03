@@ -412,7 +412,7 @@ export class SessionController {
       if (this.style === null) {
         this.storage.log('session-ended', 'keep-overlay used the default style (no preset presentation known)');
       }
-      snapshot = { template: this.template, value: endedValue, style, schemaVersion: 1 };
+      snapshot = { template: this.template, value: endedValue, style, schemaVersion: 2 };
     }
     this.storage.saveSnapshot(snapshot);
     this.snapshot = snapshot;

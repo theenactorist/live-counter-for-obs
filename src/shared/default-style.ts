@@ -29,4 +29,10 @@ export const DEFAULT_STYLE: StyleConfig = {
   shadow: null,
   background: null,
   paddingPx: 8,
+  // Task 2.11: this fallback is only ever painted alongside a null template
+  // (style and template are always set together — see controller.ts's class
+  // comment on `style`/`template`), so numberOnly (matching the v1->v2
+  // migration's "template null -> numberOnly" inference) is the correct,
+  // behavior-preserving default here.
+  layout: 'numberOnly',
 };
