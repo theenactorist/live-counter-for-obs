@@ -64,7 +64,19 @@ interface PresetsUiState {
   importText: string;
   importError: string | null;
   importFeedback: string | null;
+  // Task 2.10, item 4 — distinct from importError (a validation problem with
+  // pasted CONTENT): this is a clipboard-READ problem, shown next to
+  // import-paste rather than folded into the Apply-time importError so a
+  // failed paste doesn't read as "your JSON was invalid."
+  importPasteError: string | null;
 }
+
+// Task 2.10, item 4 — shown by import-paste (and diagnostics.ts's
+// settings-paste) on a rejected or empty clipboard read. Real-world driver:
+// OBS's embedded Browser Dock does NOT deliver Cmd/Ctrl+V to page content at
+// all, so pasting an exported preset envelope is otherwise impossible for an
+// operator testing this in real OBS.
+const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
 
 // Task 2.9 — export/import via clipboard. The envelope shape is deliberately
 // tiny (app/kind/v tag + timestamp + the presets array itself) so a future
@@ -183,6 +195,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     importText: '',
     importError: null,
     importFeedback: null,
+    importPasteError: null,
   };
 
   let exportConfirmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -477,17 +490,55 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     return box;
   }
 
+  // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so
+  // this is the operator's only way to get a copied export envelope into the
+  // textarea at all. On rejection (permission denied/unavailable) or an empty
+  // read, the textarea is left completely untouched and an inline hint takes
+  // over — never a silent no-op an operator could mistake for "it worked."
+  async function onImportPaste(): Promise<void> {
+    ui.importPasteError = null;
+    let text = '';
+    let failed = false;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      failed = true;
+    }
+    // Same guard as onExport/onDelete/onDuplicate above: a tab switch (or
+    // settings-save reconnect) mid-await must not repaint this torn-down
+    // mount over its replacement.
+    if (destroyed) return;
+    if (failed || text.length === 0) {
+      ui.importPasteError = CLIPBOARD_BLOCKED_TEXT;
+      render();
+      return;
+    }
+    ui.importText = text;
+    render();
+  }
+
   function renderImportPanel(): HTMLElement {
     const box = el('div', { 'data-testid': 'import-panel', class: 'import-panel' });
     box.appendChild(el('div', { class: 'form-label' }, 'Paste an exported preset list, then Apply.'));
 
+    const textareaRow = el('div', { class: 'import-textarea-row' });
     const textarea = el('textarea', { 'data-testid': 'import-textarea', rows: '6' }) as HTMLTextAreaElement;
     textarea.value = ui.importText;
     textarea.addEventListener('input', () => {
       ui.importText = textarea.value;
     });
-    box.appendChild(textarea);
+    textareaRow.appendChild(textarea);
 
+    const paste = button('import-paste', 'Paste');
+    paste.addEventListener('click', () => {
+      void onImportPaste();
+    });
+    textareaRow.appendChild(paste);
+    box.appendChild(textareaRow);
+
+    if (ui.importPasteError) {
+      box.appendChild(el('div', { 'data-testid': 'import-paste-error', class: 'field-error' }, ui.importPasteError));
+    }
     if (ui.importError) {
       box.appendChild(el('div', { 'data-testid': 'import-error', class: 'field-error' }, ui.importError));
     }
@@ -512,6 +563,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       ui.importText = '';
       ui.importError = null;
       ui.importFeedback = null;
+      ui.importPasteError = null;
       render();
     });
     actions.appendChild(cancel);

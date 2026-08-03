@@ -162,6 +162,39 @@
       button.ctl.danger {
         border-color: #6b1f1f;
       }
+      /* Task 2.10 — live-view hierarchy (PRD §9, AC 23): +1/-1 get their own
+         row so +1 can visually outweigh -1 (larger flex share AND a taller
+         min-height — both dimensions, so the bounding-box AREA test is never
+         a coin flip on one axis alone), and Reset/End get a visibly smaller,
+         muted treatment so they read as separate from the operator's
+         moment-to-moment counting actions. */
+      .primary-row {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+      .primary-row .ctl-primary {
+        flex: 1 1 0%;
+        min-height: 56px;
+        font-size: 1.15rem;
+        font-weight: 700;
+      }
+      .primary-row .ctl-primary-dominant {
+        flex: 2 1 0%;
+        min-height: 72px;
+        font-size: 1.5rem;
+      }
+      .live-danger-divider {
+        height: 1px;
+        background: #2a2a2a;
+        border: none;
+        margin: 0.9rem 0 0.6rem;
+      }
+      .danger-row .ctl-small {
+        padding: 0.3rem 0.6rem;
+        font-size: 0.8rem;
+        opacity: 0.75;
+      }
       .jump-box,
       .confirm-box {
         display: flex;
@@ -304,6 +337,21 @@
         border-radius: 6px;
         padding: 0.6rem;
         margin-bottom: 0.75rem;
+      }
+      /* Task 2.10, item 4 — wraps the textarea + its Paste button so Paste
+         sits directly beside the field it fills, per the brief. Higher
+         specificity than the plain `.import-panel textarea` rule below (3
+         classes vs. 2), so its `width: auto` reliably wins regardless of
+         declaration order. */
+      .import-textarea-row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-start;
+      }
+      .import-panel .import-textarea-row textarea {
+        flex: 1 1 0%;
+        min-width: 0;
+        width: auto;
       }
       .import-panel textarea {
         background: #0f0f0f;

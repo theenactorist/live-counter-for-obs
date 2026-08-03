@@ -68,6 +68,13 @@ const HOTKEYS_COPY_TEXT = 'Hotkeys: not built yet (Phase 3)';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
   'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
+// Task 2.10, item 4 — shown by settings-paste (and presets.ts's import-paste)
+// on a rejected or empty clipboard read. Real-world driver: OBS's embedded
+// Browser Dock does NOT deliver Cmd/Ctrl+V to page content at all, so pasting
+// the websocket password is otherwise impossible for an operator testing this
+// in real OBS — hence a dedicated Paste button instead of just relying on the
+// (absent) native paste gesture.
+const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -222,6 +229,10 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   passwordLabel.appendChild(passwordInput);
   settingsRow.appendChild(passwordLabel);
 
+  // Task 2.10, item 4 — sits right next to the password field it fills.
+  const passwordPasteBtn = button('settings-paste', 'Paste');
+  settingsRow.appendChild(passwordPasteBtn);
+
   const saveBtn = button('settings-save', 'Save');
   settingsRow.appendChild(saveBtn);
   root.appendChild(settingsRow);
@@ -229,6 +240,10 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const settingsError = el('div', { 'data-testid': 'diag-settings-error', class: 'field-error' });
   settingsError.hidden = true;
   root.appendChild(settingsError);
+
+  const settingsPasteError = el('div', { 'data-testid': 'settings-paste-error', class: 'field-error' });
+  settingsPasteError.hidden = true;
+  root.appendChild(settingsPasteError);
 
   portInput.addEventListener('input', () => {
     settingsPortRaw = portInput.value;
@@ -247,6 +262,35 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     }
     settingsError.hidden = true;
     opts.onSaveSettings(port, passwordInput.value);
+  });
+
+  // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so
+  // this is the operator's only way to get a copied password into the field
+  // at all. On rejection (permission denied/unavailable) or an empty read,
+  // the field is left completely untouched and an inline hint takes over —
+  // never a silent no-op an operator could mistake for "it worked."
+  passwordPasteBtn.addEventListener('click', () => {
+    void (async () => {
+      settingsPasteError.hidden = true;
+      let text: string;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        settingsPasteError.hidden = false;
+        settingsPasteError.textContent = CLIPBOARD_BLOCKED_TEXT;
+        return;
+      }
+      if (text.length === 0) {
+        settingsPasteError.hidden = false;
+        settingsPasteError.textContent = CLIPBOARD_BLOCKED_TEXT;
+        return;
+      }
+      passwordInput.value = text;
+      // Dispatched (not called directly) so the existing 'input' listener
+      // above — and any future one — updates state exactly as if the
+      // operator had typed it, with no separate code path to keep in sync.
+      passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+    })();
   });
 
   // --- Version ---------------------------------------------------------

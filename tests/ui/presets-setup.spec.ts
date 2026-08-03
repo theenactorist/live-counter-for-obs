@@ -1150,4 +1150,122 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.10, item 1: readable animation-select labels ----------------
+  // Values (the wire format) are unchanged — only the visible <option> text
+  // changes, from the raw enum ('slideUp', 'holdThenHide'-style identifiers)
+  // to operator-facing copy.
+  test('animation type/target selects show human labels while keeping their underlying values', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      const typeLabels = await page
+        .getByTestId('setup-anim-type')
+        .locator('option')
+        .evaluateAll((opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent })));
+      expect(typeLabels).toEqual([
+        { value: 'none', text: 'None' },
+        { value: 'pop', text: 'Scale / Pop' },
+        { value: 'fade', text: 'Fade' },
+        { value: 'slideUp', text: 'Slide up' },
+        { value: 'flip', text: 'Flip' },
+      ]);
+
+      const targetLabels = await page
+        .getByTestId('setup-anim-target')
+        .locator('option')
+        .evaluateAll((opts) => opts.map((o) => ({ value: (o as HTMLOptionElement).value, text: o.textContent })));
+      expect(targetLabels).toEqual([
+        { value: 'number', text: 'Number only' },
+        { value: 'text', text: 'Text only' },
+        { value: 'both', text: 'Text and number' },
+      ]);
+
+      // The underlying value round-trips exactly as before — selecting by
+      // the (still enum-shaped) value still works, and it is what
+      // buildAnimation() actually persists/starts a session with.
+      await page.getByTestId('setup-anim-type').selectOption('slideUp');
+      await expect(page.getByTestId('setup-anim-type')).toHaveValue('slideUp');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 2.10, item 4: import-paste -------------------------------------
+  // Real-world driver (controller clarification): OBS browser docks do NOT
+  // deliver Cmd/Ctrl+V, so pasting an exported preset envelope is otherwise
+  // impossible for an operator testing this in real OBS.
+
+  test('import-paste fills the import textarea from the clipboard', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      const envelope = JSON.stringify({
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: new Date().toISOString(),
+        presets: [],
+      });
+      await page.evaluate((text) => navigator.clipboard.writeText(text), envelope);
+      await page.getByTestId('import-paste').click();
+
+      await expect(page.getByTestId('import-textarea')).toHaveValue(envelope);
+      await expect(page.getByTestId('import-paste-error')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('import-paste shows an inline error and leaves the textarea untouched when the clipboard read is rejected', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      await page.getByTestId('import-textarea').fill('unchanged');
+      await page.getByTestId('import-paste').click();
+
+      await expect(page.getByTestId('import-paste-error')).toBeVisible();
+      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('import-paste with an empty clipboard read shows the same inline error and leaves the textarea untouched', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      await page.evaluate(() => navigator.clipboard.writeText(''));
+      await page.getByTestId('import-textarea').fill('unchanged');
+      await page.getByTestId('import-paste').click();
+
+      await expect(page.getByTestId('import-paste-error')).toBeVisible();
+      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
 });

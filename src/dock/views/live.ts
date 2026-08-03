@@ -300,37 +300,70 @@ export function mountLiveView(
       ),
     );
 
+    // Task 2.10 (PRD §9, AC 23): the exact operator-facing hierarchy is
+    // readout -> +1/-1 (dominant primary pair) -> secondary row (Undo, Jump)
+    // -> [jump box / reset+end confirm boxes, near what triggered them] ->
+    // mode toggle -> automatic cluster (auto mode only; also owns Reverse —
+    // see item 2 below) -> Show/Hide -> a decorative divider -> Reset/End
+    // (small, muted, visibly less prominent than +1). Previously every
+    // control from -1 through End sat in one flat `.btn-row`, so a manual
+    // operator's most-frequent action (+1) had no more visual weight than
+    // the rarely-touched End button next to it.
     root.appendChild(renderPrimaryControls(session, lo, hi));
+    root.appendChild(renderSecondaryControls(session));
 
     if (ui.jumpOpen) root.appendChild(renderJumpBox(session, lo, hi));
-    if (ui.resetConfirmOpen) root.appendChild(renderResetConfirm());
-    if (ui.endConfirmOpen) root.appendChild(renderEndConfirm());
 
     root.appendChild(renderModeToggle(session));
 
+    // Reverse only makes sense once the engine itself is driving the count
+    // (controller clarification, item 2): a manual operator just clicks
+    // +1/-1 directly, so btn-reverse renders ONLY here, inside the
+    // automatic-only cluster — absent from the DOM entirely in manual mode,
+    // not merely CSS-hidden, so toBeVisible()/count() assertions stay
+    // unambiguous. Engine capability (the `reverse` command itself) is
+    // untouched; only this view's rendering condition changed.
     if (session.mode === 'automatic') root.appendChild(renderAutoCluster(session));
+
+    root.appendChild(renderShowHideRow(session));
+
+    // Decorative only — the divider separates the utility controls above
+    // from the destructive pair below, so it carries no information a
+    // screen-reader user needs (the buttons either side already announce
+    // their own names).
+    root.appendChild(el('div', { 'data-testid': 'live-danger-divider', 'aria-hidden': 'true', class: 'live-danger-divider' }));
+    root.appendChild(renderDangerControls());
+
+    if (ui.resetConfirmOpen) root.appendChild(renderResetConfirm());
+    if (ui.endConfirmOpen) root.appendChild(renderEndConfirm());
 
     return root;
   }
 
   function renderPrimaryControls(session: Session, lo: number, hi: number): HTMLElement {
-    const row = el('div', { class: 'btn-row' });
+    const row = el('div', { class: 'primary-row' });
 
-    const minus = button('btn-minus', '−1', { disabled: session.currentValue === lo });
+    // DOM order matters here (controller clarification, item 3): +1 first,
+    // so it is both the visually dominant button (see the CSS classes below)
+    // AND the first stop for keyboard/screen-reader navigation — the
+    // opposite of the original -1-first layout.
+    const plus = button('btn-plus', '+1', { disabled: session.currentValue === hi, extraClass: 'ctl-primary ctl-primary-dominant' });
+    plus.addEventListener('click', () => dispatch({ type: 'increment', nonce: generateNonce() }));
+    row.appendChild(plus);
+
+    const minus = button('btn-minus', '−1', { disabled: session.currentValue === lo, extraClass: 'ctl-primary' });
     minus.addEventListener('click', () => dispatch({ type: 'decrement', nonce: generateNonce() }));
     row.appendChild(minus);
 
-    const plus = button('btn-plus', '+1', { disabled: session.currentValue === hi });
-    plus.addEventListener('click', () => dispatch({ type: 'increment', nonce: generateNonce() }));
-    row.appendChild(plus);
+    return row;
+  }
+
+  function renderSecondaryControls(session: Session): HTMLElement {
+    const row = el('div', { class: 'btn-row' });
 
     const undo = button('btn-undo', 'Undo', { disabled: session.undoStack.length === 0 });
     undo.addEventListener('click', () => dispatch({ type: 'undo', nonce: generateNonce() }));
     row.appendChild(undo);
-
-    const reverse = button('btn-reverse', 'Reverse');
-    reverse.addEventListener('click', () => dispatch({ type: 'reverse', nonce: generateNonce() }));
-    row.appendChild(reverse);
 
     const jump = button('btn-jump', 'Jump');
     jump.addEventListener('click', () => {
@@ -344,20 +377,32 @@ export function mountLiveView(
     });
     row.appendChild(jump);
 
+    return row;
+  }
+
+  function renderShowHideRow(session: Session): HTMLElement {
+    const row = el('div', { class: 'btn-row' });
+
     const showHide = button('btn-show-hide', session.overlayVisible ? 'Hide' : 'Show');
     showHide.addEventListener('click', () =>
       dispatch({ type: session.overlayVisible ? 'hideOverlay' : 'showOverlay', nonce: generateNonce() }),
     );
     row.appendChild(showHide);
 
-    const reset = button('btn-reset', 'Reset');
+    return row;
+  }
+
+  function renderDangerControls(): HTMLElement {
+    const row = el('div', { class: 'btn-row danger-row' });
+
+    const reset = button('btn-reset', 'Reset', { extraClass: 'ctl-small danger' });
     reset.addEventListener('click', () => {
       ui.resetConfirmOpen = true;
       render();
     });
     row.appendChild(reset);
 
-    const end = button('btn-end', 'End', { extraClass: 'danger' });
+    const end = button('btn-end', 'End', { extraClass: 'ctl-small danger' });
     end.addEventListener('click', () => {
       ui.endConfirmOpen = true;
       render();
@@ -465,6 +510,15 @@ export function mountLiveView(
 
   function renderAutoCluster(session: Session): HTMLElement {
     const cluster = el('div', { class: 'auto-cluster' });
+
+    // Reverse lives here, not in the primary/secondary rows above (Task 2.10,
+    // item 2): flipping direction is only ever meaningful while the ENGINE is
+    // advancing the count on its own, so this is the one place its render
+    // condition (session.mode === 'automatic') and its home in the layout are
+    // the same check.
+    const reverse = button('btn-reverse', 'Reverse');
+    reverse.addEventListener('click', () => dispatch({ type: 'reverse', nonce: generateNonce() }));
+    cluster.appendChild(reverse);
 
     const startLabel = session.status === 'idle' ? 'Start counting' : 'Resume';
     const start = button('auto-start', startLabel, { disabled: session.status === 'running' || session.status === 'complete' });

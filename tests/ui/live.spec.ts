@@ -155,15 +155,48 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Task 2.10 (controller clarification, item 2): Reverse only makes sense
+  // once the engine itself is driving the count (automatic mode) — a manual
+  // operator just clicks +1/-1 directly. Updated (was a manual-session test)
+  // to toggle to automatic first, since btn-reverse no longer renders at all
+  // in manual mode (see the dedicated visibility test below).
   test('reverse flips the direction text in progress-line', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await page.getByTestId('mode-toggle').click(); // manual -> automatic
 
       await expect(page.getByTestId('progress-line')).toContainText('Counting up');
       await page.getByTestId('btn-reverse').click();
       await expect(page.getByTestId('progress-line')).toContainText('Counting down');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 2.10, item 2 (controller clarification): hidden by NOT RENDERING
+  // (absent from the DOM), not CSS-hidden, so count()/toBeVisible() are
+  // unambiguous — a manual operator has no use for a "reverse direction"
+  // control when every count is their own explicit click.
+  test('btn-reverse is absent in manual mode and present+functional once switched to automatic', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      await expect(page.getByTestId('btn-reverse')).toHaveCount(0);
+
+      await page.getByTestId('mode-toggle').click();
+      await expect(page.getByTestId('btn-reverse')).toBeVisible();
+
+      await expect(page.getByTestId('progress-line')).toContainText('Counting up');
+      await page.getByTestId('btn-reverse').click();
+      await expect(page.getByTestId('progress-line')).toContainText('Counting down');
+
+      // Switching back to manual removes it again.
+      await page.getByTestId('mode-toggle').click();
+      await expect(page.getByTestId('btn-reverse')).toHaveCount(0);
     } finally {
       await mock.close();
     }
@@ -432,7 +465,10 @@ test.describe('dock Live view', () => {
       const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
       expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
 
-      for (const id of ['btn-plus', 'btn-minus', 'btn-undo', 'btn-reverse', 'btn-jump', 'btn-show-hide', 'btn-reset', 'btn-end']) {
+      // btn-reverse deliberately excluded (Task 2.10, item 2): it no longer
+      // renders at all in manual mode (this session is manual), so it isn't
+      // one of this screen's visible controls to size-check here.
+      for (const id of ['btn-plus', 'btn-minus', 'btn-undo', 'btn-jump', 'btn-show-hide', 'btn-reset', 'btn-end']) {
         const locator = page.getByTestId(id);
         await expect(locator).toBeVisible();
         const box = await locator.boundingBox();
@@ -612,6 +648,95 @@ test.describe('dock Live view', () => {
       // localStorage, which this reload would now pick up instead.
       await openDock(page, { port: mock.port, devhook: false });
       await expect(page.getByTestId('current-value')).toHaveText(String(afterReconnect));
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 2.10, item 3: live-view hierarchy (PRD §9, AC 23) -------------
+
+  test('hierarchy: btn-plus precedes btn-minus in DOM order', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const order = await page.evaluate(() => {
+        const plus = document.querySelector('[data-testid="btn-plus"]')!;
+        const minus = document.querySelector('[data-testid="btn-minus"]')!;
+        // Non-zero DOCUMENT_POSITION_FOLLOWING means minus comes AFTER plus.
+        return Boolean(plus.compareDocumentPosition(minus) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      expect(order).toBe(true);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('hierarchy: +1 is visually dominant over -1 (strictly greater bounding-box area), both stay >=44px', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const plusBox = await page.getByTestId('btn-plus').boundingBox();
+      const minusBox = await page.getByTestId('btn-minus').boundingBox();
+      expect(plusBox).not.toBeNull();
+      expect(minusBox).not.toBeNull();
+
+      expect(plusBox!.width).toBeGreaterThanOrEqual(44);
+      expect(plusBox!.height).toBeGreaterThanOrEqual(44);
+      expect(minusBox!.width).toBeGreaterThanOrEqual(44);
+      expect(minusBox!.height).toBeGreaterThanOrEqual(44);
+
+      const plusArea = plusBox!.width * plusBox!.height;
+      const minusArea = minusBox!.width * minusBox!.height;
+      expect(plusArea).toBeGreaterThan(minusArea);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('hierarchy: Reset and End are visibly smaller (height) than +1, and sit after live-danger-divider', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const plusBox = await page.getByTestId('btn-plus').boundingBox();
+      const resetBox = await page.getByTestId('btn-reset').boundingBox();
+      const endBox = await page.getByTestId('btn-end').boundingBox();
+      expect(plusBox).not.toBeNull();
+      expect(resetBox).not.toBeNull();
+      expect(endBox).not.toBeNull();
+
+      expect(resetBox!.height).toBeLessThan(plusBox!.height);
+      expect(endBox!.height).toBeLessThan(plusBox!.height);
+
+      const divider = page.getByTestId('live-danger-divider');
+      await expect(divider).toBeAttached();
+      await expect(divider).toHaveAttribute('aria-hidden', 'true');
+
+      const positions = await page.evaluate(() => {
+        const showHide = document.querySelector('[data-testid="btn-show-hide"]')!;
+        const divider = document.querySelector('[data-testid="live-danger-divider"]')!;
+        const reset = document.querySelector('[data-testid="btn-reset"]')!;
+        const end = document.querySelector('[data-testid="btn-end"]')!;
+        return {
+          // divider comes after the utility group (btn-show-hide)...
+          dividerAfterShowHide: Boolean(showHide.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING),
+          // ...and before the destructive group (btn-reset, btn-end).
+          resetAfterDivider: Boolean(divider.compareDocumentPosition(reset) & Node.DOCUMENT_POSITION_FOLLOWING),
+          endAfterDivider: Boolean(divider.compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING),
+        };
+      });
+      expect(positions.dividerAfterShowHide).toBe(true);
+      expect(positions.resetAfterDivider).toBe(true);
+      expect(positions.endAfterDivider).toBe(true);
     } finally {
       await mock.close();
     }

@@ -37,6 +37,24 @@ import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
+
+// Task 2.10, item 1 (operator feedback): the <select> VALUES are the wire
+// format (unchanged — buildAnimation() and every persisted Preset still spell
+// them 'slideUp'/'both'/etc.) but the raw enum identifiers made a poor label
+// for an operator picking an animation ("slideUp"? "both"?). These labels are
+// purely the visible <option> text.
+const ANIMATION_TYPE_LABELS: Record<(typeof ANIMATION_TYPES)[number], string> = {
+  none: 'None',
+  pop: 'Scale / Pop',
+  fade: 'Fade',
+  slideUp: 'Slide up',
+  flip: 'Flip',
+};
+const ANIMATION_TARGET_LABELS: Record<(typeof ANIMATION_TARGETS)[number], string> = {
+  number: 'Number only',
+  text: 'Text only',
+  both: 'Text and number',
+};
 const COMPLETION_KINDS = ['hold', 'hide', 'holdThenHide'] as const;
 const FONTS = ['Inter', 'Oswald'] as const;
 
@@ -510,7 +528,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function renderAnimTypeSelect(): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-anim-type' }) as HTMLSelectElement;
     for (const t of ANIMATION_TYPES) {
-      const opt = el('option', { value: t }, t) as HTMLOptionElement;
+      const opt = el('option', { value: t }, ANIMATION_TYPE_LABELS[t]) as HTMLOptionElement;
       opt.selected = t === ui.animType;
       select.appendChild(opt);
     }
@@ -524,7 +542,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function renderAnimTargetSelect(): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-anim-target' }) as HTMLSelectElement;
     for (const t of ANIMATION_TARGETS) {
-      const opt = el('option', { value: t }, t) as HTMLOptionElement;
+      const opt = el('option', { value: t }, ANIMATION_TARGET_LABELS[t]) as HTMLOptionElement;
       opt.selected = t === ui.animTarget;
       select.appendChild(opt);
     }

@@ -422,4 +422,77 @@ test.describe('Diagnostics view', () => {
     await expect(page.getByTestId('pane-diagnostics')).toBeVisible();
     await expect(page.getByTestId('tab-diagnostics')).toHaveClass(/active/);
   });
+
+  // --- Task 2.10, item 4: settings-paste ----------------------------------
+  // Real-world driver (controller clarification): OBS browser docks do NOT
+  // deliver Cmd/Ctrl+V to their contents, so pasting a websocket password is
+  // otherwise impossible for an operator testing this in real OBS.
+
+  test('settings-paste fills the password field from the clipboard', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.evaluate(() => navigator.clipboard.writeText('sekret-from-clipboard'));
+      await page.getByTestId('settings-paste').click();
+
+      await expect(page.getByTestId('settings-password')).toHaveValue('sekret-from-clipboard');
+      // diagnostics.ts builds its DOM once and toggles `.hidden` in place
+      // (see the file's own module doc comment) rather than conditionally
+      // rendering — same convention as its sibling diag-settings-error, so
+      // this asserts hidden rather than absent.
+      await expect(page.getByTestId('settings-paste-error')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('settings-paste shows an inline error and leaves the field untouched when the clipboard read is rejected', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // Monkey-patch BEFORE any page script runs — same pattern as the
+      // export-clipboard-failure test in presets-setup.spec.ts — so the
+      // dock's own paste handler sees a consistently-rejecting clipboard.
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('settings-password').fill('unchanged');
+      await page.getByTestId('settings-paste').click();
+
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible();
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('settings-paste with an empty clipboard read shows the same inline error and leaves the field untouched', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.evaluate(() => navigator.clipboard.writeText(''));
+      await page.getByTestId('settings-password').fill('unchanged');
+      await page.getByTestId('settings-paste').click();
+
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible();
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
 });
