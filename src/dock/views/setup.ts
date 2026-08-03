@@ -780,9 +780,18 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // Labels use `textColor` (not `numberColor`) — matching the real overlay
     // renderer's applyStyle(), which colors beforeEl/afterEl from
     // `s.textColor` while numberEl gets `s.numberColor`.
+    //
+    // Gate fix wave (L6): and they use TEXT_SIZE_PX, not the number's size.
+    // The preview root carries `fontSize: numberSizePx` so the NUMBER renders
+    // at its true size; every label used to inherit that, previewing a label
+    // roughly 4x larger relative to the number than the renderer's own
+    // `s.textSizePx` produces on stream — in the one UI PRD §8.8 names as how
+    // the operator picks a layout. (The textBehind ghost keeps its own
+    // explicit oversized font size, matching the renderer's ghost branch.)
     function labelSpan(testid: string, text: string): HTMLSpanElement {
       const span = el('span', { 'data-testid': testid }, text);
       span.style.color = ui.textColor;
+      span.style.fontSize = `${TEXT_SIZE_PX}px`;
       return span;
     }
 

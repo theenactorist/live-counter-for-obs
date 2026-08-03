@@ -841,6 +841,58 @@ test.describe('dock Live view', () => {
     expect(activeTestId).toBe('connect-password');
   });
 
+  // --- Gate fix wave (Ruling C): the card is dismissible ------------------
+  // Task 2.13 made counting, presets and the overlay work with zero OBS, but
+  // 2.12's card had no dismissal and no mention of that — so the Live tab
+  // still demanded a connection the product no longer needs, and came back
+  // on every End.
+
+  test('connect-card: "Not now" dismisses it, the normal Live UI renders, and the chip brings it back', async ({ page }) => {
+    // Nothing listening — the card shows and would never go away on its own.
+    await openDock(page, { port: 39466, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+    await expect(page.getByTestId('live-empty')).toHaveCount(0);
+
+    await page.getByTestId('connect-dismiss').click();
+
+    await expect(page.getByTestId('connect-card')).toHaveCount(0);
+    await expect(page.getByTestId('live-empty')).toBeVisible();
+    const chip = page.getByTestId('obs-disconnected-chip');
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveText('OBS not connected');
+
+    // Survives the card's own once-a-second re-render tick — the dismissal
+    // is not silently undone by the poll that keeps the state line current.
+    await page.waitForTimeout(1500);
+    await expect(page.getByTestId('connect-card')).toHaveCount(0);
+    await expect(chip).toBeVisible();
+
+    await chip.click();
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+  });
+
+  test('connect-card: dismissal survives a settings-save reboot (page session, not per-mount)', async ({ page }) => {
+    await openDock(page, { port: 39467, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+    await page.getByTestId('connect-dismiss').click();
+    await expect(page.getByTestId('live-empty')).toBeVisible();
+
+    // A Save from Diagnostics tears down and remounts every view; the
+    // operator's "Not now" must not be re-litigated by that.
+    await page.getByTestId('tab-diagnostics').click();
+    await page.getByTestId('settings-port').fill('39468');
+    await page.getByTestId('settings-save').click();
+    await page.getByTestId('tab-live').click();
+
+    await expect(page.getByTestId('live-empty')).toBeVisible();
+    await expect(page.getByTestId('connect-card')).toHaveCount(0);
+
+    // ...but a genuine page reload starts fresh (session-scoped only, never
+    // persisted).
+    await page.reload();
+    await expect(page.getByTestId('connect-card')).toBeVisible({ timeout: 5000 });
+  });
+
   test('connect-card: Paste fills connect-password from the clipboard', async ({ page, context }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await openDock(page, { port: 39465, devhook: false });

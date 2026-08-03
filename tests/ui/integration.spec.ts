@@ -16,7 +16,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
 const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
 
-const ALLOWED_REQUEST_TYPES = ['BroadcastCustomEvent', 'SetPersistentData', 'GetPersistentData'];
+// Requests the dock is allowed to make while merely running a session. The
+// first three are the protocol itself; the rest are the gate fix wave's
+// READ-ONLY add-overlay detection scan (Ruling A: it now runs unprompted at
+// mount/identify/tab-activation so the button's label is truthful before the
+// first click). Every one of them is a GET — see MUTATING_REQUEST_TYPES below,
+// which is the assertion that actually carries this test's meaning.
+const ALLOWED_REQUEST_TYPES = [
+  'BroadcastCustomEvent',
+  'SetPersistentData',
+  'GetPersistentData',
+  'GetVideoSettings',
+  'GetCurrentProgramScene',
+  'GetInputList',
+  'GetInputSettings',
+  'GetSceneItemList',
+  'GetSceneList',
+];
+// Nothing here may EVER be sent without the operator clicking add-overlay.
+const MUTATING_REQUEST_TYPES = ['CreateInput', 'SetInputSettings', 'CreateSceneItem', 'RemoveInput', 'SetCurrentProgramScene'];
 
 interface StartCfg {
   startValue: number;
@@ -163,12 +181,16 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       await expect(dock.getByTestId('status-chip')).toHaveAttribute('data-state', 'hidden', { timeout: 5000 });
       await expect(overlay.getByTestId('overlay-content')).toHaveCount(0);
 
-      // Render-level hide proof: the mock server, across the WHOLE test
-      // (dock boot, session broadcasts, ticks, completion), never received
-      // any request type other than the bus/persistence traffic every
-      // src/ module already restricts itself to (see grep in the task
-      // report) — completion:'hide' is purely a broadcast-driven, client-
-      // side render decision, never an OBS scene/source mutation.
+      // Render-level hide proof: across the WHOLE test (dock boot, session
+      // broadcasts, ticks, completion) the mock server never received a
+      // single MUTATING request — completion:'hide' is purely a
+      // broadcast-driven, client-side render decision, never an OBS
+      // scene/source mutation. Gate fix wave: the read-only add-overlay
+      // detection scan now also runs unprompted (Ruling A), so the exact
+      // "nothing but bus/persistence traffic" list has widened — but only
+      // with GETs, and the mutation check below is the one that matters.
+      const mutations = mock.requestLog.filter((t) => MUTATING_REQUEST_TYPES.includes(t));
+      expect(mutations).toEqual([]);
       const disallowed = mock.requestLog.filter((t) => !ALLOWED_REQUEST_TYPES.includes(t));
       expect(disallowed).toEqual([]);
     } finally {
@@ -427,6 +449,49 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
 
     await expect(dock.getByTestId('current-value')).toHaveText('3');
     await expect(overlay.getByTestId('overlay-number')).toHaveText('3', { timeout: 3000 });
+  });
+
+  // Gate fix wave (Ruling C) — the Live tab must not be the one screen that
+  // still insists on a websocket the product no longer needs. Same zero-OBS
+  // setup as test 10, but driven through the dismissible Connect card the
+  // operator actually meets first.
+  test('10b. zero OBS: dismissing the Connect card leaves a usable Live tab — counting works and the overlay follows', async ({
+    context,
+  }) => {
+    const dock = await context.newPage();
+    const overlay = await context.newPage();
+
+    await openDock(dock, { port: 59713 });
+    await overlay.goto(OVERLAY_URL);
+
+    // The card is what greets an operator with no OBS...
+    await expect(dock.getByTestId('connect-card')).toBeVisible();
+    await expect(dock.getByTestId('connect-optional-note')).toContainText('count without OBS');
+
+    // ...and "Not now" gets them straight to the working product.
+    await dock.getByTestId('connect-dismiss').click();
+    await expect(dock.getByTestId('connect-card')).toHaveCount(0);
+    await expect(dock.getByTestId('live-empty')).toBeVisible();
+    await expect(dock.getByTestId('obs-disconnected-chip')).toBeVisible();
+
+    await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+    await expect(dock.getByTestId('current-value')).toHaveText('0');
+    await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+    await dock.getByTestId('btn-plus').click();
+    await expect(dock.getByTestId('current-value')).toHaveText('1');
+    await expect(overlay.getByTestId('overlay-number')).toHaveText('1', { timeout: 3000 });
+
+    // The card stays gone across the session's whole life — including the
+    // End that used to push the operator straight back into it.
+    await dock.getByTestId('btn-end').click();
+    await dock.getByTestId('end-keep').click();
+    await expect(dock.getByTestId('live-empty')).toBeVisible();
+    await expect(dock.getByTestId('connect-card')).toHaveCount(0);
+
+    // ...and the chip is the way back when they DO want OBS.
+    await dock.getByTestId('obs-disconnected-chip').click();
+    await expect(dock.getByTestId('connect-card')).toBeVisible();
   });
 
   test('11. with both transports live, no envelope is ever delivered twice to the overlay (nonce-level dedup across local + ws)', async ({

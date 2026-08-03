@@ -147,6 +147,7 @@ export class Bus {
   private readonly nonceWindow = new NonceWindow(DEDUP_WINDOW_CAPACITY);
   private readonly listeners = new Set<(m: BusMessage) => void>();
   private readonly transportUnsubs: Array<() => void>;
+  private destroyed = false;
 
   constructor(client: ObsWsClient | null, source: BusMessage['source'], opts: BusOptions = {}) {
     this.source = source;
@@ -176,7 +177,12 @@ export class Bus {
     for (const fn of [...this.listeners]) fn(raw);
   }
 
-  async send(kind: BusKind, payload: unknown): Promise<void> {
+  send(kind: BusKind, payload: unknown): Promise<void> {
+    // Gate fix wave (F3): a destroyed Bus must not be able to write to shared
+    // state or report success. Rejecting (rather than silently resolving)
+    // keeps a stale caller visible in the diagnostics log instead of leaving
+    // it to believe it delivered.
+    if (this.destroyed) return Promise.reject(new Error('bus send after destroy'));
     const envelope: BusMessage = {
       app: 'live-counter',
       v: 1,
@@ -199,16 +205,50 @@ export class Bus {
         return Promise.reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
-    const settled = await Promise.allSettled(attempts);
-    const anyDelivered = settled.some((r) => r.status === 'fulfilled' && r.value === true);
-    if (anyDelivered) return;
-    // Every transport either rejected or reported "did not deliver" — this
-    // is the one case worth surfacing as a real failure (SessionController's
-    // broadcast() logs it). A healthy dock with the local transport working
-    // but no OBS attached never reaches here: the local send() above already
-    // counts as delivered.
-    const reasons = settled.map((r) => (r.status === 'rejected' ? describeError(r.reason) : 'transport unavailable'));
-    throw new Error(`bus send failed on every transport: ${reasons.join('; ')}`);
+    // Gate fix wave (F4): resolve on the FIRST genuine delivery rather than
+    // awaiting every transport. `Promise.allSettled` meant an
+    // identified-but-unresponsive OBS held this promise for the ws request's
+    // full 8s timeout even though the local transport had already delivered
+    // synchronously — and SessionController.init() awaits exactly this call
+    // before painting a restored session. Every attempt still runs to
+    // completion (they are all attached to handlers here, so a later
+    // rejection can never surface as an unhandled one); only the WAIT is
+    // shortened. The all-failed aggregate error is unchanged.
+    return new Promise<void>((resolve, reject) => {
+      let remaining = attempts.length;
+      let settledOut = false;
+      const reasons: string[] = attempts.map(() => 'transport unavailable');
+      if (remaining === 0) {
+        reject(new Error('bus send failed on every transport: no transports configured'));
+        return;
+      }
+      attempts.forEach((attempt, i) => {
+        void attempt
+          .then(
+            (delivered) => {
+              if (delivered === true && !settledOut) {
+                settledOut = true;
+                resolve();
+              }
+            },
+            (err: unknown) => {
+              reasons[i] = describeError(err);
+            },
+          )
+          .then(() => {
+            remaining -= 1;
+            // Every transport either rejected or reported "did not deliver" —
+            // the one case worth surfacing as a real failure
+            // (SessionController's broadcast() logs it). A healthy dock with
+            // the local transport working but no OBS attached never reaches
+            // here: the local send() already counted as delivered above.
+            if (remaining === 0 && !settledOut) {
+              settledOut = true;
+              reject(new Error(`bus send failed on every transport: ${reasons.join('; ')}`));
+            }
+          });
+      });
+    });
   }
 
   onMessage(fn: (m: BusMessage) => void): () => void {
@@ -218,13 +258,15 @@ export class Bus {
     };
   }
 
-  /** Reflects each transport's CURRENT availability — feeds src/dock/diagnostics.ts's transport row. */
+  /** Reflects each transport's CURRENT availability — feeds src/dock/diagnostics.ts's transport row. A destroyed Bus reports nothing available. */
   activeTransports(): { local: boolean; obsws: boolean } {
+    if (this.destroyed) return { local: false, obsws: false };
     return { local: this.local?.available ?? false, obsws: this.obsws.available };
   }
 
-  /** Tears down both transports' underlying listeners (BroadcastChannel/'storage'/ws onEvent) and drops every registered listener. Idempotent. */
+  /** Tears down both transports' underlying listeners (BroadcastChannel/'storage'/ws onEvent), drops every registered listener, and makes send() a rejected path (F3). Idempotent. */
   destroy(): void {
+    this.destroyed = true;
     for (const unsub of this.transportUnsubs) unsub();
     this.transportUnsubs.length = 0;
     this.local?.destroy?.();

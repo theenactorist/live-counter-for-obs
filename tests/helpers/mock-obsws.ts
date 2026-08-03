@@ -19,6 +19,16 @@ export interface MockInputSeed {
   inputName: string;
   inputKind: string;
   inputSettings: Record<string, unknown>;
+  /**
+   * Gate fix wave (Ruling A) — which SCENES contain this input as a scene
+   * item. obs-websocket v5 models inputs as scene-collection-global SOURCES
+   * and scene membership separately as scene ITEMS; without this distinction
+   * the "overlay exists, but in another scene" case the add-overlay redesign
+   * turns on is literally unrepresentable here (the gate finding's "the mock
+   * cannot catch it"). Omitted = the program scene, which is what every
+   * pre-existing single-scene test assumes.
+   */
+  scenes?: string[];
 }
 
 export interface MockObsOptions {
@@ -29,6 +39,14 @@ export interface MockObsOptions {
   programScene?: string;
   /** Seeds the inputs GetInputList/GetInputSettings see from the start (Task 2.12) — e.g. a pre-existing overlay Browser Source, or a same-named-but-unrelated input for collision tests. */
   inputs?: MockInputSeed[];
+  /** Seeds GetSceneList (gate fix wave) — default `[programScene]`, plus any scene named by an input seed's `scenes`. */
+  scenes?: string[];
+}
+
+/** One scene item as GetSceneItemList reports it (gate fix wave) — only the fields add-overlay reads. */
+export interface MockSceneItem {
+  sceneItemId: number;
+  sourceName: string;
 }
 
 export interface MockObs {
@@ -66,6 +84,8 @@ export interface MockObs {
   requestPayloads: Array<{ type: string; data: Record<string, unknown> }>;
   /** Current scene/input state as the mock sees it (Task 2.12) — read directly for assertions instead of round-tripping through another request. */
   inputs: Map<string, { inputKind: string; inputSettings: Record<string, unknown> }>;
+  /** Scene name -> its scene items, in order (gate fix wave) — lets a test assert WHICH scene a source actually landed in, not merely that a source exists. */
+  sceneItems: Map<string, MockSceneItem[]>;
   close(): Promise<void>;
 }
 
@@ -111,10 +131,27 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   const videoSettings = opts.videoSettings ?? { baseWidth: 1920, baseHeight: 1080 };
   const programScene = opts.programScene ?? 'Scene';
   const inputs = new Map<string, { inputKind: string; inputSettings: Record<string, unknown> }>();
+  let nextSceneItemId = 1;
+  // Gate fix wave (Ruling A) — real per-scene item tracking, so "this input
+  // exists in the collection" and "this input is an item of THIS scene" are
+  // two genuinely different facts, exactly as they are in obs-websocket v5.
+  const sceneItems = new Map<string, MockSceneItem[]>();
+  function ensureScene(name: string): MockSceneItem[] {
+    let items = sceneItems.get(name);
+    if (!items) {
+      items = [];
+      sceneItems.set(name, items);
+    }
+    return items;
+  }
+  ensureScene(programScene);
+  for (const name of opts.scenes ?? []) ensureScene(name);
   for (const seed of opts.inputs ?? []) {
     inputs.set(seed.inputName, { inputKind: seed.inputKind, inputSettings: { ...seed.inputSettings } });
+    for (const sceneName of seed.scenes ?? [programScene]) {
+      ensureScene(sceneName).push({ sceneItemId: nextSceneItemId++, sourceName: seed.inputName });
+    }
   }
-  let nextSceneItemId = 1;
 
   function send(socket: WsSocket, op: number, d: Record<string, unknown>): void {
     socket.send(JSON.stringify({ op, d }));
@@ -172,6 +209,51 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
           responseData = { currentProgramSceneName: programScene };
           break;
         }
+        case 'GetSceneList': {
+          responseData = {
+            currentProgramSceneName: programScene,
+            scenes: Array.from(sceneItems.keys()).map((sceneName, i) => ({ sceneName, sceneIndex: i })),
+          };
+          break;
+        }
+        case 'GetSceneItemList': {
+          const sceneName = requestData?.sceneName as string;
+          const items = sceneItems.get(sceneName);
+          if (!items) {
+            result = false;
+            code = 600;
+            comment = `No scene was found by the name of \`${sceneName}\`.`;
+          } else {
+            responseData = {
+              sceneItems: items.map((item) => ({
+                sceneItemId: item.sceneItemId,
+                sourceName: item.sourceName,
+                inputKind: inputs.get(item.sourceName)?.inputKind ?? null,
+                isGroup: false,
+              })),
+            };
+          }
+          break;
+        }
+        case 'CreateSceneItem': {
+          const sceneName = requestData?.sceneName as string;
+          const sourceName = requestData?.sourceName as string;
+          const items = sceneItems.get(sceneName);
+          if (!items) {
+            result = false;
+            code = 600;
+            comment = `No scene was found by the name of \`${sceneName}\`.`;
+          } else if (!inputs.has(sourceName)) {
+            result = false;
+            code = 600;
+            comment = `No source was found by the name of \`${sourceName}\`.`;
+          } else {
+            const sceneItemId = nextSceneItemId++;
+            items.push({ sceneItemId, sourceName });
+            responseData = { sceneItemId };
+          }
+          break;
+        }
         case 'GetInputList': {
           responseData = {
             inputs: Array.from(inputs.entries()).map(([inputName, input]) => ({
@@ -224,7 +306,12 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
             const inputKind = (requestData?.inputKind as string) ?? 'browser_source';
             const inputSettings = { ...((requestData?.inputSettings as Record<string, unknown>) ?? {}) };
             inputs.set(inputName, { inputKind, inputSettings });
-            responseData = { sceneItemId: nextSceneItemId++ };
+            // Real CreateInput also places the new source into the named
+            // scene as an item — modelled here (gate fix wave) so a following
+            // GetSceneItemList reports it, exactly as OBS would.
+            const sceneItemId = nextSceneItemId++;
+            ensureScene((requestData?.sceneName as string) ?? programScene).push({ sceneItemId, sourceName: inputName });
+            responseData = { sceneItemId };
           }
           break;
         }
@@ -346,6 +433,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     requestLog,
     requestPayloads,
     inputs,
+    sceneItems,
     close() {
       return new Promise<void>((resolve, reject) => {
         for (const c of wss.clients) c.terminate();

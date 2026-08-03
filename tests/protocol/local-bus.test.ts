@@ -42,6 +42,32 @@ function envelope(overrides: Partial<BusMessage> = {}): BusMessage {
   };
 }
 
+// --- Gate fix wave (F3): a destroyed transport is inert -------------------
+describe('LocalBusTransport — destroy()', () => {
+  it('a destroyed instance writes nothing to storage and reports not-delivered (no zombie writer)', () => {
+    const writes: Array<{ key: string; value: string }> = [];
+    const storage = {
+      setItem(key: string, value: string): void {
+        writes.push({ key, value });
+      },
+    };
+    const eventTarget = { addEventListener(): void {}, removeEventListener(): void {} };
+    const t = new LocalBusTransport({ storage, eventTarget, broadcastChannelCtor: null, storageKey: 'lc.bus.test' });
+
+    expect(t.send(envelope())).toBe(true);
+    expect(writes).toHaveLength(1);
+
+    t.destroy();
+
+    // destroy() used to close the channel and unbind the listener but leave
+    // the storage writer live, so this second send still wrote the shared key
+    // AND reported success — the zombie-writer class.
+    expect(t.send(envelope())).toBe(false);
+    expect(writes).toHaveLength(1);
+    expect(t.available).toBe(false);
+  });
+});
+
 describe('LocalBusTransport — BroadcastChannel path', () => {
   it('delivers a message sent by one instance to another instance sharing the same channel name', async () => {
     const channelName = `lc-test-bc-${generateNonce()}`;

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { startMockObs } from '../helpers/mock-obsws.js';
+import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { VERSION } from '../../src/shared/version.js';
@@ -20,6 +20,25 @@ async function openDock(
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
   if (opts.diagRefreshMs !== undefined) params.set('diagRefreshMs', String(opts.diagRefreshMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+/**
+ * Waits until no NEW add-overlay detection scan has started for a beat.
+ *
+ * The dock seeds its scan from several independent triggers (mount, every
+ * `identified`, every Diagnostics tab activation), so right after boot one
+ * can still be on the wire. A test that arms a one-shot `failNext` while a
+ * scan is in flight is racing which scan eats the failure — the flake this
+ * helper removes. `GetInputList` is the per-scan marker: exactly one per scan.
+ */
+async function settleOverlayScans(mock: MockObs): Promise<void> {
+  let last = -1;
+  for (let i = 0; i < 30; i++) {
+    const n = mock.requestLog.filter((t) => t === 'GetInputList').length;
+    if (n === last) return;
+    last = n;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
 }
 
 /** Test-side "overlay" on the mock obs-websocket server — sends a real 'hello' over the real transport. */
@@ -606,7 +625,11 @@ test.describe('Diagnostics view', () => {
     }
   });
 
-  test('add-overlay: a second click finds the just-created overlay and updates it instead of duplicating', async ({
+  // Gate fix wave (Ruling A item 3): a second click no longer mutates on its
+  // own. Reconfiguring a source the operator already owns now goes through an
+  // inline confirmation that names exactly what will change — the label
+  // promised a fix, and a fix is what happens, but only after Apply.
+  test('add-overlay: a second click offers a Fix confirmation and, on Apply, updates instead of duplicating', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -621,12 +644,303 @@ test.describe('Diagnostics view', () => {
       await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
 
       await page.getByTestId('add-overlay').click();
+      // Nothing has gone out yet — the confirmation names the input and the
+      // exact dimensions it is about to force, and warns about the reload.
+      const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
+      await expect(fixConfirm).toBeVisible();
+      await expect(fixConfirm).toContainText("'Live Counter Overlay'");
+      await expect(fixConfirm).toContainText('1920×1080');
+      await expect(fixConfirm).toContainText('reload it on air');
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings')).toHaveLength(0);
+
+      await page.getByTestId('add-overlay-fix-apply').click();
       await expect(page.getByTestId('add-overlay-confirm')).toHaveText('Overlay settings updated', { timeout: 5000 });
 
-      // Still exactly one CreateInput ever — the second click went through
-      // SetInputSettings instead, having found the overlay it just made.
+      // Still exactly one CreateInput ever — the confirmed second click went
+      // through SetInputSettings instead, on the overlay it just made.
       expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
       expect(mock.requestLog.filter((t) => t === 'SetInputSettings').length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: Cancel on the Fix confirmation sends nothing at all', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Hand-added counter',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///somewhere/overlay.html?port=4455', width: 800, height: 600 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-fix-confirm')).toBeVisible();
+      await page.getByTestId('add-overlay-fix-cancel').click();
+      await expect(page.getByTestId('add-overlay-fix-confirm')).toBeHidden();
+
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings')).toHaveLength(0);
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(0);
+      // The operator's hand-tuned size is untouched.
+      expect(mock.inputs.get('Hand-added counter')?.inputSettings.width).toBe(800);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Gate fix wave (Ruling A item 1): the label is truthful BEFORE the
+  // first click. The reported defect: a fresh mount always read "Add overlay
+  // to my scene", so the operator who had already added the source by hand
+  // was promised an addition and got a reconfiguration.
+
+  test('add-overlay: a pre-existing overlay in the program scene makes the button read "Fix overlay settings" before any click', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'My own counter source',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      // Detection is by SETTINGS URL, not by name — a hand-added source under
+      // any name is still found.
+      await expect(page.getByTestId('add-overlay')).toBeEnabled();
+      // Nothing was mutated merely by looking.
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings')).toHaveLength(0);
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Gate fix wave (Ruling A item 2 + test gap 1): cross-scene cases.
+  // GetInputList is scene-collection-GLOBAL, so before this wave an overlay
+  // living in another scene was updated in place, "Overlay settings updated"
+  // was reported, and the program scene stayed empty — the operator went
+  // live with no counter.
+
+  test('add-overlay: an overlay in ANOTHER scene reads "Add overlay to this scene", names that scene, and adds the existing source here', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      programScene: 'Starting Soon',
+      scenes: ['Starting Soon', 'Main'],
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          scenes: ['Main'], // NOT in the program scene
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await expect(page.getByTestId('add-overlay')).toHaveText('Add overlay to this scene', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-note')).toContainText("already exists in 'Main'");
+      await expect(page.getByTestId('add-overlay-note')).toContainText("'Starting Soon'");
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toContainText('Overlay added to Starting Soon', {
+        timeout: 5000,
+      });
+
+      // The EXISTING source was added to the program scene...
+      expect(mock.sceneItems.get('Starting Soon')?.map((i) => i.sourceName)).toEqual(['Live Counter Overlay']);
+      // ...exactly once, with no duplicate input minted...
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(0);
+      expect(mock.requestLog.filter((t) => t === 'CreateSceneItem')).toHaveLength(1);
+      expect(mock.inputs.size).toBe(1);
+      // ...and the other scene's copy was neither moved nor reconfigured.
+      expect(mock.sceneItems.get('Main')?.map((i) => i.sourceName)).toEqual(['Live Counter Overlay']);
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings')).toHaveLength(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: once the existing source is in this scene, the button becomes the Fix path (never a second input)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      programScene: 'Starting Soon',
+      scenes: ['Starting Soon', 'Main'],
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          scenes: ['Main'],
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Add overlay to this scene', { timeout: 5000 });
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
+      await expect(page.getByTestId('add-overlay-note')).toBeHidden();
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Gate fix wave (F6): a half-read scene is inconclusive, never "none".
+  // Skipping a failing GetInputSettings used to risk missing the REAL overlay
+  // and creating a duplicate "Live Counter Overlay 2" in the live scene.
+
+  test('add-overlay: a failing GetInputSettings during the scan disables the button and offers a re-check, creating nothing', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      // Arms the failure for the NEXT scan, then forces one by re-activating
+      // the tab — deterministic about WHICH scan sees it, unlike arming it
+      // before boot and racing the identify-driven scan.
+      await settleOverlayScans(mock);
+      mock.failNext('GetInputSettings', 500, 'transient (test)');
+      await page.getByTestId('tab-live').click();
+      await page.getByTestId('tab-diagnostics').click();
+
+      await expect(page.getByTestId('add-overlay-retry')).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('add-overlay')).toBeDisabled();
+      await expect(page.getByTestId('add-overlay')).not.toHaveText('Add overlay to my scene');
+      await expect(page.getByTestId('add-overlay-error')).toContainText("Couldn't check your scene");
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(0);
+
+      // The retry re-scans cleanly (the forced failure is one-shot) and lands
+      // on the truthful verdict.
+      await page.getByTestId('add-overlay-retry').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-retry')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Gate fix wave (Ruling B): no credentials in what gets written --------
+
+  test('add-overlay: the URL written into the scene collection carries NO password', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // A password IS configured for this dock — the point is that it still
+      // never reaches the Browser Source's settings.
+      await page.getByTestId('settings-password').fill('super-secret-pass');
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+
+      const creates = mock.requestPayloads.filter((r) => r.type === 'CreateInput');
+      const writtenUrl = String((creates[0]!.data.inputSettings as Record<string, unknown>).url);
+      expect(writtenUrl).toContain('overlay.html');
+      expect(writtenUrl).not.toContain('pw=');
+      expect(writtenUrl).not.toContain('super-secret-pass');
+      // The non-default port IS carried (it is not a secret, and it keeps the
+      // websocket path usable for a custom-port setup).
+      expect(writtenUrl).toContain(`port=${mock.port}`);
+
+      // The MANUAL copy path still offers the credentialed URL, distinctly
+      // labelled — the two are different URLs on purpose.
+      const previewUrl = await page.getByTestId('diag-overlay-url').inputValue();
+      expect(previewUrl).toContain('pw=super-secret-pass');
+      await expect(page.getByTestId('diag-copy-overlay-url')).toContainText('with password');
+      await expect(page.getByTestId('add-overlay-url-note')).toContainText('password-free');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: the written URL follows the port the operator has TYPED, matching the URL preview above it', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // Typed but deliberately NOT saved: the preview updates on every
+      // keystroke, so the write must come from the same source of truth
+      // rather than the value this mount happened to boot with.
+      await page.getByTestId('settings-port').fill('4499');
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay-confirm')).toBeVisible({ timeout: 5000 });
+
+      const creates = mock.requestPayloads.filter((r) => r.type === 'CreateInput');
+      const writtenUrl = String((creates[0]!.data.inputSettings as Record<string, unknown>).url);
+      expect(writtenUrl).toContain('port=4499');
+      const previewUrl = await page.getByTestId('diag-overlay-url').inputValue();
+      expect(previewUrl).toContain('port=4499');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Gate fix wave (L4 / AC 23): a denied clipboard write surfaces the
+  // select-to-copy fallback instead of nothing at all.
+
+  test('copy buttons: a denied clipboard write shows the manual-copy hint and no false "Copied!"', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.writeText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('diag-copy-overlay-url').click();
+      await expect(page.getByTestId('copy-fallback')).toBeVisible();
+      await expect(page.getByTestId('copy-fallback')).toContainText('Copy blocked');
+      await expect(page.getByTestId('copy-confirm')).toBeHidden();
+
+      // The URL's own text is selected, so the operator's Cmd/Ctrl+C works.
+      const selected = await page.evaluate(() => {
+        const input = document.querySelector<HTMLInputElement>('[data-testid="diag-overlay-url"]');
+        return input === null ? '' : input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0);
+      });
+      expect(selected).toContain('overlay.html');
+
+      // Same for the dock URL and the diagnostics dump.
+      await page.getByTestId('diag-copy-dock-url').click();
+      await expect(page.getByTestId('copy-fallback')).toBeVisible();
+      await page.getByTestId('diag-copy-log').click();
+      await expect(page.getByTestId('copy-fallback')).toBeVisible();
+      await expect(page.getByTestId('copy-confirm')).toBeHidden();
     } finally {
       await mock.close();
     }
@@ -725,17 +1039,18 @@ test.describe('Diagnostics view', () => {
       // once the shared call resolves) rather than firing a second,
       // concurrent request — proving the fix holds even when an operator
       // clicks exactly the reported sequence, not just that the UI LOOKS
-      // disabled for an instant.
+      // disabled for an instant. Gate fix wave: by the time it IS actionable
+      // the shared scan has relabelled it to the Fix path, so this click
+      // opens the confirmation rather than mutating anything — a strictly
+      // stronger outcome than before for the same operator sequence.
+      await expect(mirrorBtn).toHaveText('Fix overlay settings', { timeout: 5000 });
       await mirrorBtn.click({ timeout: 5000 });
-      await expect(
-        page.getByTestId('live-add-overlay-confirm').or(page.getByTestId('live-add-overlay-error')),
-      ).toBeVisible({ timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay-fix-confirm')).toBeVisible({ timeout: 5000 });
 
-      // Exactly one CreateInput ever, from Diagnostics' original click; the
-      // Live click that followed (once re-enabled) found the just-created
-      // overlay and updated it instead.
+      // Exactly one CreateInput ever, from Diagnostics' original click, and
+      // the Live click that followed sent nothing at all on its own.
       expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
-      expect(mock.requestLog.filter((t) => t === 'SetInputSettings').length).toBeGreaterThanOrEqual(1);
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings')).toHaveLength(0);
     } finally {
       await mock.close();
     }

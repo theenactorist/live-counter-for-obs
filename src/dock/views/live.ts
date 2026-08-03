@@ -39,7 +39,19 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
-import { addOverlayToScene, isAddOverlayBusy, onAddOverlayBusyChange, pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../diagnostics.js';
+import {
+  addOverlayButtonState,
+  fixOverlayConfirmText,
+  getOverlayScan,
+  onAddOverlayBusyChange,
+  onOverlayScanChange,
+  refreshOverlayScan,
+  runAddOverlay,
+  pasteIntoField,
+  CLIPBOARD_BLOCKED_TEXT,
+  type AddOverlayResult,
+  type OverlayIntent,
+} from '../diagnostics.js';
 import { CONNECTION_GRACE_MS } from '../connection-grace.js';
 
 export interface LiveViewHandle {
@@ -103,13 +115,20 @@ interface ConnectUiState {
 // toggling `pane.hidden`), so sharing one testid would make every
 // `getByTestId('add-overlay')` lookup ambiguous (a strict-mode violation)
 // the instant both panes exist in the DOM at once — which is always, here.
-// The underlying request logic (`addOverlayToScene`) is still the single
+// The underlying request logic (`runAddOverlay`) and the scan that decides
+// what the button even SAYS (`addOverlayButtonState`) are still the single
 // shared implementation; only the DOM wiring differs per view, same as each
 // view already keeping its own local `el()`/`button()` helpers.
+// Gate fix wave (Ruling A): `hasOverlay` is GONE. The button's verb now comes
+// from the shared, scene-aware scan (diagnostics.ts's addOverlayButtonState)
+// rather than a per-view boolean that started life as `false` at every mount
+// and was only ever corrected AFTER a mutation had already happened — the
+// misleading-label defect this wave exists to remove. Only the two transient
+// result messages and the Fix confirmation's open/closed state are local.
 interface LiveAddOverlayUiState {
-  hasOverlay: boolean;
   confirmText: string | null;
   errorText: string | null;
+  fixConfirmOpen: boolean;
 }
 
 export interface MountLiveViewOptions {
@@ -163,6 +182,12 @@ function button(testid: string, text: string, opts: { disabled?: boolean; extraC
   b.disabled = opts.disabled ?? false;
   return b;
 }
+
+// Gate fix wave (Ruling C): "remembered for the page session only" — module
+// scope, never localStorage, and deliberately OUTSIDE mountLiveView so a
+// settings-save reconnect (main.ts's boot() destroys and remounts this view)
+// does not push the dismissed card back in the operator's face.
+let connectCardDismissed = false;
 
 export function mountLiveView(
   container: HTMLElement,
@@ -223,9 +248,9 @@ export function mountLiveView(
   let wasConnected = isConnected();
 
   const addOverlayUi: LiveAddOverlayUiState = {
-    hasOverlay: false,
     confirmText: null,
     errorText: null,
+    fixConfirmOpen: false,
   };
 
   // Initialized "now" rather than 0: a freshly-mounted view with a session
@@ -294,7 +319,17 @@ export function mountLiveView(
     // live-root counting screen a session already in progress still renders
     // regardless of connectivity (the operator keeps counting offline; the
     // status chip/banner-overlay already cover that story).
-    if (session === null && !isConnected() && connectCardEnabled) {
+    //
+    // Gate fix wave (Ruling C): ...and only until the operator says "Not
+    // now". Task 2.13 made counting, presets and the overlay fully functional
+    // with zero OBS, so a card with no way past it is the one screen that
+    // still insists on a connection the product no longer needs. Once
+    // dismissed, the normal Live UI renders with a small chip that reopens
+    // the card. Dismissal lives in a module-level flag (page session only —
+    // never persisted), so a settings-save remount does not resurrect a card
+    // the operator already waved off.
+    const cardWanted = session === null && !isConnected() && connectCardEnabled;
+    if (cardWanted && !connectCardDismissed) {
       container.appendChild(renderConnectCard());
       if (!connectCardEverShown) {
         connectCardEverShown = true;
@@ -303,6 +338,7 @@ export function mountLiveView(
       }
     } else {
       connectCardEverShown = false;
+      if (cardWanted) container.appendChild(renderDisconnectedChip());
       if (session === null) {
         container.appendChild(renderLiveEmpty());
       } else {
@@ -311,6 +347,19 @@ export function mountLiveView(
     }
 
     restoreFocus(focusSnapshot);
+  }
+
+  // Ruling C — the persistent way back to the card the operator dismissed.
+  // Deliberately a chip rather than a banner: the point of dismissing was to
+  // stop OBS setup from dominating a screen that works without it.
+  function renderDisconnectedChip(): HTMLElement {
+    const chip = button('obs-disconnected-chip', 'OBS not connected', { extraClass: 'obs-chip' });
+    chip.title = 'Counting and the overlay work without OBS. Click to connect anyway.';
+    chip.addEventListener('click', () => {
+      connectCardDismissed = false;
+      render();
+    });
+    return chip;
   }
 
   function renderLiveEmpty(): HTMLElement {
@@ -323,51 +372,100 @@ export function mountLiveView(
     // land here once identified, click Add overlay (click 2).
     const settingsAtMount = opts.initialSettings;
     if (client !== undefined && settingsAtMount !== undefined) {
-      // Review fix (Critical 1): `disabled` is derived from the SHARED
-      // `isAddOverlayBusy()` lock (diagnostics.ts module scope), not a flag
-      // local to this view — a click on Diagnostics' own `add-overlay`
-      // disables THIS button too (the busy-change subscription below keeps
-      // it current for as long as this button stays in the DOM), closing
-      // the race that let both entry points fire a CreateInput at once.
-      const btn = button('live-add-overlay', addOverlayUi.hasOverlay ? 'Fix overlay settings' : 'Add overlay to my scene');
-      btn.disabled = isAddOverlayBusy() || client.state !== 'identified';
+      // Gate fix wave (Ruling A): label, enabled-ness, intent and note ALL
+      // come from the shared scan (diagnostics.ts's addOverlayButtonState),
+      // which also folds in the SHARED `isAddOverlayBusy()` lock — so this
+      // mirror and Diagnostics' own button can never disagree about what a
+      // click is about to do, and neither can promise an addition when an
+      // overlay already exists.
+      const state = addOverlayButtonState(client);
+      const btn = button('live-add-overlay', state.label, { disabled: state.disabled });
       btn.addEventListener('click', () => {
         addOverlayUi.confirmText = null;
         addOverlayUi.errorText = null;
-        // addOverlayToScene() flips the shared busy lock synchronously
-        // before returning (see diagnostics.ts) — render() right after
-        // already paints this button disabled, with no separate flag needed.
-        const call = addOverlayToScene(client, settingsAtMount.wsPort, settingsAtMount.wsPassword);
-        render();
-        void call.then((result) => {
-          // Review fix (Important 2): this continuation can resolve AFTER
-          // a settings-save reconnect has already destroy()'d this exact
-          // mount (main.ts's boot() tears down + remounts every view on
-          // Save) — render() itself no-ops once destroyed, but skip the
-          // state mutation too so a THIRD mount woken later by some future
-          // change never inherits a confirm/error message that was never
-          // actually about it.
-          if (destroyed) return;
-          if (result.ok) {
-            addOverlayUi.hasOverlay = true;
-            addOverlayUi.confirmText = result.action === 'created' ? `Overlay added to ${result.sceneName}` : 'Overlay settings updated';
-          } else {
-            addOverlayUi.errorText = result.message;
-          }
+        if (state.intent === null) return;
+        if (state.intent === 'fix') {
+          // Ruling A item 3: reconfiguring a source the operator already owns
+          // is announced in full before anything is sent.
+          addOverlayUi.fixConfirmOpen = true;
           render();
-        });
+          return;
+        }
+        startAddOverlay(state.intent);
       });
       wrap.appendChild(btn);
+
+      if (state.note !== null) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-note', class: 'diag-note' }, state.note));
+      }
+      if (state.retry) {
+        if (state.retryMessage !== null) {
+          wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-error', class: 'field-error' }, state.retryMessage));
+        }
+        const retry = button('live-add-overlay-retry', 'Check again');
+        retry.addEventListener('click', () => {
+          void refreshOverlayScan(client);
+        });
+        wrap.appendChild(retry);
+      }
+
+      if (addOverlayUi.fixConfirmOpen && state.intent === 'fix') {
+        const scan = getOverlayScan(client);
+        const box = el('div', { 'data-testid': 'live-add-overlay-fix-confirm', class: 'confirm-box' });
+        box.appendChild(el('span', {}, scan ? fixOverlayConfirmText(scan) : ''));
+        const apply = button('live-add-overlay-fix-apply', 'Apply');
+        apply.addEventListener('click', () => {
+          addOverlayUi.fixConfirmOpen = false;
+          startAddOverlay('fix');
+        });
+        const cancel = button('live-add-overlay-fix-cancel', 'Cancel');
+        cancel.addEventListener('click', () => {
+          addOverlayUi.fixConfirmOpen = false;
+          render();
+        });
+        box.append(apply, cancel);
+        wrap.appendChild(box);
+      }
 
       if (addOverlayUi.confirmText !== null) {
         wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-confirm', class: 'copy-confirm' }, addOverlayUi.confirmText));
       }
-      if (addOverlayUi.errorText !== null) {
+      if (addOverlayUi.errorText !== null && !state.retry) {
         wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-error', class: 'field-error' }, addOverlayUi.errorText));
       }
     }
 
     return wrap;
+  }
+
+  /** Fires one of the three explicit actions and paints its outcome (Ruling A). */
+  function startAddOverlay(intent: OverlayIntent): void {
+    if (client === undefined) return;
+    // Review fold-in: the written URL's port now comes from the SAME live
+    // mirror the Connect card edits, not a value frozen at mount — so what
+    // the operator last typed and what gets written can no longer diverge.
+    const port = parseConnectPort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT;
+    // runAddOverlay() flips the shared busy lock synchronously before
+    // returning (see diagnostics.ts) — render() right after already paints
+    // this button disabled, with no separate flag needed.
+    const call = runAddOverlay(client, intent, port);
+    render();
+    void call.then((result: AddOverlayResult) => {
+      // Review fix (Important 2): this continuation can resolve AFTER a
+      // settings-save reconnect has already destroy()'d this exact mount
+      // (main.ts's boot() tears down + remounts every view on Save) —
+      // render() itself no-ops once destroyed, but skip the state mutation
+      // too so a THIRD mount woken later by some future change never
+      // inherits a confirm/error message that was never actually about it.
+      if (destroyed) return;
+      if (result.ok) {
+        addOverlayUi.confirmText =
+          result.action === 'updated' ? 'Overlay settings updated' : `Overlay added to ${result.sceneName}`;
+      } else {
+        addOverlayUi.errorText = result.message;
+      }
+      render();
+    });
   }
 
   function connectStateText(phase: ReturnType<typeof connectPhase>): string {
@@ -456,6 +554,25 @@ export function mountLiveView(
       opts.onSaveSettings?.(port, passwordInput.value);
     });
     card.appendChild(submitBtn);
+
+    // Ruling C — the escape hatch. Counting, presets and the overlay all work
+    // over Task 2.13's direct transport with no websocket at all, so the card
+    // must never be the only thing on this screen with no way past it. The
+    // copy states what is actually lost, so dismissing is an informed choice
+    // rather than a shrug.
+    const dismissBtn = button('connect-dismiss', 'Not now');
+    dismissBtn.addEventListener('click', () => {
+      connectCardDismissed = true;
+      render();
+    });
+    card.appendChild(dismissBtn);
+    card.appendChild(
+      el(
+        'div',
+        { 'data-testid': 'connect-optional-note', class: 'connect-optional-note' },
+        'You can count without OBS — create a session in Setup. Connecting adds session persistence, LIVE status and Add overlay.',
+      ),
+    );
 
     const phase = connectPhase();
     card.appendChild(el('div', { 'data-testid': 'connect-state', class: 'connect-state' }, connectStateText(phase)));
@@ -906,7 +1023,8 @@ export function mountLiveView(
     // rather than a surgical in-place update — safe here specifically
     // because the card only ever shows while session === null, so there is
     // no live-root state for a full rebuild to disturb.
-    const showingConnectCard = controller.getState().session === null && !isConnected() && connectCardEnabled;
+    const showingConnectCard =
+      controller.getState().session === null && !isConnected() && connectCardEnabled && !connectCardDismissed;
     if (showingConnectCard) {
       render();
     } else {
@@ -919,7 +1037,12 @@ export function mountLiveView(
   // (see obsws-client.ts — 'connecting' has none of its own, which is why
   // the poll above exists at all) rather than waiting out up to one full
   // BANNER_POLL_MS tick to notice.
-  const unsubIdentified = client?.on('identified', () => render());
+  const unsubIdentified = client?.on('identified', () => {
+    // Ruling A item 1: every (re)identify re-seeds the shared scan, so this
+    // mirror's verb is truthful from the first moment it is clickable.
+    void refreshOverlayScan(client);
+    render();
+  });
   const unsubAuthFailed = client?.on('auth-failed', () => render());
   // Review fix (Critical 1) — the other half of cross-view disabling: when
   // Diagnostics' own add-overlay button is the one clicked, THIS surgical
@@ -930,9 +1053,18 @@ export function mountLiveView(
   const unsubAddOverlayBusyLive = onAddOverlayBusyChange(() => {
     if (destroyed) return;
     const btn = container.querySelector<HTMLButtonElement>('[data-testid="live-add-overlay"]');
-    if (btn && client) btn.disabled = isAddOverlayBusy() || client.state !== 'identified';
+    if (btn && client) btn.disabled = addOverlayButtonState(client).disabled;
+  });
+  // A scan completing (or being invalidated) changes the button's VERB, not
+  // just its enabled-ness — that needs the real render() path, unlike the
+  // busy-flag update above. Cheap: scans only run at mount, on identify, on
+  // Diagnostics tab activation, and around an action.
+  const unsubOverlayScanLive = onOverlayScanChange(() => {
+    if (destroyed) return;
+    if (container.querySelector('[data-testid="live-add-overlay"]')) render();
   });
 
+  if (client) void refreshOverlayScan(client);
   render();
 
   return {
@@ -943,6 +1075,7 @@ export function mountLiveView(
       unsubIdentified?.();
       unsubAuthFailed?.();
       unsubAddOverlayBusyLive();
+      unsubOverlayScanLive();
       clearInterval(bannerPoll);
       document.removeEventListener('keydown', onKeydown);
       // Review fix (Important 2), mirrors mountDiagnosticsView's own

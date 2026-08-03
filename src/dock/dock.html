@@ -132,6 +132,35 @@
         color: #ffd699;
         font-size: 0.9rem;
       }
+      /* Gate fix wave (Ruling C) — the card is no longer a wall: this line
+         names what connecting actually buys, and the chip below is the
+         permanent way back once "Not now" has been clicked. */
+      .connect-optional-note {
+        color: #a0a0a0;
+        font-size: 0.85rem;
+        max-width: 34rem;
+      }
+      button.ctl.obs-chip {
+        min-height: 28px;
+        min-width: 0;
+        padding: 0.2rem 0.7rem;
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        border-radius: 999px;
+        background: #2a2a2a;
+        color: #c0c0c0;
+        border: 1px solid #444;
+        margin-bottom: 0.6rem;
+      }
+      /* Gate fix wave — secondary explanatory line under a control (the
+         add-overlay scan's "already exists in <scene>" note, and the
+         password-free-URL note beside it). */
+      .diag-note {
+        color: #a0a0a0;
+        font-size: 0.85rem;
+        margin: 0.35rem 0;
+      }
       .current-value {
         font-size: clamp(2.5rem, 14vw, 5rem);
         font-weight: 700;
@@ -343,7 +372,11 @@
       .setup-preview-column {
         flex-direction: column;
         align-items: center;
-        gap: 0.3em;
+        /* Gate fix wave (F7): no gap here either. The overlay renderer's
+           applyLayoutStyle() sets only flex-direction/align-items on the
+           stacked branch — no gap — so a 0.3em gap here made the preview
+           lie about the stream in exactly the way the row case above
+           documents. One owner for the spacing decision: the renderer. */
       }
       .setup-preview-relative {
         position: relative;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus, type BusMessage, type BusTransport } from '../../src/protocol/bus.js';
+import { transportRowState } from '../../src/dock/diagnostics.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 
 // Task 2.13 — a controllable fake `BusTransport` for exercising Bus's
@@ -371,5 +372,124 @@ describe('Bus — composite transports', () => {
     // zero live transports, and send() should reject (nothing delivered).
     expect(bus.activeTransports()).toEqual({ local: false, obsws: false });
     await expect(bus.send('hello', {})).rejects.toThrow(/every transport/);
+  });
+
+  // --- Gate fix wave (F4): resolve on the FIRST delivery ------------------
+  // Before this fix send() awaited Promise.allSettled over every transport,
+  // so an identified-but-unresponsive OBS held the promise for the ws
+  // request's full 8s timeout even though the local transport had delivered
+  // synchronously — and SessionController.init() awaits exactly this call
+  // before painting a restored session.
+
+  it('send() resolves as soon as ONE transport delivers, without waiting for a hung transport to settle', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    let releaseHung: (() => void) | undefined;
+    let hungSettled = false;
+    // Stands in for the real-world shape of this bug: the LOCAL transport
+    // delivers instantly while the OTHER one hangs. (In production it is the
+    // ws side that hangs on an identified-but-unresponsive OBS; the composite
+    // makes no distinction, and using the real ws transport as the DELIVERING
+    // half keeps this test honest about the composite's actual wiring.)
+    const hung = new FakeTransport({
+      sendImpl: () =>
+        new Promise<boolean>((resolve) => {
+          releaseHung = () => {
+            hungSettled = true;
+            resolve(true);
+          };
+        }),
+    });
+    const bus = new Bus(client, 'dock', { localTransport: hung });
+
+    await expect(bus.send('state', { n: 1 })).resolves.toBeUndefined();
+    expect(hungSettled).toBe(false); // still in flight — send() did NOT wait for it
+    expect(hung.sent).toHaveLength(1); // ...but it WAS attempted
+    expect(mock.broadcasts).toHaveLength(1); // and the delivery that resolved us was real
+
+    releaseHung?.();
+  });
+
+  it('a transport that rejects AFTER another has already delivered never surfaces as an unhandled rejection', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const late = new FakeTransport({
+        sendImpl: () => new Promise<boolean>((_resolve, reject) => setTimeout(() => reject(new Error('late boom')), 20)),
+      });
+      const bus = new Bus(client, 'dock', { localTransport: late });
+
+      await expect(bus.send('state', { n: 1 })).resolves.toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  // --- Gate fix wave (F3): a destroyed Bus is inert ------------------------
+
+  it('destroy() makes send() a rejected path and reports no active transports', async () => {
+    const fakeLocal = new FakeTransport();
+    const bus = new Bus(null, 'dock', { localTransport: fakeLocal });
+    bus.destroy();
+
+    await expect(bus.send('state', { n: 1 })).rejects.toThrow(/after destroy/);
+    expect(fakeLocal.sent).toHaveLength(0); // nothing reached the transport at all
+    expect(bus.activeTransports()).toEqual({ local: false, obsws: false });
+  });
+});
+
+// --- Gate fix wave (test gap 3): the transport row's warn/fail branches ----
+// `diag-row-transport` was only ever asserted in its two 'ok' states, so the
+// row could read green while every write failed. Driven here through the REAL
+// activeTransports() output rather than hand-written literals, so the two
+// halves can't drift apart.
+describe('transportRowState (diag-row-transport)', () => {
+  it("'OBS only' (local transport down) is a warn, not an ok", async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const deadLocal = new FakeTransport({ available: false });
+    const bus = new Bus(client, 'dock', { localTransport: deadLocal });
+
+    const active = bus.activeTransports();
+    expect(active).toEqual({ local: false, obsws: true });
+    const row = transportRowState(active);
+    expect(row.state).toBe('warn');
+    expect(row.text).toContain('OBS only');
+    expect(row.text).toContain('still require the OBS WebSocket connection');
+  });
+
+  it("neither transport available is a fail reading 'not connected'", () => {
+    const bus = new Bus(null, 'dock', { localTransport: null });
+
+    const active = bus.activeTransports();
+    expect(active).toEqual({ local: false, obsws: false });
+    const row = transportRowState(active);
+    expect(row.state).toBe('fail');
+    expect(row.text).toContain('not connected');
+  });
+
+  it("both transports live is ok, and 'direct only' is deliberately ok too (the zero-OBS headline)", async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const liveLocal = new FakeTransport({ available: true });
+    const bus = new Bus(client, 'dock', { localTransport: liveLocal });
+
+    expect(transportRowState(bus.activeTransports())).toMatchObject({ state: 'ok' });
+    expect(transportRowState(bus.activeTransports()).text).toContain('direct + OBS');
+
+    client.close();
+    await vi.waitFor(() => {
+      expect(bus.activeTransports().obsws).toBe(false);
+    });
+    const directOnly = transportRowState(bus.activeTransports());
+    expect(directOnly.state).toBe('ok');
+    expect(directOnly.text).toContain('direct only');
   });
 });

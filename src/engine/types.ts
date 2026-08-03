@@ -80,15 +80,20 @@ export interface StyleConfig {
   shadow: { color: string; blurPx: number; offsetX: number; offsetY: number } | null;
   background: { color: string; opacity: number } | null; paddingPx: number;
   // Task 2.11 (operator feedback, PRD §8.8) — which of the six overlay
-  // presentation shapes to render:
+  // presentation shapes to render. `{count}` is NEVER required by any layout
+  // (corrected 2026-08-02: the earlier "inline requires the token" rule made
+  // textBefore and textAfter render identically, defeating the gallery). The
+  // authoritative substitution rules live in src/shared/template-content.ts,
+  // which the overlay renderer and Setup's preview both call:
   //  - numberOnly:  the counter alone, template/label ignored entirely.
-  //  - textBefore/textAfter: today's inline template rendering, split on the
-  //    FIRST `{count}` token (unchanged) — still REQUIRE the token.
-  //  - textAbove/textBelow: the label stacked above/below the number, does
-  //    NOT require `{count}` (a plain label), substituted in if present.
+  //  - textBefore/textAfter: a token-LESS label is placed by the LAYOUT
+  //    (textBefore = label then number, textAfter = number then label). A
+  //    label that DOES contain `{count}` is split around the first token and
+  //    the token dictates placement, whichever of the two is selected.
+  //  - textAbove/textBelow: the label stacked above/below the number; a plain
+  //    label renders verbatim, `{count}` is substituted in if present.
   //  - textBehind: the label rendered as a large, low-opacity ghost centered
-  //    behind the number; same non-token-requiring substitution as
-  //    above/below.
+  //    behind the number; same substitution rule as above/below.
   layout: OverlayLayout;
 }
 export interface Preset {

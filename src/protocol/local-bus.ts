@@ -111,6 +111,13 @@ export class LocalBusTransport {
   private storageListenerBound = false;
   private seq = 0;
   private readonly listeners = new Set<(raw: unknown) => void>();
+  // Gate fix wave (F3) — the zombie-writer guard. destroy() used to close the
+  // BroadcastChannel and unbind the 'storage' listener but leave `storage`
+  // live, so send() on a destroyed instance still wrote `lc.bus.v1` and still
+  // reported delivered=true. No caller does that today (main.ts disposes the
+  // controller before bus.destroy()), but a destroyed transport must not be
+  // able to write to shared state at all.
+  private destroyed = false;
 
   constructor(opts: LocalBusTransportOptions = {}) {
     const channelName = opts.channelName ?? LOCAL_BUS_CHANNEL_NAME;
@@ -148,11 +155,13 @@ export class LocalBusTransport {
   }
 
   get available(): boolean {
+    if (this.destroyed) return false;
     return this.broadcastChannelAvailable || this.localStorageAvailable;
   }
 
-  /** Fans out to every live channel; returns whether at least one accepted the write. Never throws. */
+  /** Fans out to every live channel; returns whether at least one accepted the write. Never throws. A destroyed transport writes nothing and reports not-delivered (F3). */
   send(message: BusMessage): boolean {
+    if (this.destroyed) return false;
     let delivered = false;
     if (this.channel) {
       try {
@@ -188,6 +197,7 @@ export class LocalBusTransport {
   }
 
   destroy(): void {
+    this.destroyed = true;
     if (this.channel) {
       try {
         this.channel.removeEventListener('message', this.handleChannelMessage);

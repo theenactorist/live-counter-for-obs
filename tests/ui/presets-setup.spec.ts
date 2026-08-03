@@ -715,6 +715,11 @@ test.describe('dock Setup + Presets views', () => {
       });
       await page.getByTestId('setup-completion').selectOption('holdThenHide');
       await page.getByTestId('setup-completion-seconds').fill('7');
+      // Gate fix wave (L3): the round-trip previously left `layout` at its
+      // default, so an export/import that silently REWROTE it (as opposed to
+      // dropping it, which isStyleConfig would catch) passed unnoticed.
+      await page.getByTestId('setup-layout-textBehind').click();
+      await expect(page.getByTestId('setup-layout-textBehind')).toHaveAttribute('aria-pressed', 'true');
 
       await page.getByTestId('setup-save').click();
 
@@ -762,6 +767,9 @@ test.describe('dock Setup + Presets views', () => {
       await expect(page.getByTestId('setup-anim-duration')).toHaveValue('400');
       await expect(page.getByTestId('setup-completion')).toHaveValue('holdThenHide');
       await expect(page.getByTestId('setup-completion-seconds')).toHaveValue('7');
+      // ...including the non-default layout (L3).
+      await expect(page.getByTestId('setup-layout-textBehind')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('setup-layout-textBefore')).toHaveAttribute('aria-pressed', 'false');
 
       const stored = await page.evaluate(
         () =>
@@ -773,6 +781,133 @@ test.describe('dock Setup + Presets views', () => {
       expect(stored).toHaveLength(1);
       expect(stored[0]!.createdAt).toBe(originalCreatedAt);
       expect(stored[0]!.updatedAt).toBe(originalUpdatedAt);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Gate fix wave (L3, second half): pasting an envelope from BEFORE the
+  // layout gallery existed — the cross-machine scenario PRD §8.7 names as the
+  // supported way to move preset setups between computers, and the only path
+  // the v1→v2 migration actually exists for. No test imported one.
+  test('import: a hand-written schemaVersion-1 envelope (no style.layout) migrates in with the layout inferred (AC 24 via the import path)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+
+      const v1Envelope = JSON.stringify({
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: '2026-07-01T10:00:00.000Z',
+        presets: [
+          {
+            schemaVersion: 1,
+            id: '11111111-1111-4111-8111-111111111111',
+            title: 'Pre-gallery Preset',
+            description: 'Saved before layouts existed',
+            startValue: 0,
+            finishValue: 40,
+            mode: 'manual',
+            intervalSeconds: 1,
+            template: '{count} to go',
+            style: {
+              fontFamily: 'Inter',
+              fontWeight: 700,
+              numberSizePx: 96,
+              textSizePx: 24,
+              numberColor: '#ffffff',
+              textColor: '#cccccc',
+              alignH: 'center',
+              alignV: 'middle',
+              outline: null,
+              shadow: null,
+              background: null,
+              paddingPx: 8,
+              // deliberately NO `layout` — that is the whole point
+            },
+            animation: { type: 'pop', target: 'both', durationMs: 300 },
+            completion: { kind: 'hold' },
+            createdAt: '2026-07-01T09:00:00.000Z',
+            updatedAt: '2026-07-01T09:30:00.000Z',
+          },
+        ],
+      });
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(v1Envelope);
+      await page.getByTestId('import-apply').click();
+
+      await expect(page.getByTestId('import-confirm')).toContainText('1 presets imported');
+
+      const row = page.getByTestId('preset-row').filter({ hasText: 'Pre-gallery Preset' });
+      await expect(row).toBeVisible();
+      await row.getByTestId('preset-load').click();
+
+      // Its template carries `{count}`, so the migration infers textBefore.
+      await expect(page.getByTestId('setup-layout-textBefore')).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('setup-template')).toHaveValue('{count} to go');
+      await expect(page.getByTestId('setup-start')).toHaveValue('0');
+      await expect(page.getByTestId('setup-finish')).toHaveValue('40');
+      await expect(page.getByTestId('setup-anim-type')).toHaveValue('pop');
+
+      // ...and it was stored at the CURRENT schema version, not left at v1.
+      const stored = await page.evaluate(
+        () =>
+          JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as Array<{
+            schemaVersion: number;
+            style: { layout?: string };
+          }>,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.schemaVersion).toBe(2);
+      expect(stored[0]!.style.layout).toBe('textBefore');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Gate fix wave (test gap 2): the 300px narrow-viewport assertion only ever
+  // covered the Live tab, but Setup is where configuration happens — and it
+  // grew a six-thumbnail wrapping gallery and a per-layout preview in this
+  // delta with no narrow check at all. The real OBS dock IS this narrow.
+  test('300x800 viewport: the Setup form fits — no horizontal scroll, every layout thumbnail >=44px', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.setViewportSize({ width: 300, height: 800 });
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, {
+        start: 0,
+        finish: 25,
+        title: 'Narrow dock',
+        template: 'A deliberately long-ish label {count}',
+      });
+      await expect(page.getByTestId('setup-layout-gallery')).toBeVisible();
+
+      const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+      const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
+      expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+
+      for (const layout of ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind']) {
+        const btn = page.getByTestId(`setup-layout-${layout}`);
+        await expect(btn).toBeVisible();
+        const box = await btn.boundingBox();
+        expect(box, layout).not.toBeNull();
+        expect(box!.height, layout).toBeGreaterThanOrEqual(44);
+        expect(box!.width, layout).toBeGreaterThanOrEqual(44);
+      }
+
+      // Selecting a layout at this width must not push the preview (or
+      // anything else) off the side either.
+      await page.getByTestId('setup-layout-textBehind').click();
+      await expect(page.getByTestId('setup-preview')).toBeVisible();
+      const afterWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+      expect(afterWidth).toBeLessThanOrEqual(clientWidth);
     } finally {
       await mock.close();
     }
