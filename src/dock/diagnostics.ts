@@ -251,9 +251,21 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   });
   passwordInput.addEventListener('input', () => {
     settingsPassword = passwordInput.value;
+    // Review fix: the operator typing here IS them acting on a stale
+    // "Clipboard blocked" hint — it must disappear immediately, not linger
+    // until they happen to click Paste again (which may never happen once
+    // they've already typed the value in by hand).
+    settingsPasteError.hidden = true;
     updateOverlayUrl();
   });
   saveBtn.addEventListener('click', () => {
+    // Review fix: Save is the other moment a stale paste-error hint must
+    // clear — previously it only reset on a subsequent Paste click, so an
+    // invalid-port Save kept showing "Clipboard blocked" right next to the
+    // unrelated port error, and a successful save only LOOKED clean because
+    // boot()'s reconnect happens to remount this whole view as a side
+    // effect (masking the same bug on the happy path).
+    settingsPasteError.hidden = true;
     const port = parsePort(portInput.value);
     if (port === null) {
       settingsError.hidden = false;

@@ -1268,4 +1268,44 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Review fix: stale import-paste-error must clear, not linger --------
+  // (reviewer-confirmed: import succeeded with the hint still visible,
+  // implying failure even though the operator had already typed the JSON in
+  // manually after the paste attempt failed.)
+  test('import-paste-error disappears once the operator types the export manually and Apply succeeds', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      await page.getByTestId('import-paste').click();
+      await expect(page.getByTestId('import-paste-error')).toBeVisible();
+
+      const envelope = JSON.stringify({
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: new Date().toISOString(),
+        presets: [],
+      });
+      await page.getByTestId('import-textarea').fill(envelope);
+      // Typing (via fill, which dispatches 'input') is the moment the
+      // operator has acted on the hint — it should clear immediately, before
+      // Apply is even clicked.
+      await expect(page.getByTestId('import-paste-error')).toHaveCount(0);
+
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+      await expect(page.getByTestId('import-paste-error')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

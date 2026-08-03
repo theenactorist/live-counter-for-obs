@@ -495,4 +495,54 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Review fix: stale settings-paste-error must clear, not linger ------
+  // (reviewer-confirmed: both only reset when Paste is clicked again, so a
+  // stale "type it in manually" hint kept showing after the operator had
+  // already acted on it.)
+
+  test('settings-paste-error disappears as soon as the operator types into the password field (no save needed)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('settings-paste').click();
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible();
+
+      await page.getByTestId('settings-password').pressSequentially('typed');
+      await expect(page.getByTestId('settings-paste-error')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('settings-paste-error clears on Save even when the port is invalid (the port error shows instead)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('settings-paste').click();
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible();
+
+      await page.getByTestId('settings-port').fill('999999');
+      await page.getByTestId('settings-save').click();
+
+      await expect(page.getByTestId('diag-settings-error')).toBeVisible();
+      await expect(page.getByTestId('settings-paste-error')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
 });

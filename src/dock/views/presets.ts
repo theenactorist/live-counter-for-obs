@@ -340,6 +340,12 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
   async function onImportApply(): Promise<void> {
     ui.importError = null;
     ui.importFeedback = null;
+    // Review fix: Apply is a success/apply-handler moment too — a stale
+    // "Clipboard blocked" hint left over from an earlier failed paste must
+    // not keep showing once the operator has typed the JSON in by hand and
+    // successfully applied it (it would otherwise misleadingly imply the
+    // paste — or the import — had failed).
+    ui.importPasteError = null;
 
     let parsed: unknown;
     try {
@@ -513,7 +519,21 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       render();
       return;
     }
-    ui.importText = text;
+    // Same mechanism as diagnostics.ts's settings-paste (Minor, review fix):
+    // set the real DOM value and dispatch a bubbling 'input' event so the
+    // textarea's own listener below — not a second code path — updates
+    // ui.importText. render() still runs unconditionally afterward: it's
+    // what actually repaints away any import-paste-error banner still on
+    // screen from an earlier failed attempt (ui.importPasteError is already
+    // reset above by the time the dispatched event reaches the listener, so
+    // the listener's own guard won't fire a render on its own here).
+    const textarea = container.querySelector<HTMLTextAreaElement>('[data-testid="import-textarea"]');
+    if (textarea) {
+      textarea.value = text;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      ui.importText = text;
+    }
     render();
   }
 
@@ -526,6 +546,15 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     textarea.value = ui.importText;
     textarea.addEventListener('input', () => {
       ui.importText = textarea.value;
+      // Review fix: the operator typing here IS them acting on a stale
+      // "Clipboard blocked" hint — it must disappear immediately, not
+      // linger until Apply (or a subsequent Paste click) resets it. Guarded
+      // so a normal keystroke (no error showing) doesn't force an extra
+      // full rebuild.
+      if (ui.importPasteError !== null) {
+        ui.importPasteError = null;
+        render();
+      }
     });
     textareaRow.appendChild(textarea);
 
