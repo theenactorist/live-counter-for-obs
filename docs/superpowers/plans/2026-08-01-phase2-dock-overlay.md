@@ -232,9 +232,46 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(overlay): six-layout gallery with schema v2 migration`
 
+### Task 2.12: One-card Connect + "Add overlay to my scene" (operator feedback 2026-08-02 — setup friction)
+
+**Driver:** the operator's setup was 6 steps ("that's a lot of steps to copy password, paste, connect websocket server, going to diagnostics"). Two of them are pure waste: once connected, the dock can create the overlay Browser Source itself.
+
+**Files:** Modify `src/dock/views/live.ts` (Connect card), `src/dock/diagnostics.ts` (Add-overlay button + shared helpers), `src/protocol/obsws-client.ts` (nothing expected — verify), `tests/helpers/mock-obsws.ts` (extend), `src/dock/dock.html` (styles); tests in `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Mock server extension (test-only):** add request handlers `GetVideoSettings` (returns `baseWidth`/`baseHeight`, default 1920×1080, settable), `GetCurrentProgramScene`, `GetInputList`, `GetInputSettings`, `SetInputSettings`, `CreateInput` — each recording into the existing `requestLog` so tests assert exact payloads. `CreateInput` stores the input so a following `GetInputList` returns it.
+
+**Contract:**
+1. **Connect card** — rendered on the Live tab whenever the client is not `identified` and no session UI can be useful: `[data-testid=connect-card]` containing `connect-port` (pre-filled from settings, default 4455), `connect-password` (focused on mount, `type=password`), `connect-paste` (reuses the Task 2.10 paste mechanism), `connect-submit`, and a state line `connect-state` whose text names the actual fix: unreachable → "OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry"; auth-failed → "That password wasn't accepted — copy it from Show Connect Info"; connecting → "Connecting…". A `connect-retry` button appears in the unreachable state. On success the card unmounts and normal Live content renders. Saving through the card persists via `DockStorage.saveSettings` and re-boots the client exactly as the Diagnostics settings form does (reuse that path — do not duplicate boot logic).
+2. **Add overlay** — `[data-testid=add-overlay]` in Diagnostics (and mirrored on the Connect card's success state): enabled only when identified. On click: `GetVideoSettings` → `GetCurrentProgramScene` → detect an existing overlay by scanning `GetInputList` for `browser_source` inputs whose `GetInputSettings.url` contains `overlay.html`:
+   - none found → `CreateInput` in the current program scene, `inputName` `Live Counter Overlay` (suffix ` 2`, ` 3`… if taken), `inputKind` `browser_source`, settings `{ is_local_file:false, url:<generated overlay URL>, width:<baseWidth>, height:<baseHeight>, shutdown:false, restart_when_active:false }`, then `add-overlay-confirm` "Overlay added to <scene>".
+   - one found → the button reads "Fix overlay settings" and issues `SetInputSettings` on that input (same settings object, `overlayLayout` untouched) instead of creating a duplicate; confirm text "Overlay settings updated".
+   - failure of any request → `add-overlay-error` with the request's message; nothing partially created is left behind (no retry loop).
+3. Diagnostics' existing "Copy overlay URL" stays (manual path remains available).
+
+**Mandatory tests:** card visible when not identified and gone once identified; wrong password → auth-failed text; server absent → unreachable text + Retry present; successful connect through the card persists settings and reaches identified; add-overlay disabled while not identified; add-overlay creates exactly one `CreateInput` with the asserted settings payload (url contains `overlay.html`, width/height match the mock's `GetVideoSettings`, `shutdown:false`); second click with the overlay already present issues `SetInputSettings` and **no** second `CreateInput`; name collision produces ` 2`; a failing `CreateInput` surfaces `add-overlay-error`.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): one-card connect flow + add-overlay-to-scene button`
+
+### Task 2.13: Direct panel↔overlay transport, websocket optional (spike-confirmed 2026-08-02)
+
+**Driver + evidence:** a spike proved two `file://` pages share `localStorage`, receive cross-page `storage` events, and can talk over `BroadcastChannel`. So the bus does not need obs-websocket, which makes the password optional for counting. Verified in Chromium; **CEF 127 confirmation happens in the next real-OBS smoke test**, which is why the websocket transport stays as a fallback rather than being replaced.
+
+**Files:** Create `src/protocol/local-bus.ts`; modify `src/protocol/bus.ts` (composite), `src/overlay/main.ts` (mount without requiring ws), `src/dock/main.ts` (wire composite), `src/dock/diagnostics.ts` (transport row); tests in `tests/protocol/bus.test.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/integration.spec.ts`.
+
+**Contract:**
+1. `LocalBusTransport` — `BroadcastChannel('live-counter')` when constructible, plus a `localStorage` write/`storage`-event path as a second channel (write key `lc.bus.v1` with the envelope + a monotonic counter, so identical payloads still fire an event). Both are best-effort: any constructor/quota failure degrades to "transport unavailable" without throwing.
+2. `Bus` becomes a composite over `[LocalBusTransport, ObsWsTransport]`: `send` fans out to every available transport (failures on one never block another); `onMessage` **deduplicates by envelope nonce** across transports so a message arriving twice fires once; the own-source filter stays. Expose `activeTransports(): { local: boolean; obsws: boolean }`.
+3. **Overlay boots without credentials** — `overlay.html` with no `?port`/`?pw` mounts the renderer and joins the local transport; the ws client is attempted only when params are present (or defaults are reachable) and its absence is not an error state. The existing `overlay-status` heartbeat goes over whichever transports are live.
+4. **Diagnostics transport row** — `diag-row-transport`: "Panel ↔ overlay: direct + OBS" / "direct only" / "OBS only" / "not connected", with `data-state` ok/warn/fail. The overlay row's meaning is unchanged (it still reflects heartbeats seen).
+5. Session persistence, LIVE status, and the add-overlay button continue to require the websocket — document that in the row's help text.
+
+**Mandatory tests:** unit — composite fans out and dedupes by nonce (two transports delivering the same envelope → one `onMessage`); a throwing transport doesn't prevent the other from sending; `activeTransports` reflects availability. Playwright — **dock + overlay with NO mock server at all: start a session, +1 ×3, overlay shows 3** (the headline: counting with zero OBS setup); overlay loaded with no query params renders and heartbeats; with both transports live a value change produces exactly one render (no double-apply); killing the ws mock mid-session leaves counting working over the direct transport and flips `diag-row-transport` to "direct only".
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(protocol): direct BroadcastChannel transport, obs-websocket optional`
+
 ---
 
-## Phase gate checklist (after Task 2.11)
+## Phase gate checklist (after Task 2.13)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)
