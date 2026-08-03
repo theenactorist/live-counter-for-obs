@@ -202,7 +202,15 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
             code = 600;
             comment = `No source was found by the name of \`${inputName}\`.`;
           } else {
-            input.inputSettings = { ...(requestData?.inputSettings as Record<string, unknown>) };
+            // Real obs-websocket's `overlay` field defaults to `true` (MERGE
+            // with the input's existing settings) when the request omits it
+            // — only an explicit `overlay:false` replaces wholesale. Mocking
+            // the replace-always shortcut would hide a real regression if
+            // the dock ever started sending `overlay:false` (or some future
+            // caller relied on merge semantics) — see review fold-in, Minor.
+            const newSettings = (requestData?.inputSettings as Record<string, unknown>) ?? {};
+            const overlayMerge = requestData?.overlay !== false;
+            input.inputSettings = overlayMerge ? { ...input.inputSettings, ...newSettings } : { ...newSettings };
           }
           break;
         }

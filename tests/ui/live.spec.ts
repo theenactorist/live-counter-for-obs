@@ -871,4 +871,90 @@ test.describe('dock Live view', () => {
       await mock.close();
     }
   });
+
+  // --- Review fix (Important 2): mountLiveView's destroy() neither cleared
+  // its container nor guarded pending promises, and render() writes into
+  // the persistent shell.panes.live node — so a settings-save reconnect
+  // while an add-overlay call was in flight let the OLD (torn-down) view's
+  // stale .then() repaint stale state over the freshly-mounted replacement.
+
+  test('add-overlay from Live: a settings-save reconnect mid-flight does not let the torn-down view repaint over the fresh one', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('live-empty')).toBeVisible({ timeout: 5000 });
+
+      // Widens the in-flight window (comfortably past the few UI actions
+      // below, which take some tens of ms) so the reconnect genuinely lands
+      // while THIS mount's add-overlay call is still unresolved.
+      mock.delayResponsesFor('GetVideoSettings', 500);
+      await page.getByTestId('live-add-overlay').click();
+
+      // Also holds back the RECONNECTING client's own Identified reply —
+      // without this, the new client typically identifies against a healthy
+      // local mock within single-digit milliseconds, correcting things so
+      // fast that even the tightest black-box polling could never observe
+      // the corruption. This makes the window wide and deterministic
+      // instead of a sub-millisecond race — but it also means BOTH the
+      // stale closure (whose own client is now permanently closed, so ITS
+      // isConnected() reads false) and the fresh one (still waiting to
+      // identify, so ITS isConnected() ALSO reads false) render the SAME
+      // Connect card shape while this is pending, which would make a
+      // content check keyed on live-empty/live-add-overlay's presence
+      // meaningless here — hence keying the check on the PASSWORD below
+      // instead, which genuinely differs between the two closures.
+      mock.delayIdentify(2000);
+
+      // Triggers main.ts's boot() reconnect (Task 2.5 dispose discipline):
+      // disposes the old controller, closes the old client (which itself
+      // rejects the in-flight GetVideoSettings request above — SYNCHRONOUSLY,
+      // regardless of the mock's own delay above, since ObsWsClient.close()
+      // rejects everything pending locally rather than waiting on the wire),
+      // and mounts a FRESH LiveViewHandle into the SAME shell.panes.live
+      // container the old, still-resolving closure also targets. Saves a
+      // NEW, distinctive password — the STALE closure's own `initialSettings`
+      // (captured at ITS mount time) still carries the ORIGINAL empty
+      // password, so if its rejected add-overlay call's `.then()` repaints
+      // this container, the Connect card it draws would show that stale,
+      // empty value instead of the one just saved.
+      const freshPassword = 'fresh-password-marker';
+      await page.getByTestId('tab-diagnostics').click();
+      await page.getByTestId('settings-port').fill(String(mock.port));
+      await page.getByTestId('settings-password').fill(freshPassword);
+      await page.getByTestId('settings-save').click();
+
+      await page.getByTestId('tab-live').click();
+
+      // Sampled repeatedly across the (now wide, ~2s) window: the Connect
+      // card showing at any moment must be the FRESH one — its password
+      // field reads `freshPassword`, never the stale closure's original
+      // empty value. Deliberately a ONE-SHOT `.inputValue()` read compared
+      // with a plain `expect()`, NOT `expect(locator).toHaveValue(...)` —
+      // that assertion auto-retries for its own timeout, which would just
+      // wait out the ~1s self-correction (the fresh mount's own periodic
+      // poll repaints regardless, papering back over the stale value) and
+      // report success without ever actually observing the transient
+      // corruption in between.
+      for (let i = 0; i < 10; i++) {
+        const cardCount = await page.getByTestId('connect-card').count();
+        if (cardCount > 0) {
+          const value = await page.getByTestId('connect-password').inputValue();
+          expect(value, `sample ${i} at ~${i * 150}ms`).toBe(freshPassword);
+        }
+        await page.waitForTimeout(150);
+      }
+
+      // Once the (deliberately delayed) reconnect finally identifies, the
+      // fresh view settles into its genuinely-live, fully usable state —
+      // exactly one of each node, button enabled — proving this was never
+      // a stale husk to begin with.
+      await expect(page.getByTestId('live-empty')).toHaveCount(1, { timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay')).toHaveCount(1);
+      await expect(page.getByTestId('live-add-overlay')).toBeEnabled({ timeout: 5000 });
+    } finally {
+      await mock.close();
+    }
+  });
 });

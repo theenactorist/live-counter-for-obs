@@ -39,7 +39,8 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
-import { addOverlayToScene, pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../diagnostics.js';
+import { addOverlayToScene, isAddOverlayBusy, onAddOverlayBusyChange, pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../diagnostics.js';
+import { CONNECTION_GRACE_MS } from '../connection-grace.js';
 
 export interface LiveViewHandle {
   destroy(): void;
@@ -60,11 +61,12 @@ const OVERLAY_SILENCE_MS = 10_000;
 const BANNER_POLL_MS = 1000;
 
 // Task 2.12 (one-card connect flow) — how long the Connect card shows
-// "Connecting…" before giving up and calling it unreachable. Matches
-// main.ts's own WS_BANNER_GRACE_MS so the card's own verdict and the
-// shell-wide banner-ws never visibly disagree about when a connection
-// attempt has gone on "too long".
-const CONNECT_GRACE_MS = 3000;
+// "Connecting…" before giving up and calling it unreachable. Shared with
+// main.ts's banner-ws via connection-grace.ts (review fold-in, Minor: was
+// two hand-synced 3000s) so the card's own verdict and the shell-wide
+// banner-ws never visibly disagree about when a connection attempt has gone
+// on "too long".
+const CONNECT_GRACE_MS = CONNECTION_GRACE_MS;
 const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry';
 const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from Show Connect Info";
 const CONNECT_CONNECTING_TEXT = 'Connecting…';
@@ -105,7 +107,6 @@ interface ConnectUiState {
 // shared implementation; only the DOM wiring differs per view, same as each
 // view already keeping its own local `el()`/`button()` helpers.
 interface LiveAddOverlayUiState {
-  inFlight: boolean;
   hasOverlay: boolean;
   confirmText: string | null;
   errorText: string | null;
@@ -180,6 +181,21 @@ export function mountLiveView(
     recoveredDismissed: false,
   };
 
+  // Review fix (Important 2): a settings-save reconnect (main.ts's boot())
+  // tears this mount down and immediately mounts a fresh LiveViewHandle into
+  // the SAME `container` — but an add-overlay call (or a clipboard paste)
+  // started from THIS mount can still be awaiting a promise when that
+  // happens. Without this flag, the stale continuation's own render() call
+  // — which reads/writes `container` directly, not some private subtree —
+  // would repaint this torn-down mount's state over the freshly-mounted
+  // replacement. Set in destroy(); checked at the top of render() itself
+  // (rather than sprinkled through every callback) so EVERY async
+  // continuation that might otherwise touch the DOM post-teardown is
+  // covered by one guard, mirroring the Task 2.6 disposed-guard pattern
+  // (setup.ts's own `destroyed`) adapted to this file's single shared
+  // render() entry point.
+  let destroyed = false;
+
   // Task 2.12 — Connect card + its Live-empty add-overlay mirror. Whether
   // either feature is even reachable is fixed for this mount's whole
   // lifetime (main.ts always passes all three together in production; a
@@ -207,7 +223,6 @@ export function mountLiveView(
   let wasConnected = isConnected();
 
   const addOverlayUi: LiveAddOverlayUiState = {
-    inFlight: false,
     hasOverlay: false,
     confirmText: null,
     errorText: null,
@@ -253,6 +268,12 @@ export function mountLiveView(
   }
 
   function render(): void {
+    // Review fix (Important 2) — see the `destroyed` declaration above: a
+    // stale async continuation (add-overlay's `.then()`, a clipboard-paste
+    // hook) firing after this mount's own destroy() must never rebuild
+    // `container` again — that container is now owned by a freshly-mounted
+    // replacement.
+    if (destroyed) return;
     refreshConnectTiming();
     const focusSnapshot = captureFocus();
 
@@ -302,15 +323,31 @@ export function mountLiveView(
     // land here once identified, click Add overlay (click 2).
     const settingsAtMount = opts.initialSettings;
     if (client !== undefined && settingsAtMount !== undefined) {
+      // Review fix (Critical 1): `disabled` is derived from the SHARED
+      // `isAddOverlayBusy()` lock (diagnostics.ts module scope), not a flag
+      // local to this view — a click on Diagnostics' own `add-overlay`
+      // disables THIS button too (the busy-change subscription below keeps
+      // it current for as long as this button stays in the DOM), closing
+      // the race that let both entry points fire a CreateInput at once.
       const btn = button('live-add-overlay', addOverlayUi.hasOverlay ? 'Fix overlay settings' : 'Add overlay to my scene');
-      btn.disabled = addOverlayUi.inFlight || client.state !== 'identified';
+      btn.disabled = isAddOverlayBusy() || client.state !== 'identified';
       btn.addEventListener('click', () => {
-        addOverlayUi.inFlight = true;
         addOverlayUi.confirmText = null;
         addOverlayUi.errorText = null;
+        // addOverlayToScene() flips the shared busy lock synchronously
+        // before returning (see diagnostics.ts) — render() right after
+        // already paints this button disabled, with no separate flag needed.
+        const call = addOverlayToScene(client, settingsAtMount.wsPort, settingsAtMount.wsPassword);
         render();
-        void addOverlayToScene(client, settingsAtMount.wsPort, settingsAtMount.wsPassword).then((result) => {
-          addOverlayUi.inFlight = false;
+        void call.then((result) => {
+          // Review fix (Important 2): this continuation can resolve AFTER
+          // a settings-save reconnect has already destroy()'d this exact
+          // mount (main.ts's boot() tears down + remounts every view on
+          // Save) — render() itself no-ops once destroyed, but skip the
+          // state mutation too so a THIRD mount woken later by some future
+          // change never inherits a confirm/error message that was never
+          // actually about it.
+          if (destroyed) return;
           if (result.ok) {
             addOverlayUi.hasOverlay = true;
             addOverlayUi.confirmText = result.action === 'created' ? `Overlay added to ${result.sceneName}` : 'Overlay settings updated';
@@ -884,17 +921,39 @@ export function mountLiveView(
   // BANNER_POLL_MS tick to notice.
   const unsubIdentified = client?.on('identified', () => render());
   const unsubAuthFailed = client?.on('auth-failed', () => render());
+  // Review fix (Critical 1) — the other half of cross-view disabling: when
+  // Diagnostics' own add-overlay button is the one clicked, THIS surgical
+  // update (not a full render(), and thus no focus-preservation churn for a
+  // plain button) keeps live-add-overlay's `disabled` attribute current
+  // too, whenever it happens to be on screen. A no-op the rest of the time
+  // (querySelector finds nothing while live-empty isn't showing).
+  const unsubAddOverlayBusyLive = onAddOverlayBusyChange(() => {
+    if (destroyed) return;
+    const btn = container.querySelector<HTMLButtonElement>('[data-testid="live-add-overlay"]');
+    if (btn && client) btn.disabled = isAddOverlayBusy() || client.state !== 'identified';
+  });
 
   render();
 
   return {
     destroy(): void {
+      destroyed = true;
       unsubController();
       unsubBus();
       unsubIdentified?.();
       unsubAuthFailed?.();
+      unsubAddOverlayBusyLive();
       clearInterval(bannerPoll);
       document.removeEventListener('keydown', onKeydown);
+      // Review fix (Important 2), mirrors mountDiagnosticsView's own
+      // documented rationale: a settings-save reconnect mounts a fresh
+      // LiveViewHandle into this SAME container right after this call —
+      // the `destroyed` flag above is what actually stops a stale
+      // continuation from repainting over it (render() itself no-ops once
+      // set), but clearing here too means nothing of this mount's DOM is
+      // even left to look at during the brief gap before the new mount's
+      // own first render().
+      container.innerHTML = '';
     },
   };
 }

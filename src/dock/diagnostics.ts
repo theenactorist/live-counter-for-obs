@@ -111,6 +111,44 @@ function isNameTakenError(err: unknown): boolean {
   return err instanceof Error && err.message.includes(NAME_TAKEN_CODE);
 }
 
+// Review fix (Critical 1): Diagnostics' own `add-overlay` button and the
+// Live tab's `live-add-overlay` mirror both ultimately call
+// `addOverlayToScene` against the SAME OBS scene, but each view previously
+// tracked its own "in flight" flag independently. Reachable sequence: click
+// Add overlay on Diagnostics, switch to Live before the scan resolves, click
+// the mirror too — both saw no existing overlay and both issued
+// `CreateInput`, the second colliding into a genuine duplicate ("Live
+// Counter Overlay 2") in the live scene. `addOverlayInFlight` is a
+// module-level single-flight lock: a call made while one is already running
+// returns THAT SAME promise instead of starting a second pass, so every
+// caller — regardless of which button triggered it — observes the identical
+// outcome and only one request sequence ever reaches OBS.
+let addOverlayInFlight: Promise<AddOverlayResult> | null = null;
+const addOverlayBusyListeners = new Set<(busy: boolean) => void>();
+
+function setAddOverlayBusy(busy: boolean): void {
+  for (const fn of addOverlayBusyListeners) fn(busy);
+}
+
+/** Whether a scan/create/update triggered from EITHER entry point is currently in flight — lets a view disable its OWN button even when the other view is the one that actually clicked (see onAddOverlayBusyChange). */
+export function isAddOverlayBusy(): boolean {
+  return addOverlayInFlight !== null;
+}
+
+/**
+ * Fires synchronously on every busy-state transition (true when a call
+ * starts, false when it settles) — the other half of the Critical-1 fix:
+ * without this, only the view that was actually clicked would disable its
+ * button, leaving the OTHER entry point clickable for the exact window the
+ * shared lock exists to close.
+ */
+export function onAddOverlayBusyChange(fn: (busy: boolean) => void): () => void {
+  addOverlayBusyListeners.add(fn);
+  return () => {
+    addOverlayBusyListeners.delete(fn);
+  };
+}
+
 /**
  * Scans every browser_source input in the current program scene for one
  * already pointed at overlay.html (found by settings, NOT by name — so an
@@ -119,9 +157,27 @@ function isNameTakenError(err: unknown): boolean {
  * or creates a fresh one, retrying with a numeric suffix on a genuine
  * CreateInput name collision (exercised for real against the mock server,
  * not merely assumed). Never leaves anything partially created: any
- * request's failure short-circuits immediately with `ok: false`.
+ * request's failure short-circuits immediately with `ok: false`. Coalesced
+ * (see addOverlayInFlight above) — safe to call from both entry points
+ * without risking a duplicate Browser Source.
  */
-export async function addOverlayToScene(client: ObsWsClient, port: number, password: string): Promise<AddOverlayResult> {
+export function addOverlayToScene(client: ObsWsClient, port: number, password: string): Promise<AddOverlayResult> {
+  if (addOverlayInFlight !== null) return addOverlayInFlight;
+  const run = runAddOverlayToScene(client, port, password).finally(() => {
+    addOverlayInFlight = null;
+    setAddOverlayBusy(false);
+  });
+  // Assigned BEFORE notifying busy=true: a subscriber's callback (see
+  // onAddOverlayBusyChange) runs SYNCHRONOUSLY inside setAddOverlayBusy() and
+  // immediately calls back into isAddOverlayBusy(), which reads this exact
+  // variable — notifying first would have every listener observe the OLD
+  // (still-null) value and conclude nothing is busy at all.
+  addOverlayInFlight = run;
+  setAddOverlayBusy(true);
+  return run;
+}
+
+async function runAddOverlayToScene(client: ObsWsClient, port: number, password: string): Promise<AddOverlayResult> {
   try {
     const videoSettings = await client.request('GetVideoSettings');
     const baseWidth = videoSettings.baseWidth as number;
@@ -145,11 +201,19 @@ export async function addOverlayToScene(client: ObsWsClient, port: number, passw
     let existingName: string | null = null;
     for (const input of inputs) {
       if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
-      const settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
-      const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
-      if (existingUrl.includes(OVERLAY_URL_MARKER)) {
-        existingName = input.inputName;
-        break;
+      try {
+        const settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
+        const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
+        if (existingUrl.includes(OVERLAY_URL_MARKER)) {
+          existingName = input.inputName;
+          break;
+        }
+      } catch {
+        // Review fix (Minor): one unrelated browser source failing to
+        // report its settings (mid-removal, a transient hiccup) must not
+        // abort the whole add-overlay flow with a confusing
+        // "GetInputSettings failed" error — skip it and keep scanning.
+        continue;
       }
     }
 
@@ -445,12 +509,14 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   // The operator-feedback-driven shortcut ("that's a lot of steps ... going
   // to diagnostics etc"): once connected, skip manually adding + configuring
   // a Browser Source entirely. Enabled only while identified — every request
-  // it issues needs a live, authenticated socket. `addOverlayInFlight` guards
-  // against a double-click racing two concurrent scans/creates; the periodic
-  // poll below (`updateAddOverlayEnabled`) re-derives `disabled` from BOTH
-  // that flag and connectivity on every tick, so neither a slow request nor
-  // a connectivity drop mid-flight can leave the button wrongly enabled.
-  let addOverlayInFlight = false;
+  // it issues needs a live, authenticated socket. Busy state (review fix,
+  // Critical 1) is now a SHARED lock (`isAddOverlayBusy`/`onAddOverlayBusyChange`,
+  // diagnostics.ts module scope) rather than a flag local to this view, so a
+  // click on the Live tab's mirror disables THIS button too, and vice versa
+  // — the periodic poll below (`updateAddOverlayEnabled`) plus the busy-change
+  // subscription re-derive `disabled` from that shared state and connectivity
+  // on every tick/transition, so neither a slow request nor a connectivity
+  // drop mid-flight can leave the button wrongly enabled.
   const addOverlayBtn = button('add-overlay', 'Add overlay to my scene');
   root.appendChild(addOverlayBtn);
   const addOverlayConfirm = el('div', { 'data-testid': 'add-overlay-confirm', class: 'copy-confirm' });
@@ -461,16 +527,21 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   root.appendChild(addOverlayError);
 
   function updateAddOverlayEnabled(): void {
-    addOverlayBtn.disabled = addOverlayInFlight || opts.client.state !== 'identified';
+    addOverlayBtn.disabled = isAddOverlayBusy() || opts.client.state !== 'identified';
   }
+
+  const unsubAddOverlayBusy = onAddOverlayBusyChange(() => updateAddOverlayEnabled());
 
   addOverlayBtn.addEventListener('click', () => {
     addOverlayConfirm.hidden = true;
     addOverlayError.hidden = true;
-    addOverlayInFlight = true;
-    updateAddOverlayEnabled();
+    // addOverlayToScene() flips the shared busy lock SYNCHRONOUSLY before it
+    // returns (see setAddOverlayBusy in the module-level implementation
+    // above), which fires the onAddOverlayBusyChange subscription above —
+    // so this button (and the Live tab's mirror, if mounted) is already
+    // showing disabled by the time this line finishes, with no separate
+    // call needed here.
     void addOverlayToScene(opts.client, opts.initialSettings.wsPort, opts.initialSettings.wsPassword).then((result) => {
-      addOverlayInFlight = false;
       updateAddOverlayEnabled();
       if (result.ok) {
         // A source is now known to exist either way (just created, or found
@@ -633,6 +704,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     refresh,
     destroy(): void {
       unsubBus();
+      unsubAddOverlayBusy();
       clearInterval(pollHandle);
       if (copyConfirmTimer !== null) clearTimeout(copyConfirmTimer);
       // A settings-save reconnect tears this instance down and immediately

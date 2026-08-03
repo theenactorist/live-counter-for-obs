@@ -685,4 +685,59 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Review fix (Critical 1): the two entry points (this button and the
+  // Live tab's `live-add-overlay` mirror) previously tracked "in flight"
+  // independently — clicking Diagnostics' button, switching tabs, and
+  // clicking the mirror before the first scan resolved raced two
+  // CreateInputs, the second colliding into a genuine duplicate ("Live
+  // Counter Overlay 2") in the live scene. Fix: a shared, coalesced lock
+  // (diagnostics.ts module scope) that both buttons read and both disable
+  // from.
+
+  test('add-overlay: clicking both entry points during the same in-flight call coalesces into exactly one CreateInput, and cross-disables the other button', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // Widens the in-flight window (real localhost round trips are far too
+      // fast otherwise) so the cross-tab click below genuinely lands while
+      // Diagnostics' own request sequence is still unresolved, rather than
+      // this test merely getting lucky about ordering.
+      mock.delayResponsesFor('GetVideoSettings', 1000);
+
+      await page.getByTestId('add-overlay').click();
+      await expect(page.getByTestId('add-overlay')).toBeDisabled();
+
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+      const mirrorBtn = page.getByTestId('live-add-overlay');
+      // The shared lock disables the OTHER entry point too — this is the
+      // actual fix; the reported bug depended on this button staying
+      // clickable while Diagnostics' own call was still in flight.
+      await expect(mirrorBtn).toBeDisabled();
+
+      // Clicking it anyway waits for it to become actionable again (i.e.
+      // once the shared call resolves) rather than firing a second,
+      // concurrent request — proving the fix holds even when an operator
+      // clicks exactly the reported sequence, not just that the UI LOOKS
+      // disabled for an instant.
+      await mirrorBtn.click({ timeout: 5000 });
+      await expect(
+        page.getByTestId('live-add-overlay-confirm').or(page.getByTestId('live-add-overlay-error')),
+      ).toBeVisible({ timeout: 5000 });
+
+      // Exactly one CreateInput ever, from Diagnostics' original click; the
+      // Live click that followed (once re-enabled) found the just-created
+      // overlay and updated it instead.
+      expect(mock.requestLog.filter((t) => t === 'CreateInput')).toHaveLength(1);
+      expect(mock.requestLog.filter((t) => t === 'SetInputSettings').length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await mock.close();
+    }
+  });
 });

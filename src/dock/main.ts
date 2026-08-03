@@ -22,13 +22,16 @@ import { mountDiagnosticsView, type DiagnosticsViewHandle } from './diagnostics.
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
+import { CONNECTION_GRACE_MS } from './connection-grace.js';
 
 const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
 // monitor, not a one-shot first-run check — a connection that drops well
 // after boot (server restarted, network hiccup) must surface it too, not
-// just a first-run empty-password grace period.
-const WS_BANNER_GRACE_MS = 3000;
+// just a first-run empty-password grace period. Threshold now shared with
+// live.ts's Connect card via connection-grace.ts (review fold-in, Minor: was
+// two hand-synced 3000s).
+const WS_BANNER_GRACE_MS = CONNECTION_GRACE_MS;
 const WS_BANNER_POLL_MS = 500;
 const BANNER_WS_TEXT = 'Not connected to OBS — Tools → WebSocket Server Settings, then enter the password in Settings';
 
