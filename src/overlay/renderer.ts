@@ -58,7 +58,7 @@ import type { OverlaySnapshot } from '../protocol/persistence.js';
 import { formatValue } from '../engine/format.js';
 import { interruptAndAnimate } from './animations.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
-import { splitTemplate, substituteLabel } from '../shared/template-content.js';
+import { substituteLabel, inlineContent } from '../shared/template-content.js';
 
 export interface StatePayload {
   session: Session | null;
@@ -160,16 +160,31 @@ export function mountOverlayRenderer(
   // those same two nodes for their own, very different purpose (inline/stacked
   // label text). Always present in the DOM from mount; `display` toggles with
   // the layout, never removed/rebuilt.
+  //
+  // Fix wave (review Important 1): the centering transform lives on a
+  // WRAPPER (`behindWrapEl`), never on `behindEl` itself. `behindEl` is what
+  // `triggerAnimation` below animates for `target: 'text'` when this layout
+  // is active, and pop/slideUp/flip all animate `transform` via WAAPI —
+  // which fully REPLACES an element's own inline `transform` for the
+  // animation's duration, not compose with it. Animating `behindEl` directly
+  // (with its own `translate(-50%,-50%)` centering) would have visibly
+  // yanked the ghost off-center for the animation's whole run. Splitting the
+  // "where" (wrapper, static) from the "what animates" (inner span, free to
+  // animate) keeps the ghost centered no matter what's playing on it.
+  const behindWrapEl = document.createElement('div');
+  behindWrapEl.style.position = 'absolute';
+  behindWrapEl.style.top = '50%';
+  behindWrapEl.style.left = '50%';
+  behindWrapEl.style.transform = 'translate(-50%, -50%)';
+  behindWrapEl.style.pointerEvents = 'none';
+  behindWrapEl.style.zIndex = '0';
+  behindWrapEl.style.display = 'none';
   const behindEl = document.createElement('span');
   behindEl.dataset.testid = 'overlay-text-behind';
-  behindEl.style.position = 'absolute';
-  behindEl.style.top = '50%';
-  behindEl.style.left = '50%';
-  behindEl.style.transform = 'translate(-50%, -50%)';
-  behindEl.style.pointerEvents = 'none';
   behindEl.style.whiteSpace = 'nowrap';
-  behindEl.style.display = 'none';
-  contentRoot.append(beforeEl, numberEl, afterEl, behindEl);
+  behindEl.style.display = 'inline-block';
+  behindWrapEl.appendChild(behindEl);
+  contentRoot.append(beforeEl, numberEl, afterEl, behindWrapEl);
 
   // Minors: small, low-opacity, fixed-corner, subtle gray — must never
   // compete visually with the counter itself, and must sit outside
@@ -206,6 +221,12 @@ export function mountOverlayRenderer(
   let beforeAnim: Animation | null = null;
   let afterAnim: Animation | null = null;
   let bothAnim: Animation | null = null;
+  // Fix wave — target:'text' animates `behindEl` instead of before/afterEl
+  // when textBehind is the active layout (those two are empty for
+  // textBehind; the ghost IS the "text" for this layout). Tracked via
+  // `currentLayout`, set at the end of every applyLayoutStyle() call.
+  let behindAnim: Animation | null = null;
+  let currentLayout: OverlayLayout = DEFAULT_STYLE.layout;
 
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -251,10 +272,12 @@ export function mountOverlayRenderer(
     beforeAnim?.cancel();
     afterAnim?.cancel();
     bothAnim?.cancel();
+    behindAnim?.cancel();
     numberAnim = null;
     beforeAnim = null;
     afterAnim = null;
     bothAnim = null;
+    behindAnim = null;
   }
 
   function hideContent(): void {
@@ -319,7 +342,7 @@ export function mountOverlayRenderer(
 
     contentRoot.style.flexDirection = stacked ? 'column' : 'row';
     contentRoot.style.alignItems = stacked ? 'center' : 'baseline';
-    // A containing block for behindEl's `position: absolute` centering
+    // A containing block for behindWrapEl's `position: absolute` centering
     // (top/left: 50% below) — only needed while textBehind is active; left at
     // '' otherwise so it never leaks into an unrelated ancestor's own
     // positioning context.
@@ -334,11 +357,20 @@ export function mountOverlayRenderer(
     // textBehind: the number must paint ABOVE the ghost label, and the ghost
     // must not affect layout flow (brief) — numberEl needs `position:
     // relative` for its own z-index to take effect at all (z-index is a
-    // no-op on statically-positioned elements), stacked above behindEl's
-    // `position: absolute` + z-index 0 set once at mount.
+    // no-op on statically-positioned elements), stacked above behindWrapEl's
+    // `position: absolute` + z-index 0 (set once at mount).
     numberEl.style.position = behind ? 'relative' : '';
     numberEl.style.zIndex = behind ? '1' : '';
-    behindEl.style.display = behind ? 'block' : 'none';
+    behindWrapEl.style.display = behind ? 'block' : 'none';
+
+    // Fix wave — triggerAnimation() needs to know the ACTIVE layout to
+    // decide whether `target: 'text'` should animate beforeEl/afterEl (every
+    // other layout) or behindEl (textBehind, whose label lives there
+    // instead). Updated here rather than passed as a parameter since every
+    // caller of applyLayoutStyle already has the full StyleConfig in scope
+    // one level up (applyStyle) and this keeps triggerAnimation's own
+    // signature unchanged.
+    currentLayout = layout;
   }
 
   function applyStyle(style: StyleConfig | null): void {
@@ -373,12 +405,14 @@ export function mountOverlayRenderer(
 
     // textBehind ghost (controller clarification): ~2.4x the number's
     // font-size, ~0.18 opacity, same color as the number so it reads as a
-    // "shadow" of it. Set unconditionally (cheap) — `display` in
-    // applyLayoutStyle above is what actually gates visibility per layout.
+    // "shadow" of it. Set unconditionally (cheap) — `display` (on the
+    // WRAPPER, behindWrapEl) in applyLayoutStyle above is what actually
+    // gates visibility per layout. Positioning/z-index live on the wrapper
+    // (set once at mount) — behindEl itself carries only cosmetic/text
+    // properties so it stays free for triggerAnimation to animate directly.
     behindEl.style.fontSize = `${s.numberSizePx * 2.4}px`;
     behindEl.style.color = s.numberColor;
     behindEl.style.opacity = '0.18';
-    behindEl.style.zIndex = '0';
 
     applyLayoutStyle(s.layout);
   }
@@ -387,13 +421,21 @@ export function mountOverlayRenderer(
   // the formatted value regardless of layout; the label text's source and
   // destination node vary:
   //  - numberOnly ignores the label/template entirely (brief).
-  //  - textBefore/textAfter keep today's split-on-`{count}` rendering
-  //    (splitTemplate), which REQUIRES the token (setup.ts's validation).
+  //  - textBefore/textAfter (and the `default` fallback — see below):
+  //    inlineContent() — a token in the label wins (split around it, exactly
+  //    as before, same result for either layout); a token-LESS label is
+  //    placed by the layout itself (textBefore: label then number; textAfter:
+  //    number then label). Contract correction, post-review: `{count}` is no
+  //    longer REQUIRED by any layout.
   //  - textAbove/textBelow/textBehind render the label verbatim via
-  //    substituteLabel (does NOT require the token) — the only difference
-  //    between them is WHICH node gets it (beforeEl for the stacked
-  //    layouts, whose visual order applyLayoutStyle above already handles;
-  //    behindEl for the ghost).
+  //    substituteLabel (substitutes `{count}` if present, never requires it)
+  //    — the only difference between them is WHICH node gets it (beforeEl
+  //    for the stacked layouts, whose visual order applyLayoutStyle above
+  //    already handles; behindEl for the ghost).
+  //  - `default` (cheap minor, review): an unrecognized layout value — e.g. a
+  //    stale overlay.html paired with a newer dock.html that has since added
+  //    a 7th layout — falls back to the same inlineContent('textBefore', …)
+  //    rendering as textBefore, rather than rendering nothing.
   function applyLayoutContent(layout: OverlayLayout, template: string | null, valueText: string): void {
     numberEl.textContent = valueText;
     switch (layout) {
@@ -402,17 +444,6 @@ export function mountOverlayRenderer(
         afterEl.textContent = '';
         behindEl.textContent = '';
         break;
-      case 'textBefore':
-      case 'textAfter': {
-        const { before, after } = splitTemplate(template);
-        // Operator content: textContent only, never innerHTML — a hostile
-        // template (e.g. an <img onerror=...> payload) must render as inert
-        // literal text, not markup (AC 11).
-        beforeEl.textContent = before;
-        afterEl.textContent = after;
-        behindEl.textContent = '';
-        break;
-      }
       case 'textAbove':
       case 'textBelow':
         beforeEl.textContent = substituteLabel(template, valueText);
@@ -424,6 +455,24 @@ export function mountOverlayRenderer(
         afterEl.textContent = '';
         behindEl.textContent = substituteLabel(template, valueText);
         break;
+      case 'textAfter': {
+        // Operator content: textContent only, never innerHTML — a hostile
+        // template (e.g. an <img onerror=...> payload) must render as inert
+        // literal text, not markup (AC 11).
+        const { before, after } = inlineContent('textAfter', template);
+        beforeEl.textContent = before;
+        afterEl.textContent = after;
+        behindEl.textContent = '';
+        break;
+      }
+      case 'textBefore':
+      default: {
+        const { before, after } = inlineContent('textBefore', template);
+        beforeEl.textContent = before;
+        afterEl.textContent = after;
+        behindEl.textContent = '';
+        break;
+      }
     }
   }
 
@@ -432,8 +481,16 @@ export function mountOverlayRenderer(
     if (animation.target === 'number') {
       numberAnim = interruptAndAnimate(numberEl, animation, numberAnim);
     } else if (animation.target === 'text') {
-      beforeAnim = interruptAndAnimate(beforeEl, animation, beforeAnim);
-      afterAnim = interruptAndAnimate(afterEl, animation, afterAnim);
+      // Fix wave (review Important 1): textBehind's label lives in
+      // `behindEl`, not before/afterEl (both empty for this layout) — a
+      // `target: 'text'` animation must target the node that actually HAS
+      // the text, or it silently animates nothing.
+      if (currentLayout === 'textBehind') {
+        behindAnim = interruptAndAnimate(behindEl, animation, behindAnim);
+      } else {
+        beforeAnim = interruptAndAnimate(beforeEl, animation, beforeAnim);
+        afterAnim = interruptAndAnimate(afterEl, animation, afterAnim);
+      }
     } else {
       bothAnim = interruptAndAnimate(contentRoot, animation, bothAnim);
     }

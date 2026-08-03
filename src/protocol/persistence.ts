@@ -27,16 +27,20 @@ export interface LoadOutcome<T> {
   warning: 'corrupt-quarantined' | 'mirror-used' | null;
 }
 
+// Task 2.11: bumped 1 -> 2 alongside PRESET_SCHEMA_VERSION for StyleConfig's
+// new required `layout` field. See `migrateSnapshotV1` below for the upgrade
+// path — a v1 snapshot on disk (e.g. from operator testing before this
+// landed) is migrated the same way a v1 preset is (engine/migrate.ts's
+// `inferLayout`), not merely rejected. Exported (fix wave, review minor) so
+// `controller.ts`'s snapshot construction references this instead of a
+// hardcoded `2`.
+export const SNAPSHOT_SCHEMA_VERSION = 2 as const;
+
 export interface OverlaySnapshot {
   template: string | null;
   value: number;
   style: StyleConfig;
-  // Task 2.11: bumped 1 -> 2 alongside PRESET_SCHEMA_VERSION for StyleConfig's
-  // new required `layout` field. See `migrateSnapshotV1` below for the
-  // upgrade path — a v1 snapshot on disk (e.g. from operator testing before
-  // this landed) is migrated the same way a v1 preset is (engine/migrate.ts's
-  // `inferLayout`), not merely rejected.
-  schemaVersion: 2;
+  schemaVersion: typeof SNAPSHOT_SCHEMA_VERSION;
 }
 
 export interface DockSettings {
@@ -68,7 +72,7 @@ function isOverlaySnapshot(x: unknown): x is OverlaySnapshot {
   const { template, value, style, schemaVersion } = x;
   if (!(template === null || typeof template === 'string')) return false;
   if (typeof value !== 'number') return false;
-  if (schemaVersion !== 2) return false;
+  if (schemaVersion !== SNAPSHOT_SCHEMA_VERSION) return false;
   if (!isPlainObject(style)) return false;
   return true;
 }
@@ -88,8 +92,8 @@ function migrateSnapshotV1(x: unknown): unknown {
   if (!isPlainObject(x)) return x;
   const { schemaVersion, template, style } = x;
   if (schemaVersion !== 1) return x;
-  if (!isPlainObject(style)) return { ...x, schemaVersion: 2 };
-  return { ...x, schemaVersion: 2, style: { ...style, layout: inferLayout(template) } };
+  if (!isPlainObject(style)) return { ...x, schemaVersion: SNAPSHOT_SCHEMA_VERSION };
+  return { ...x, schemaVersion: SNAPSHOT_SCHEMA_VERSION, style: { ...style, layout: inferLayout(template) } };
 }
 
 function isDockSettings(x: unknown): x is DockSettings {

@@ -197,7 +197,13 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
-  test('template validation: missing {count} blocks Save and Start; live example renders with the preview value', async ({
+  // Fix-wave contract correction (post-review; PRD §8.8/AC 22 updated to
+  // match): `{count}` is no longer required by ANY layout — the original
+  // rule ("textBefore/textAfter require it") made the two layouts render
+  // identically, which was the bug. This replaces the old
+  // "template validation: missing {count} blocks Save and Start..." test,
+  // which asserted the (now-removed) blocking behavior.
+  test('a label with no {count} never blocks Save/Start; a token still substitutes into the live example', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -209,9 +215,12 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('setup-title').fill('Templated');
 
       await page.getByTestId('setup-template').fill('no token here');
-      await expect(page.getByTestId('setup-template-error')).toBeVisible();
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
-      await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+      await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+      // Default layout (textBefore): a token-less label is placed before the
+      // number, exactly the operator's literal text with nothing inserted.
+      await expect(page.getByTestId('setup-template-example')).toHaveText('no token here7');
 
       await page.getByTestId('setup-template').fill('Lives: {count}');
       await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
@@ -1364,7 +1373,15 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
-  test('layout-aware template validation: only textBefore/textAfter require {count}; the field label switches accordingly', async ({
+  // Fix-wave contract correction (post-review): replaces the old
+  // "layout-aware template validation: only textBefore/textAfter require
+  // {count}" test — that rule was wrong (the controller's own spec error,
+  // not an implementation bug) and has been dropped entirely. The field is
+  // now ALWAYS plain "Label text" and NEVER blocks Save/Start for a missing
+  // token, on any layout; a token's only remaining effect is a neutral,
+  // informational hint (never blocking) explaining that its PRESENCE decides
+  // placement for the inline layouts.
+  test('label text never requires {count} and never blocks Save, on any layout; a neutral hint appears only when a token is present', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -1379,31 +1396,67 @@ test.describe('dock Setup + Presets views', () => {
         .locator('.form-row', { has: page.getByTestId('setup-template') })
         .locator('.form-label');
 
-      // Default layout (textBefore) requires {count}, same as before this task.
-      await expect(templateLabel).toHaveText('Template (must contain {count})');
-      await page.getByTestId('setup-template').fill('no token here');
-      await expect(page.getByTestId('setup-template-error')).toBeVisible();
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
-
-      // Switching to a stacked layout: the error clears (no token required),
-      // the field's label switches to "Label text", and Save re-enables —
-      // the SAME (still tokenless) text is now valid.
+      // The field is ALWAYS "Label text" — never switches, on any layout.
+      await expect(templateLabel).toHaveText('Label text');
+      await page.getByTestId('setup-layout-textAfter').click();
+      await expect(templateLabel).toHaveText('Label text');
       await page.getByTestId('setup-layout-textAbove').click();
       await expect(templateLabel).toHaveText('Label text');
+
+      // A token-less label never blocks Save/Start, on any layout — no
+      // `setup-template-error` exists anymore at all.
+      await page.getByTestId('setup-template').fill('no token at all');
+      await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-template-token-hint')).toHaveCount(0);
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+
+      await page.getByTestId('setup-layout-textBefore').click();
       await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
       await expect(page.getByTestId('setup-save')).toBeEnabled();
 
-      // numberOnly: also no error, regardless of field content.
-      await page.getByTestId('setup-layout-numberOnly').click();
+      // Typing {count} in surfaces the neutral placement hint — still never
+      // blocks anything.
+      await page.getByTestId('setup-template').fill('Round {count} of 20');
       await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
+      await expect(page.getByTestId('setup-template-token-hint')).toBeVisible();
+      await expect(page.getByTestId('setup-template-token-hint')).toContainText('sets where the number goes');
       await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await expect(page.getByTestId('setup-start-session')).toBeEnabled();
 
-      // Switching BACK to an inline layout re-requires the token — the
-      // tokenless text left in the field is invalid again.
+      // Removing the token again hides the hint.
+      await page.getByTestId('setup-template').fill('Round twenty');
+      await expect(page.getByTestId('setup-template-token-hint')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('setup-preview places a token-less label before/after the number per layout (textBefore vs textAfter)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('5');
+      await page.getByTestId('setup-template').fill('Score');
+
+      // Default layout is textBefore: label then number.
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('Score');
+      let labelBox = await page.getByTestId('setup-preview-label').boundingBox();
+      let numberBox = await page.getByTestId('setup-preview-number').boundingBox();
+      expect(labelBox).not.toBeNull();
+      expect(numberBox).not.toBeNull();
+      expect(numberBox!.x).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width - 1);
+
       await page.getByTestId('setup-layout-textAfter').click();
-      await expect(templateLabel).toHaveText('Template (must contain {count})');
-      await expect(page.getByTestId('setup-template-error')).toBeVisible();
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-preview-label-after')).toHaveText('Score');
+      labelBox = await page.getByTestId('setup-preview-label-after').boundingBox();
+      numberBox = await page.getByTestId('setup-preview-number').boundingBox();
+      expect(labelBox).not.toBeNull();
+      expect(numberBox).not.toBeNull();
+      expect(labelBox!.x).toBeGreaterThanOrEqual(numberBox!.x + numberBox!.width - 1);
     } finally {
       await mock.close();
     }

@@ -34,7 +34,7 @@ import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
-import { splitTemplate, substituteLabel } from '../../shared/template-content.js';
+import { inlineContent, substituteLabel } from '../../shared/template-content.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -70,12 +70,6 @@ const LAYOUT_LABELS: Record<OverlayLayout, string> = {
   textBelow: 'Text below',
   textBehind: 'Text behind',
 };
-// Only these two require the operator's template to contain `{count}` —
-// every other layout takes a plain label (PRD §8.8 amendment).
-function isInlineLayout(layout: OverlayLayout): boolean {
-  return layout === 'textBefore' || layout === 'textAfter';
-}
-
 const DEFAULT_COMPLETION_SECONDS = 5;
 
 // Font-size bounds for the Number-size field (code-quality:P2-Q-06). Before
@@ -298,19 +292,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       : { kind: ui.completionKind };
   }
 
-  // Task 2.11 — layout-aware (PRD §8.8 amendment): only the inline layouts
-  // (textBefore/textAfter) require `{count}`. Every other layout (numberOnly,
-  // and the stacked/ghost layouts) takes a plain label or ignores it
-  // entirely, so there is nothing to validate here for them.
-  function templateError(): string | null {
-    if (!isInlineLayout(ui.layout)) return null;
-    const t = ui.template.trim();
-    if (t.length === 0) return null;
-    return t.includes('{count}') ? null : 'Template must include {count}';
-  }
-
-  function templateFieldLabel(): string {
-    return isInlineLayout(ui.layout) ? 'Template (must contain {count})' : 'Label text';
+  // Fix-wave contract correction (post-review; PRD §8.8/AC 22 updated to
+  // match — the ORIGINAL rule, "textBefore/textAfter require {count}", was
+  // wrong and made the two layouts render identically). `{count}` is no
+  // longer required by ANY layout: the field is always plain "Label text",
+  // and a token-less label is placed relative to the number by the LAYOUT
+  // itself (see ../../shared/template-content.js's `inlineContent`). A
+  // present token still WINS placement for the inline layouts (today's
+  // split rendering, unchanged) — `templateHasToken()` drives the neutral
+  // inline hint that surfaces that, below, instead of a blocking error.
+  function templateHasToken(): boolean {
+    return ui.template.includes('{count}');
   }
 
   function rangeValid(): boolean {
@@ -332,11 +324,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   function canSave(): boolean {
-    return ui.title.trim().length > 0 && rangeValid() && templateError() === null && completionValid() && styleValid();
+    return ui.title.trim().length > 0 && rangeValid() && completionValid() && styleValid();
   }
 
   function canStart(): boolean {
-    return rangeValid() && templateError() === null && completionValid() && styleValid();
+    return rangeValid() && completionValid() && styleValid();
   }
 
   function previewValue(): number {
@@ -347,13 +339,33 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // Feeds the `setup-template-example` hint only (a single-line "what would
   // this look like" indicator) — the actual per-layout shape is what
   // renderPreviewBlock()'s `setup-preview` element itself renders, below.
+  // Layout-aware (fix wave): mirrors applyLayoutContent()'s real-renderer
+  // logic via the shared inlineContent/substituteLabel helpers, always
+  // including the number (review minor — a stacked/behind label with no
+  // token used to render as just the bare label text, with no digit
+  // anywhere in the hint).
   function previewText(): string {
     const v = previewValue();
+    const valueText = String(v);
     // numberOnly ignores the label entirely (PRD §8.8) — same rule
     // applyLayoutContent() enforces in the real overlay renderer.
-    if (ui.layout === 'numberOnly') return String(v);
-    const t = ui.template.trim();
-    return t.length > 0 ? t.replaceAll('{count}', String(v)) : String(v);
+    if (ui.layout === 'numberOnly') return valueText;
+    const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
+    if (ui.layout === 'textAfter') {
+      const { before, after } = inlineContent('textAfter', template);
+      return `${before}${valueText}${after}`;
+    }
+    if (ui.layout === 'textBefore') {
+      const { before, after } = inlineContent('textBefore', template);
+      return `${before}${valueText}${after}`;
+    }
+    // textAbove/textBelow/textBehind: a token in the label already
+    // substitutes the number in-place (substituteLabel) — appending it AGAIN
+    // would duplicate it. A token-less label gets the number appended so the
+    // hint never shows just the bare label with no digit anywhere.
+    if (template === null) return valueText;
+    if (template.includes('{count}')) return substituteLabel(template, valueText);
+    return `${template} ${valueText}`;
   }
 
   async function performSave(force: boolean): Promise<void> {
@@ -739,7 +751,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   // Task 2.11 — the embedded preview now mirrors the CHOSEN LAYOUT's actual
   // shape (stacking direction, ghost-behind positioning), not just a flat
-  // text string, using the same splitTemplate/substituteLabel rules the real
+  // text string, using the same inlineContent/substituteLabel rules the real
   // overlay renderer uses (../../shared/template-content.js) so the operator
   // previews the same substitution the audience will see. `setup-preview`
   // itself stays a single element Test-animation can `.animate()` directly
@@ -778,9 +790,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       case 'numberOnly':
         preview.appendChild(numberSpan);
         break;
-      case 'textBefore':
       case 'textAfter': {
-        const { before, after } = splitTemplate(template);
+        const { before, after } = inlineContent('textAfter', template);
+        if (before) preview.appendChild(labelSpan('setup-preview-label', before));
+        preview.appendChild(numberSpan);
+        if (after) preview.appendChild(labelSpan('setup-preview-label-after', after));
+        break;
+      }
+      case 'textBefore': {
+        const { before, after } = inlineContent('textBefore', template);
         if (before) preview.appendChild(labelSpan('setup-preview-label', before));
         preview.appendChild(numberSpan);
         if (after) preview.appendChild(labelSpan('setup-preview-label-after', after));
@@ -877,14 +895,26 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     root.appendChild(
       formRow(
-        templateFieldLabel(),
+        'Label text',
         inputField('setup-template', ui.template, (v) => {
           ui.template = v;
         }),
       ),
     );
-    const tErr = templateError();
-    if (tErr) root.appendChild(el('div', { 'data-testid': 'setup-template-error', class: 'field-error' }, tErr));
+    // Fix-wave contract correction: no layout blocks Save/Start for a
+    // missing `{count}` anymore — this is a neutral, never-blocking note
+    // shown only when the operator's label happens to contain the token,
+    // explaining that its PRESENCE (not requirement) is what decides
+    // placement for the inline layouts.
+    if (templateHasToken()) {
+      root.appendChild(
+        el(
+          'div',
+          { 'data-testid': 'setup-template-token-hint', class: 'field-hint' },
+          'This label contains {count}, which sets where the number goes.',
+        ),
+      );
+    }
     root.appendChild(el('div', { 'data-testid': 'setup-template-example', class: 'field-hint' }, previewText()));
 
     root.appendChild(

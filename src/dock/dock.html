@@ -294,15 +294,20 @@
         margin-bottom: 0.6rem;
         word-break: break-word;
         display: inline-flex;
-        gap: 0.3em;
       }
       .setup-preview-row {
         flex-direction: row;
         align-items: baseline;
+        /* Fix wave (review minor): no gap for inline layouts — the real
+           overlay renderer never adds one either (spacing between the
+           label and the number comes entirely from the operator's own
+           label text), so an artificial gap here would make the preview
+           lie about what actually appears on stream. */
       }
       .setup-preview-column {
         flex-direction: column;
         align-items: center;
+        gap: 0.3em;
       }
       .setup-preview-relative {
         position: relative;

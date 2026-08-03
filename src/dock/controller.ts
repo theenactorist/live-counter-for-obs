@@ -10,6 +10,7 @@ import type { AutoTimer, TimerHooks } from './timer.js';
 import type { Bus } from '../protocol/bus.js';
 import { generateNonce } from '../protocol/bus.js';
 import type { DockStorage, OverlaySnapshot } from '../protocol/persistence.js';
+import { SNAPSHOT_SCHEMA_VERSION } from '../protocol/persistence.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
 
 export interface Scheduler {
@@ -412,7 +413,7 @@ export class SessionController {
       if (this.style === null) {
         this.storage.log('session-ended', 'keep-overlay used the default style (no preset presentation known)');
       }
-      snapshot = { template: this.template, value: endedValue, style, schemaVersion: 2 };
+      snapshot = { template: this.template, value: endedValue, style, schemaVersion: SNAPSHOT_SCHEMA_VERSION };
     }
     this.storage.saveSnapshot(snapshot);
     this.snapshot = snapshot;

@@ -958,7 +958,70 @@ test.describe('overlay renderer', () => {
       }
     });
 
-    test('textAfter splits on {count} the same way textBefore does', async ({ page }) => {
+    // Contract correction (post-review): `{count}` is no longer required by
+    // ANY layout, and textBefore/textAfter now differ for a token-LESS
+    // label — the layout itself decides placement (textBefore: label then
+    // number; textAfter: number then label). This replaces the old
+    // "textAfter splits on {count} the same way textBefore does" test, which
+    // asserted the two layouts were identical — that was the bug the
+    // correction fixes.
+    test('textBefore vs textAfter: a token-less label places on opposite sides of the number', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBefore' }),
+            template: 'Score', // deliberately no {count}
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Score');
+          await expect(page.getByTestId('overlay-text-after')).toHaveText('');
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+
+          const beforeLabelBox = await page.getByTestId('overlay-text-before').boundingBox();
+          const beforeNumberBox = await page.getByTestId('overlay-number').boundingBox();
+          expect(beforeLabelBox).not.toBeNull();
+          expect(beforeNumberBox).not.toBeNull();
+          // The label sits to the LEFT of the number.
+          expect(beforeNumberBox!.x).toBeGreaterThanOrEqual(beforeLabelBox!.x + beforeLabelBox!.width - 1);
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAfter' }),
+            template: 'Score',
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-text-after')).toHaveText('Score');
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('');
+          await expect(page.getByTestId('overlay-number')).toHaveText('5');
+
+          const afterLabelBox = await page.getByTestId('overlay-text-after').boundingBox();
+          const afterNumberBox = await page.getByTestId('overlay-number').boundingBox();
+          expect(afterLabelBox).not.toBeNull();
+          expect(afterNumberBox).not.toBeNull();
+          // The label sits to the RIGHT of the number — the opposite side
+          // from textBefore above, for the exact same token-less input.
+          expect(afterLabelBox!.x).toBeGreaterThanOrEqual(afterNumberBox!.x + afterNumberBox!.width - 1);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a label containing {count} still honours the token\'s position, regardless of textBefore vs textAfter', async ({
+      page,
+    }) => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
@@ -975,6 +1038,37 @@ test.describe('overlay renderer', () => {
 
           await expect(page.getByTestId('overlay-number')).toHaveText('5');
           await expect(page.getByTestId('overlay-text-before')).toHaveText('');
+          await expect(page.getByTestId('overlay-text-after')).toHaveText(' pts');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('an unrecognized layout value falls back to the textBefore split (cheap minor: forward/backward compat)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          // Simulates a stale overlay.html paired with a newer dock.html that
+          // has since added a 7th layout this build has never heard of.
+          const bogusStyle = { ...styleFixture(), layout: 'diagonal' } as unknown as StyleConfig;
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 9 }),
+            snapshot: null,
+            style: bogusStyle,
+            template: 'Score: {count} pts',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+
+          await expect(page.getByTestId('overlay-number')).toHaveText('9');
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Score: ');
           await expect(page.getByTestId('overlay-text-after')).toHaveText(' pts');
         } finally {
           close();
@@ -1159,6 +1253,193 @@ test.describe('overlay renderer', () => {
 
           expect(Math.abs(behindBox!.x - baselineBox!.x)).toBeLessThan(2);
           expect(Math.abs(behindBox!.y - baselineBox!.y)).toBeLessThan(2);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave (review Important 1): textBehind + animation.target -----
+
+    test('textBehind: target "text" animates the ghost label (previously animated nothing) and keeps it centred', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          // 'pop' (scale, symmetric around the element's own center) rather
+          // than slideUp/flip: this test is specifically about proving the
+          // ghost's CENTERING survives an animation running on it, and a
+          // directional animation (slideUp) would deliberately move it,
+          // confounding that assertion with the animation's own intended
+          // effect.
+          const animation: AnimationConfig = { type: 'pop', target: 'text', durationMs: 2000 };
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 1 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'Combo',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('Combo');
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 2 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'Combo',
+            animation,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('2');
+
+          const runningOnGhost = await page.getByTestId('overlay-text-behind').evaluate((el) => el.getAnimations().length);
+          expect(runningOnGhost).toBeGreaterThan(0);
+          // Before the fix, target:'text' animated the (empty, for this
+          // layout) before/afterEl — the ghost itself never had a running
+          // Animation at all.
+          const runningOnBefore = await page.getByTestId('overlay-text-before').evaluate((el) => el.getAnimations().length);
+          expect(runningOnBefore).toBe(0);
+
+          const numberBox = await page.getByTestId('overlay-number').boundingBox();
+          const ghostBox = await page.getByTestId('overlay-text-behind').boundingBox();
+          expect(numberBox).not.toBeNull();
+          expect(ghostBox).not.toBeNull();
+          const numberCenterX = numberBox!.x + numberBox!.width / 2;
+          const numberCenterY = numberBox!.y + numberBox!.height / 2;
+          const ghostCenterX = ghostBox!.x + ghostBox!.width / 2;
+          const ghostCenterY = ghostBox!.y + ghostBox!.height / 2;
+          // Bounding-box centres within a few px, MID-ANIMATION — proves the
+          // centering transform (moved to a static wrapper) is not being
+          // clobbered by the pop animation's own `transform: scale(...)`
+          // keyframes on the ghost's own element.
+          expect(Math.abs(numberCenterX - ghostCenterX)).toBeLessThan(5);
+          expect(Math.abs(numberCenterY - ghostCenterY)).toBeLessThan(5);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textBehind: target "both" animates the shared container — ghost and number move together', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          const animation: AnimationConfig = { type: 'pop', target: 'both', durationMs: 2000 };
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 1 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'Combo',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('Combo');
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 2 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'Combo',
+            animation,
+            heartbeat: 2,
+          } satisfies StatePayload);
+
+          // 'both' animates the shared ancestor (overlay-content), same
+          // convention as every other layout's target:'both' — both the
+          // number and the ghost are its descendants, so animating it moves
+          // them together.
+          const runningOnContent = await page.getByTestId('overlay-content').evaluate((el) => el.getAnimations().length);
+          expect(runningOnContent).toBeGreaterThan(0);
+          await expect(page.getByTestId('overlay-number')).toHaveText('2');
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('Combo');
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a live layout switch preserves node identity (same elements, not rebuilt) and does not destroy an in-flight animation', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 5000 };
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 1 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBefore' }),
+            template: 'Score: {count}',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('1');
+
+          // Marks the CURRENT DOM nodes — a rebuild would produce fresh
+          // elements that never carry this attribute, unlike a mutate-in-place
+          // update (the stable-node discipline this whole renderer depends on).
+          await page.evaluate(() => {
+            document.querySelector('[data-testid="overlay-number"]')?.setAttribute('data-identity-check', 'stable');
+            document.querySelector('[data-testid="overlay-text-before"]')?.setAttribute('data-identity-check', 'stable');
+          });
+
+          // A value change with a long-running animation, so it is still
+          // in-flight when the layout switch below arrives.
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 2 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBefore' }),
+            template: 'Score: {count}',
+            animation,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('2');
+
+          const runningBefore = await page.getByTestId('overlay-number').evaluate((el) => el.getAnimations().length);
+          expect(runningBefore).toBeGreaterThan(0);
+          const currentTimeBefore = await page
+            .getByTestId('overlay-number')
+            .evaluate((el) => (el.getAnimations()[0] as Animation).currentTime as number);
+
+          // The layout switch itself — arrives WHILE the animation above is
+          // still running.
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 2 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAbove' }),
+            template: 'Score',
+            animation: null,
+            heartbeat: 3,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Score');
+
+          // Same nodes — the identity marker survived the layout switch.
+          await expect(page.getByTestId('overlay-number')).toHaveAttribute('data-identity-check', 'stable');
+          await expect(page.getByTestId('overlay-text-before')).toHaveAttribute('data-identity-check', 'stable');
+
+          // The in-flight animation on the number element was not
+          // cancelled/replaced by the layout switch — same count, and its
+          // currentTime kept advancing rather than resetting to 0.
+          const runningAfter = await page.getByTestId('overlay-number').evaluate((el) => el.getAnimations().length);
+          expect(runningAfter).toBe(runningBefore);
+          const currentTimeAfter = await page
+            .getByTestId('overlay-number')
+            .evaluate((el) => (el.getAnimations()[0] as Animation).currentTime as number);
+          expect(currentTimeAfter).toBeGreaterThanOrEqual(currentTimeBefore);
         } finally {
           close();
         }
