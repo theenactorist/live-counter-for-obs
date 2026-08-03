@@ -1449,3 +1449,72 @@ test.describe('overlay renderer', () => {
     });
   });
 });
+
+// --- Task 2.13: overlay boots fully without any OBS setup at all ----------
+//
+// No `startMockObs()` anywhere in this describe block — that's the point:
+// an overlay opened with no `?port`/`?pw` must never attempt a websocket
+// connection at all (controller clarification, binding), and must still be
+// fully functional (mount, heartbeat, render a broadcast) purely over the
+// direct BroadcastChannel/localStorage transport.
+test.describe('overlay — no OBS setup at all (Task 2.13)', () => {
+  test('boots with no query params: mounts, heartbeats over the local transport, and never attempts a websocket connection', async ({
+    page,
+  }) => {
+    let wsAttempted = false;
+    page.on('websocket', () => {
+      wsAttempted = true;
+    });
+
+    // statusMs shrinks the heartbeat well below the default 2s so the test
+    // doesn't have to wait that long — it carries no port/pw, so ws is still
+    // never attempted (see src/overlay/main.ts's `hasWsParams`).
+    await page.goto(`${OVERLAY_URL}?statusMs=200`);
+    await expect(page.getByTestId('overlay-root')).toBeAttached();
+
+    // A listener installed AFTER the page loads would race the mount-time
+    // 'hello' send (which fires synchronously at module load, before this
+    // evaluate() call could possibly run) — waiting for the REPEATING
+    // 'overlay-status' heartbeat instead sidesteps that race entirely.
+    const kind = await page.evaluate(() => {
+      return new Promise((resolve) => {
+        const bc = new BroadcastChannel('live-counter');
+        bc.onmessage = (ev) => {
+          const d = ev.data as { app?: string; kind?: string; source?: string };
+          if (d && d.app === 'live-counter' && d.source === 'overlay' && (d.kind === 'hello' || d.kind === 'overlay-status')) {
+            bc.close();
+            resolve(d.kind);
+          }
+        };
+      });
+    });
+    expect(['hello', 'overlay-status']).toContain(kind);
+
+    await page.waitForTimeout(300);
+    expect(wsAttempted).toBe(false);
+  });
+
+  test('with no query params, renders a "state" broadcast delivered purely over BroadcastChannel', async ({ page }) => {
+    await page.goto(`${OVERLAY_URL}?statusMs=200`);
+    await expect(page.getByTestId('overlay-root')).toBeAttached();
+
+    const payload: StatePayload = {
+      session: sessionFixture({ currentValue: 3 }),
+      snapshot: null,
+      style: styleFixture(),
+      template: null,
+      animation: null,
+      heartbeat: 1,
+    };
+    await page.evaluate(
+      ({ app, v, source, kind, nonce, payload: p }) => {
+        const bc = new BroadcastChannel('live-counter');
+        bc.postMessage({ app, v, source, kind, nonce, payload: p });
+        bc.close();
+      },
+      { app: 'live-counter' as const, v: 1 as const, source: 'test' as const, kind: 'state' as const, nonce: 'local-only-1', payload },
+    );
+
+    await expect(page.getByTestId('overlay-number')).toHaveText('3');
+  });
+});

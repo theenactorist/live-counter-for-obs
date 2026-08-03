@@ -252,6 +252,12 @@ function main(): void {
     // storage/bus this function is about to replace, racing the NEW
     // controller as an undetectable "zombie" second writer.
     if (controller) controller.dispose();
+    // Task 2.13: the Bus now owns real, longer-lived listeners of its own
+    // (LocalBusTransport's BroadcastChannel/'storage' subscriptions, on top
+    // of the ws client's onEvent) — torn down here for the same reason
+    // `controller`/`client` are: without it, every settings-save reconnect
+    // would leave the OLD Bus's transports subscribed forever.
+    if (bus) bus.destroy();
     if (client) client.close();
 
     client = new ObsWsClient({

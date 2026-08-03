@@ -396,4 +396,117 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       await mock.close();
     }
   });
+
+  // --- Task 2.13: direct panel<->overlay transport, obs-websocket optional -
+
+  test('10. headline: dock + overlay with ZERO OBS setup — starting a session and counting to 3 works entirely over the direct transport', async ({
+    context,
+  }) => {
+    // Deliberately NO startMockObs() anywhere in this test. The dock still
+    // constructs its own ws client (it always does — see src/dock/main.ts),
+    // pointed at a port nothing is listening on, so it simply never
+    // identifies; the overlay is opened with NO query params at all, so it
+    // never even attempts a websocket connection (src/overlay/main.ts).
+    // Both pages share ONE browser context — mirrors OBS, where the dock's
+    // Custom Browser Dock and the overlay's Browser Source live in the SAME
+    // CEF instance (the spike this task is built on).
+    const dock = await context.newPage();
+    const overlay = await context.newPage();
+
+    await openDock(dock, { port: 59712 });
+    await overlay.goto(OVERLAY_URL);
+
+    await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+    await expect(dock.getByTestId('current-value')).toHaveText('0');
+    await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+    const plus = dock.getByTestId('btn-plus');
+    for (let i = 1; i <= 3; i++) {
+      await plus.click();
+    }
+
+    await expect(dock.getByTestId('current-value')).toHaveText('3');
+    await expect(overlay.getByTestId('overlay-number')).toHaveText('3', { timeout: 3000 });
+  });
+
+  test('11. with both transports live, no envelope is ever delivered twice to the overlay (nonce-level dedup across local + ws)', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      // debugBusCounts installs a raw per-nonce delivery counter on the
+      // overlay's composite Bus (test-only seam, inert unless requested —
+      // see src/overlay/main.ts) — the renderer's own value/coalesce
+      // diffing already makes a duplicate delivery visually
+      // unobservable, so this is the only reliable way to prove the
+      // dedup contract end-to-end against the REAL transports.
+      await openOverlay(overlay, mock.port, { debugBusCounts: '1' });
+
+      // Confirm BOTH transports are genuinely live before measuring anything.
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-row-transport')).toContainText('direct + OBS', { timeout: 5000 });
+      await dock.getByTestId('tab-live').click();
+
+      await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      const plus = dock.getByTestId('btn-plus');
+      for (let i = 1; i <= 3; i++) {
+        await plus.click();
+        await expect(overlay.getByTestId('overlay-number')).toHaveText(String(i), { timeout: 3000 });
+      }
+
+      // Sit through at least one full heartbeat cycle too (dock's
+      // SessionController re-broadcasts every 2s) — covers click-driven AND
+      // heartbeat-driven broadcasts in the same check.
+      await overlay.waitForTimeout(2500);
+
+      const debug = await overlay.evaluate(
+        () => (window as unknown as { __lcBusDebug: { totalDeliveries: number; duplicateNonces: string[] } }).__lcBusDebug,
+      );
+      expect(debug.duplicateNonces).toEqual([]);
+      expect(debug.totalDeliveries).toBeGreaterThan(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('12. killing the ws mock mid-session: counting keeps working over the direct transport; diag-row-transport flips to "direct only"', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    let closed = false;
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port, diagRefreshMs: 200 });
+      await openOverlay(overlay, mock.port);
+
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-row-transport')).toContainText('direct + OBS', { timeout: 5000 });
+      await dock.getByTestId('tab-live').click();
+
+      await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      await mock.close(); // the ws server goes away entirely, mid-session
+      closed = true;
+
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-row-transport')).toContainText('direct only', { timeout: 5000 });
+      await dock.getByTestId('tab-live').click();
+
+      const plus = dock.getByTestId('btn-plus');
+      for (let i = 1; i <= 3; i++) {
+        await plus.click();
+        await expect(dock.getByTestId('current-value')).toHaveText(String(i));
+        await expect(overlay.getByTestId('overlay-number')).toHaveText(String(i), { timeout: 3000 });
+      }
+    } finally {
+      if (!closed) await mock.close();
+    }
+  });
 });

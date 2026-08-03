@@ -1,7 +1,47 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
-import { Bus, type BusMessage } from '../../src/protocol/bus.js';
+import { Bus, type BusMessage, type BusTransport } from '../../src/protocol/bus.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
+
+// Task 2.13 — a controllable fake `BusTransport` for exercising Bus's
+// composite fan-out/dedupe logic deterministically, without depending on a
+// real BroadcastChannel/localStorage (unavailable under vitest's default
+// 'node' test environment anyway — see tests/protocol/local-bus.test.ts for
+// that transport's OWN dedicated unit tests). `emit()` simulates an incoming
+// delivery from "the other side" of this transport.
+class FakeTransport implements BusTransport {
+  available: boolean;
+  sent: BusMessage[] = [];
+  private readonly sendImpl: (m: BusMessage) => Promise<boolean> | boolean;
+  private readonly listeners = new Set<(raw: unknown) => void>();
+  destroyCalls = 0;
+
+  constructor(opts: { available?: boolean; sendImpl?: (m: BusMessage) => Promise<boolean> | boolean } = {}) {
+    this.available = opts.available ?? true;
+    this.sendImpl = opts.sendImpl ?? (() => true);
+  }
+
+  send(message: BusMessage): Promise<boolean> | boolean {
+    this.sent.push(message);
+    return this.sendImpl(message);
+  }
+
+  onMessage(fn: (raw: unknown) => void): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  emit(raw: unknown): void {
+    for (const fn of [...this.listeners]) fn(raw);
+  }
+
+  destroy(): void {
+    this.destroyCalls++;
+    this.listeners.clear();
+  }
+}
 
 let mock: MockObs | undefined;
 let clients: ObsWsClient[] = [];
@@ -202,5 +242,134 @@ describe('Bus', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(received).toHaveLength(1);
+  });
+});
+
+// Task 2.13 — Bus as a composite over [local transport, obs-websocket].
+// These use a FakeTransport (above) for the "local" half so the fan-out/
+// dedupe logic is exercised deterministically; the real ws half is still the
+// genuine mock-server-backed ObsWsClient, same as every other test in this
+// file. LocalBusTransport's OWN internals (BroadcastChannel/localStorage) are
+// covered separately in tests/protocol/local-bus.test.ts.
+describe('Bus — composite transports', () => {
+  it('onMessage dedupes by nonce: the SAME envelope delivered by BOTH the local transport and obs-websocket fires listeners exactly once', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const fakeLocal = new FakeTransport();
+    const bus = new Bus(client, 'dock', { localTransport: fakeLocal });
+
+    const received: BusMessage[] = [];
+    bus.onMessage((m) => received.push(m));
+
+    const envelope: BusMessage = {
+      app: 'live-counter',
+      v: 1,
+      source: 'overlay',
+      kind: 'state',
+      nonce: 'duplicate-nonce-1',
+      payload: { n: 1 },
+    };
+    // Simulate the SAME logical broadcast arriving via both transports —
+    // the local one directly, the ws one via the mock's real fan-out.
+    fakeLocal.emit(envelope);
+    mock.injectEvent('CustomEvent', envelope);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ nonce: 'duplicate-nonce-1' });
+  });
+
+  it('two DIFFERENT nonces from either transport both deliver (dedup is per-nonce, not "one message per transport")', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const fakeLocal = new FakeTransport();
+    const bus = new Bus(client, 'dock', { localTransport: fakeLocal });
+
+    const received: BusMessage[] = [];
+    bus.onMessage((m) => received.push(m));
+
+    fakeLocal.emit({ app: 'live-counter', v: 1, source: 'overlay', kind: 'hello', nonce: 'n-a', payload: {} });
+    mock.injectEvent('CustomEvent', { app: 'live-counter', v: 1, source: 'overlay', kind: 'hello', nonce: 'n-b', payload: {} });
+
+    await vi.waitFor(() => {
+      expect(received).toHaveLength(2);
+    });
+    expect(new Set(received.map((m) => m.nonce))).toEqual(new Set(['n-a', 'n-b']));
+  });
+
+  it('send() fans out to every available transport, and a throwing local transport does not prevent obs-websocket from delivering', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const throwingLocal = new FakeTransport({
+      sendImpl: () => {
+        throw new Error('local transport boom');
+      },
+    });
+    const bus = new Bus(client, 'dock', { localTransport: throwingLocal });
+
+    await expect(bus.send('state', { ok: true })).resolves.toBeUndefined();
+    expect(throwingLocal.sent).toHaveLength(1); // it WAS attempted
+    expect(mock.broadcasts).toHaveLength(1); // ...and the ws transport still delivered
+  });
+
+  it('send() rejects only when EVERY transport fails (a local transport reporting false, and a ws send that is never identified)', async () => {
+    // No mock server for this one: the ws client never identifies, so its
+    // transport's send() always resolves false without ever throwing.
+    const client = new ObsWsClient({ url: 'ws://127.0.0.1:1', eventSubscriptions: 0 });
+    clients.push(client);
+    const unavailableLocal = new FakeTransport({ available: false, sendImpl: () => false });
+    const bus = new Bus(client, 'dock', { localTransport: unavailableLocal });
+
+    await expect(bus.send('state', { ok: true })).rejects.toThrow(/every transport/);
+  });
+
+  it('activeTransports() reflects each transport\'s current availability', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const fakeLocal = new FakeTransport({ available: true });
+    const bus = new Bus(client, 'dock', { localTransport: fakeLocal });
+
+    expect(bus.activeTransports()).toEqual({ local: true, obsws: true });
+
+    fakeLocal.available = false;
+    expect(bus.activeTransports()).toEqual({ local: false, obsws: true });
+
+    client.close();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(bus.activeTransports().obsws).toBe(false);
+  });
+
+  it('activeTransports().local is false when no local transport is configured (ws-only, exactly as before Task 2.13)', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const bus = new Bus(client, 'dock', { localTransport: null });
+
+    expect(bus.activeTransports()).toEqual({ local: false, obsws: true });
+  });
+
+  it('destroy() unsubscribes from every transport (no further deliveries) and tears down the local transport', async () => {
+    mock = await startMockObs();
+    const client = await makeClient(mock.url);
+    const fakeLocal = new FakeTransport();
+    const bus = new Bus(client, 'dock', { localTransport: fakeLocal });
+
+    const received: BusMessage[] = [];
+    bus.onMessage((m) => received.push(m));
+
+    bus.destroy();
+    expect(fakeLocal.destroyCalls).toBe(1);
+
+    fakeLocal.emit({ app: 'live-counter', v: 1, source: 'overlay', kind: 'hello', nonce: 'after-destroy', payload: {} });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(received).toHaveLength(0);
+  });
+
+  it('a client of null (no ws attempted at all) makes obsws permanently unavailable and never blocks a local-only send', async () => {
+    const bus = new Bus(null, 'overlay');
+    // No local transport is injected either (default resolution, unavailable
+    // under vitest's plain 'node' environment) — so THIS specific Bus has
+    // zero live transports, and send() should reject (nothing delivered).
+    expect(bus.activeTransports()).toEqual({ local: false, obsws: false });
+    await expect(bus.send('hello', {})).rejects.toThrow(/every transport/);
   });
 });

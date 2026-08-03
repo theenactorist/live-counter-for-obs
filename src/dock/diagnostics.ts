@@ -58,6 +58,14 @@ const WS_WRONG_PASSWORD_TEXT =
 const OVERLAY_SEEN_TEXT = 'Overlay connected';
 const OVERLAY_NOT_SEEN_TEXT =
   'Overlay not seen — add the overlay Browser Source (copy its URL below) or check that its scene is loaded';
+// Task 2.13 — the direct panel<->overlay transport's own row. Always
+// suffixed with the SAME help text (item 5 of the brief: "document that in
+// the row's help text") regardless of which transports are currently up,
+// since persistence/LIVE/add-overlay's dependency on obs-websocket doesn't
+// change with the transport's own state.
+const TRANSPORT_LABEL = 'Panel ↔ overlay';
+const TRANSPORT_HELP_TEXT =
+  'Session persistence, LIVE status, and Add overlay to scene still require the OBS WebSocket connection.';
 // Review fix (Important 1): NEVER "ok" — there is no hotkey bridge to check
 // yet, so claiming success would be misleading. `HOTKEYS_COPY_TEXT` is the
 // deliberately terser line "Copy diagnostics" emits (brief: exactly
@@ -333,6 +341,21 @@ function overlayRowState(lastSeenAt: number, silenceMs: number): { state: RowSta
     : { state: 'warn', text: OVERLAY_NOT_SEEN_TEXT };
 }
 
+// Task 2.13 — reflects Bus.activeTransports(). 'direct only' is 'ok' (not a
+// warning): it's the headline scenario this task exists for — counting,
+// presets, and the overlay are all fully functional with zero OBS setup.
+// 'OBS only' is 'warn' rather than 'ok': functionally identical to how this
+// app behaved before this task landed, but it DOES mean the new direct
+// transport isn't working on this CEF/browser, which is worth flagging (the
+// controller clarification's CEF-127-confirmation concern) even though
+// nothing is actually broken for the operator.
+function transportRowState(active: { local: boolean; obsws: boolean }): { state: RowState; text: string } {
+  if (active.local && active.obsws) return { state: 'ok', text: `${TRANSPORT_LABEL}: direct + OBS. ${TRANSPORT_HELP_TEXT}` };
+  if (active.local) return { state: 'ok', text: `${TRANSPORT_LABEL}: direct only. ${TRANSPORT_HELP_TEXT}` };
+  if (active.obsws) return { state: 'warn', text: `${TRANSPORT_LABEL}: OBS only. ${TRANSPORT_HELP_TEXT}` };
+  return { state: 'fail', text: `${TRANSPORT_LABEL}: not connected. ${TRANSPORT_HELP_TEXT}` };
+}
+
 // A real write+remove against the SAME localStorage the rest of the app
 // depends on (DockStorage itself guards every write internally — see
 // persistence.ts's safeSet/safeRemove — so this probe intentionally goes
@@ -390,10 +413,11 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   root.appendChild(el('div', { class: 'diag-section-title' }, 'Connection checklist'));
   const rowStorage = buildRow('diag-row-storage', 'Storage');
   const rowWs = buildRow('diag-row-ws', 'OBS WebSocket');
+  const rowTransport = buildRow('diag-row-transport', 'Transport');
   const rowOverlay = buildRow('diag-row-overlay', 'Overlay');
   const rowHotkeys = buildRow('diag-row-hotkeys', 'Hotkeys');
   const checklist = el('div', { 'data-testid': 'diagnostics-checklist', class: 'diag-checklist' });
-  checklist.append(rowStorage.row, rowWs.row, rowOverlay.row, rowHotkeys.row);
+  checklist.append(rowStorage.row, rowWs.row, rowTransport.row, rowOverlay.row, rowHotkeys.row);
   root.appendChild(checklist);
   // Static placeholder — Phase 3 gives this row a real check. Deliberately
   // 'neutral', never 'ok' (review fix, Important 1): nothing has actually
@@ -637,6 +661,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     const rows: Array<[string, RowHandle]> = [
       ['Storage', rowStorage],
       ['OBS WebSocket', rowWs],
+      ['Transport', rowTransport],
       ['Overlay', rowOverlay],
     ];
     const checklistText = [
@@ -668,6 +693,9 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
 
     const wsResult = wsRowState(opts.client);
     setRow(rowWs, wsResult.state, wsResult.text);
+
+    const transportResult = transportRowState(opts.bus.activeTransports());
+    setRow(rowTransport, transportResult.state, transportResult.text);
 
     const overlayResult = overlayRowState(lastOverlaySeenAt, silenceMs);
     setRow(rowOverlay, overlayResult.state, overlayResult.text);

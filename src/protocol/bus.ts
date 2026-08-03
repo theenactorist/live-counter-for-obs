@@ -1,8 +1,23 @@
-// Envelope send/receive over obs-websocket's BroadcastCustomEvent. Dock, lua
+// Envelope send/receive over TWO transports (Task 2.13): a direct, same-
+// browser-instance `LocalBusTransport` (BroadcastChannel + localStorage) and
+// obs-websocket's BroadcastCustomEvent (`ObsWsTransport`, below). Dock, lua
 // hotkey bridge, and the overlay all talk through this one shape so that any
 // listener can cheaply reject anything that isn't a valid, foreign (i.e. not
 // self-sent) live-counter message before touching its payload.
+//
+// `Bus` is a thin composite over both transports: `send()` fans out to every
+// available one (a failure/absence on one never blocks the other — it only
+// throws when EVERY transport failed, so a healthy dock with no OBS attached
+// at all never spams the diagnostics log over a "failure" that local
+// delivery already covered); `onMessage()` validates + dedupes by envelope
+// NONCE across transports (a message arriving via both local and ws fires
+// its listeners exactly once) before fanning out to every registered
+// listener. See task-2.13-brief.md for the full contract; obs-websocket
+// REMAINS required for session-mirror persistence, LIVE status, and the
+// add-overlay button (see src/dock/diagnostics.ts's transport row).
 import type { ObsWsClient } from './obsws-client.js';
+import { NonceWindow } from '../engine/counter.js';
+import { LocalBusTransport } from './local-bus.js';
 
 export type BusKind = 'state' | 'command' | 'hello' | 'overlay-status';
 
@@ -48,13 +63,117 @@ export function generateNonce(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export class Bus {
-  private readonly client: ObsWsClient;
-  private readonly source: BusMessage['source'];
+// A transport `Bus` can fan a send/receive across. `LocalBusTransport`
+// (local-bus.ts) and `ObsWsTransport` (below) both satisfy this shape
+// structurally. `send()` reports whether it genuinely delivered (not merely
+// "didn't throw") — a `LocalBusTransport` with both its channels unavailable
+// never throws but also never delivers anything, and `Bus.send()` needs to
+// tell that apart from a real success to decide whether EVERY transport
+// failed (see `Bus.send()` below).
+export interface BusTransport {
+  readonly available: boolean;
+  send(message: BusMessage): Promise<boolean> | boolean;
+  onMessage(fn: (raw: unknown) => void): () => void;
+  destroy?(): void;
+}
 
-  constructor(client: ObsWsClient, source: BusMessage['source']) {
+// Wraps an `ObsWsClient` in the same `BusTransport` shape `LocalBusTransport`
+// exposes, so `Bus` can treat both uniformly. `client === null` models an
+// overlay opened with no `?port`/`?pw` at all (Task 2.13 — see
+// src/overlay/main.ts): there is no ws client to attempt, and this transport
+// simply reports itself unavailable rather than the caller having to special-
+// case "no client" everywhere.
+class ObsWsTransport implements BusTransport {
+  private readonly client: ObsWsClient | null;
+
+  constructor(client: ObsWsClient | null) {
     this.client = client;
+  }
+
+  get available(): boolean {
+    return this.client !== null && this.client.state === 'identified';
+  }
+
+  async send(message: BusMessage): Promise<boolean> {
+    if (this.client === null) return false;
+    await this.client.request('BroadcastCustomEvent', { eventData: message });
+    return true;
+  }
+
+  onMessage(fn: (raw: unknown) => void): () => void {
+    if (this.client === null) return () => {};
+    const client = this.client;
+    return client.onEvent((eventType, eventData) => {
+      if (eventType !== 'CustomEvent') return;
+      fn(eventData);
+    });
+  }
+}
+
+// Builds the production default local transport. Guarded (belt-and-
+// suspenders on top of LocalBusTransport's own internal guards): any
+// unexpected construction failure here must still degrade to "no local
+// transport" rather than take the whole Bus down with it.
+function createDefaultLocalTransport(): BusTransport | null {
+  try {
+    return new LocalBusTransport();
+  } catch {
+    return null;
+  }
+}
+
+export interface BusOptions {
+  /**
+   * Test seam: override the local transport — pass a fake `BusTransport` to
+   * drive the composite's fan-out/dedupe logic deterministically, or `null`
+   * to disable it outright (ws-only, exactly as Bus behaved before Task
+   * 2.13). Omitted (the production default) constructs a real
+   * `LocalBusTransport`.
+   */
+  localTransport?: BusTransport | null;
+}
+
+// Generously sized (brief: "the dock broadcasts state on every change plus a
+// 2s heartbeat, the overlay heartbeats every 2s") — this window only needs to
+// outlast the brief window during which the SAME envelope's local delivery
+// and ws delivery (or vice versa) can both arrive, not an entire session.
+const DEDUP_WINDOW_CAPACITY = 1000;
+
+export class Bus {
+  private readonly source: BusMessage['source'];
+  private readonly local: BusTransport | null;
+  private readonly obsws: BusTransport;
+  private readonly transports: BusTransport[];
+  private readonly nonceWindow = new NonceWindow(DEDUP_WINDOW_CAPACITY);
+  private readonly listeners = new Set<(m: BusMessage) => void>();
+  private readonly transportUnsubs: Array<() => void>;
+
+  constructor(client: ObsWsClient | null, source: BusMessage['source'], opts: BusOptions = {}) {
     this.source = source;
+    this.obsws = new ObsWsTransport(client);
+    this.local = opts.localTransport !== undefined ? opts.localTransport : createDefaultLocalTransport();
+    this.transports = this.local ? [this.local, this.obsws] : [this.obsws];
+    this.transportUnsubs = this.transports.map((t) => t.onMessage((raw) => this.handleIncoming(raw)));
+  }
+
+  private handleIncoming(raw: unknown): void {
+    if (!isBusMessage(raw)) return;
+    // Drop own-source echoes: obs-websocket's BroadcastCustomEvent fans out
+    // to every identified client including the sender, and (for symmetry)
+    // handleIncoming applies the SAME rule to the local transport. Note this
+    // is a same-instance filter only — two independently-constructed Bus
+    // instances that happen to share a `source` tag (e.g. two dock tabs both
+    // passing 'dock') will see each other's messages as echoes and silently
+    // drop them too; the protocol assumes a single operator per source, not
+    // multiple concurrent writers of the same source.
+    if (raw.source === this.source) return;
+    // Cross-transport dedup: the SAME envelope (same nonce) can legitimately
+    // arrive via BOTH the local transport and obs-websocket (or via both of
+    // the local transport's own two channels) — deliver it to this Bus's
+    // listeners exactly once.
+    if (this.nonceWindow.has(raw.nonce)) return;
+    this.nonceWindow.add(raw.nonce);
+    for (const fn of [...this.listeners]) fn(raw);
   }
 
   async send(kind: BusKind, payload: unknown): Promise<void> {
@@ -66,23 +185,53 @@ export class Bus {
       nonce: generateNonce(),
       payload,
     };
-    await this.client.request('BroadcastCustomEvent', { eventData: envelope });
+    // Wraps each transport's send() call individually: a transport that
+    // throws SYNCHRONOUSLY (rather than returning a rejected promise) would
+    // otherwise abort the whole `.map()` before later transports even get
+    // invoked — `Promise.resolve(t.send(...))` inside its own try/catch
+    // converts either failure mode into a rejected promise up front, so
+    // every transport always gets its chance regardless of how an earlier
+    // one fails.
+    const attempts = this.transports.map((t) => {
+      try {
+        return Promise.resolve(t.send(envelope));
+      } catch (err) {
+        return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+    const settled = await Promise.allSettled(attempts);
+    const anyDelivered = settled.some((r) => r.status === 'fulfilled' && r.value === true);
+    if (anyDelivered) return;
+    // Every transport either rejected or reported "did not deliver" — this
+    // is the one case worth surfacing as a real failure (SessionController's
+    // broadcast() logs it). A healthy dock with the local transport working
+    // but no OBS attached never reaches here: the local send() above already
+    // counts as delivered.
+    const reasons = settled.map((r) => (r.status === 'rejected' ? describeError(r.reason) : 'transport unavailable'));
+    throw new Error(`bus send failed on every transport: ${reasons.join('; ')}`);
   }
 
   onMessage(fn: (m: BusMessage) => void): () => void {
-    return this.client.onEvent((eventType, eventData) => {
-      if (eventType !== 'CustomEvent') return;
-      if (!isBusMessage(eventData)) return;
-      // Drop own-source echoes: obs-websocket's BroadcastCustomEvent fans out
-      // to every identified client including the sender, so without this
-      // check a Bus would "hear" its own sends come back. Note this is a
-      // same-instance filter only — two independently-constructed Bus
-      // instances that happen to share a `source` tag (e.g. two dock tabs
-      // both passing 'dock') will see each other's messages as echoes and
-      // silently drop them too; the protocol assumes a single operator per
-      // source, not multiple concurrent writers of the same source.
-      if (eventData.source === this.source) return;
-      fn(eventData);
-    });
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
   }
+
+  /** Reflects each transport's CURRENT availability — feeds src/dock/diagnostics.ts's transport row. */
+  activeTransports(): { local: boolean; obsws: boolean } {
+    return { local: this.local?.available ?? false, obsws: this.obsws.available };
+  }
+
+  /** Tears down both transports' underlying listeners (BroadcastChannel/'storage'/ws onEvent) and drops every registered listener. Idempotent. */
+  destroy(): void {
+    for (const unsub of this.transportUnsubs) unsub();
+    this.transportUnsubs.length = 0;
+    this.local?.destroy?.();
+    this.listeners.clear();
+  }
+}
+
+function describeError(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }
