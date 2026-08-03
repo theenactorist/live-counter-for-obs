@@ -207,9 +207,34 @@ export class SessionController {
 
 - [ ] Spec first (RED) → implement → GREEN (all suites) → commit `feat(dock): preset export/import via clipboard`
 
+### Task 2.10: Live-view hierarchy, Reverse scoping, labels, clipboard buttons (operator feedback 2026-08-02 — PRD §9, AC 23)
+
+**Files:** Modify `src/dock/views/live.ts`, `src/dock/views/setup.ts`, `src/dock/diagnostics.ts`, `src/dock/dock.html` (styles); append tests to `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Contract:**
+1. **Animation labels** — the `setup-anim-type` select must render human labels, not raw enum values: `None`, `Scale / Pop`, `Fade`, `Slide up`, `Flip` (values unchanged: none/pop/fade/slideUp/flip). Same treatment for `setup-anim-target`: `Number only` / `Text only` / `Text and number`.
+2. **Reverse hidden in Manual** — `btn-reverse` renders only when `session.mode === 'automatic'`. Engine capability untouched. Test: manual session → `btn-reverse` absent; toggle to automatic → present and functional.
+3. **Live hierarchy** (PRD §9, exact order): readout → `btn-plus` then `btn-minus` (DOM order `+1` first; `.ctl-primary` styling, `+1` visually dominant — larger flex weight or explicit size; both ≥44 px) → secondary row (`btn-undo`, `btn-jump`) → automatic cluster (auto mode only) → `btn-show-hide` → visual divider (`data-testid=live-danger-divider`) → `btn-reset`, `btn-end` small + `.danger` muted styling. Tests: DOM order assertion (`btn-plus` precedes `btn-minus`), `+1` bounding box area strictly greater than `−1`, Reset/End bounding-box height strictly less than `+1`'s, divider present between utility and destructive groups, and the existing 300 px layout test still passes.
+4. **Paste buttons** — `settings-paste` beside the websocket password field and `import-paste` beside the preset-import textarea; each calls `navigator.clipboard.readText()` on click, fills the field, and on rejection shows an inline hint (`…-paste-error`: "Clipboard blocked — type it in manually") instead of failing silently. Tests: with clipboard permissions granted and a seeded clipboard, each button fills its field; with `readText` monkey-patched to reject, the hint appears and the field is untouched.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): live-view hierarchy, manual-mode reverse scoping, readable labels, paste buttons`
+
+### Task 2.11: Overlay layout gallery (operator feedback 2026-08-02 — PRD §8.8, AC 22 + 24)
+
+**Files:** Modify `src/engine/types.ts` (StyleConfig + schema), `src/engine/migrate.ts` (v1→v2 migration), `src/shared/default-style.ts`, `src/overlay/renderer.ts`, `src/dock/views/setup.ts`; tests in `tests/engine/types.test.ts`, `tests/engine/migrate.test.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:**
+1. **Type** — `export type OverlayLayout = 'numberOnly' | 'textBefore' | 'textAfter' | 'textAbove' | 'textBelow' | 'textBehind'`; `StyleConfig` gains required `layout: OverlayLayout`; `isStyleConfig` validates it. `PRESET_SCHEMA_VERSION` → 2 and `OverlaySnapshot.schemaVersion` → 2.
+2. **Migration** (exercises the machinery built in Task 1.9): `PRESET_MIGRATIONS[1]` adds `layout`, inferred as `textBefore` when the preset's `template` contains `{count}`, else `numberOnly` when `template` is null, else `textAbove`. Same inference for a v1 snapshot. Test: a hand-written v1 preset JSON loads as v2 with the inferred layout and every other field intact (AC 24).
+3. **Renderer** (`src/overlay/renderer.ts`) — implement all six shapes using the existing stable-node discipline (mutate in place, never rebuild; animations still target number/text/both correctly per layout). `textAbove`/`textBelow` stack via flex-direction on the content root; `textBehind` renders the label as an absolutely-positioned oversized ghost (`opacity` ~0.18, larger font, centered behind, `z-index` below the number, `pointer-events:none`) — transform/opacity only, no layout animation. Label substitution: inline layouts split on `{count}`; stacked/behind layouts render the label verbatim with any `{count}` substituted.
+4. **Setup gallery** — `setup-layout-gallery` containing six `setup-layout-<name>` buttons, each a mini thumbnail (pure CSS/DOM miniature of the shape, no images), the selected one marked `aria-pressed="true"` + `.selected`; clicking updates `ui.layout`, the live preview, and the saved StyleConfig. Template validation becomes layout-aware per PRD §8.8 (inline requires `{count}`, others do not); the `setup-template` field's label switches between "Template (must contain {count})" and "Label text".
+5. Tests: overlay renders each of the six layouts with the correct DOM shape/ordering (assert relative geometry: e.g. `textAbove` label's bounding box is above the number's; `textBehind` label overlaps the number and sits behind); gallery click switches preview without broadcasting state; inline-vs-plain validation per layout; AC 24 migration test.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(overlay): six-layout gallery with schema v2 migration`
+
 ---
 
-## Phase gate checklist (after Task 2.9)
+## Phase gate checklist (after Task 2.11)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)

@@ -170,9 +170,21 @@ The dock continuously shows: current value (dominant), `X of Y` (Y = configured 
 - Presets: create, save, load, update, duplicate, delete (with confirmation). Stale-edit conflicts (preset changed since loaded) require explicit overwrite confirmation.
 - **Export/import (added to scope 2026-08-01):** Export copies all presets as a JSON text block to the clipboard; import accepts a pasted block. Imports validate every preset through the schema/migration pipeline and are all-or-nothing on any failure; imported presets get fresh ids and never overwrite existing ones (title collisions gain an "(imported)" suffix). This is the supported way to move preset setups between computers.
 
-### 8.8 Display text
+### 8.8 Display text and layout
 
-- Number-only, or a template where `{count}` is the sole token (validated: a template missing `{count}` shows an inline error). Live example renders with the current value.
+**Layout gallery (added to scope 2026-08-02, operator feedback).** The overlay's shape is chosen from a visual gallery of six layouts, each shown as a clickable thumbnail in Setup with the live preview updating on selection:
+
+| Layout | Shape | Label text |
+|---|---|---|
+| `numberOnly` | `23` | none |
+| `textBefore` | `HALLELUJAH × 23` (inline) | template with `{count}` |
+| `textAfter` | `23 TIMES` (inline) | template with `{count}` |
+| `textAbove` | label stacked over the number | plain label, no token |
+| `textBelow` | number stacked over the label | plain label, no token |
+| `textBehind` | number in front, oversized ghost label behind | plain label, no token |
+
+- **Token rule by layout:** inline layouts (`textBefore`, `textAfter`) require `{count}` in the template and show an inline error without it. Stacked and behind layouts (`textAbove`, `textBelow`, `textBehind`) take a plain label and must NOT require a token; a `{count}` present in those is still substituted rather than shown literally. `numberOnly` ignores the label entirely.
+- Live example renders with the current value in the chosen layout.
 - Templates are plain text, HTML-escaped before rendering. A hostile template (e.g. containing `<img onerror=…>`) renders inert as literal text — covered by an acceptance test.
 - MVP glyph coverage is the bundled fonts' Latin repertoire; the editor warns when template characters fall outside it.
 
@@ -210,7 +222,20 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 
 ## 9. Interface structure
 
-Three dock views — **Presets** (search, create, load, duplicate, edit, delete; shows title, description, range, mode, updated date), **Setup** (counter, text, style, animation config; embedded preview + Test animation; save/update preset; start session), **Live** (giant current value; progress line; status chip; large +1/−1 — minimum 44 px touch targets; Undo, Jump to, Reverse; automatic controls when mode is automatic; Show/Hide; Reset and End session as guarded secondary actions; connection banners).
+Four dock views — **Presets** (search, create, load, duplicate, edit, delete, export/import; shows title, description, range, mode, updated date), **Setup** (counter, layout gallery, text, style, animation config; embedded preview + Test animation; save/update preset; start session), **Live** (below), **Diagnostics** (connection checklist, settings, overlay/dock URLs, event log).
+
+**Live view control hierarchy (specified 2026-08-02, operator feedback).** Ordered by frequency of use under pressure, with slip-resistance for destructive actions:
+
+1. **Readout** — giant current value, progress line, status chip. Dominant, top.
+2. **Primary** — **+1** then **−1**, side by side, the largest targets on screen with `+1` visually dominant (most-used action gets the biggest target). `+1` precedes `−1` in both DOM and visual order.
+3. **Secondary** — Undo, Jump to. Medium, one row.
+4. **Automatic cluster** — Start/Pause, Faster, Slower, rate readout. Rendered only in Automatic mode.
+5. **Utility** — Show/Hide overlay toggle.
+6. **Destructive** — Reset and End session: small, muted, danger-styled, below a visual divider, each behind its existing confirmation.
+
+**Reverse** is an Automatic-mode control only. In Manual mode it is hidden: `+1`/`−1` already move both ways, so its only effect there is changing which boundary completes — confusing for the operator, and the engine retains the capability for Automatic.
+
+**Clipboard.** OBS browser docks do not receive the OS clipboard shortcuts (Cmd/Ctrl+C/V), so every field that needs text moved in or out provides an explicit button: **Copy** (websocket-free clipboard API, with a select-to-copy fallback already specified in §8.7) and **Paste** (clipboard read on click) beside the websocket password field and the preset-import box.
 
 The Live view remains fully usable at 300 px dock width; primary controls never rely on hover or scroll off-screen.
 
@@ -246,6 +271,9 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 19. Dock closed during automatic run → overlay shows "control panel closed" hint within 6 s and holds the last value; dock reopened → session Paused at that value.
 20. Storage quota exhausted (fault injection) → session continues in memory with a visible warning; no crash; event log records it.
 21. Export copies a JSON block containing all presets; on a fresh profile, importing that block restores every preset with all settings intact (per AC 15); importing malformed JSON or a block containing any invalid preset changes nothing and shows an inline error.
+22. Each of the six layouts (§8.8) renders its documented shape on the overlay with the same value and style; switching layout in Setup updates the preview without touching the live session; inline layouts block save/start without `{count}`, stacked/behind layouts accept a plain label.
+23. With the OS clipboard shortcuts unavailable (OBS dock), the Paste buttons populate the websocket-password and preset-import fields, and the Copy buttons place the overlay URL and the preset export on the clipboard; a clipboard denial surfaces the select-to-copy fallback rather than a false success.
+24. A preset saved before the layout gallery existed (schema v1) loads after upgrade with a sensible layout inferred (inline when its template carries `{count}`, number-only when it has no template) and all other settings intact.
 
 ## 12. Test plan
 
