@@ -386,10 +386,25 @@
         padding: 1rem;
         margin-bottom: 0.75rem;
       }
+      /* Fix wave (review Important 2) — sized by setup.ts's
+         fitPreviewToScale() to exactly the preview's SCALED visual
+         footprint; `overflow: hidden` is a safety net (the computed scale
+         factor already makes the scaled content fit this box's own width),
+         never load-bearing on its own. */
+      .setup-preview-scale-box {
+        width: 100%;
+        overflow: hidden;
+      }
+      /* No `word-break`/wrapping rule here on purpose (fix wave, review
+         Important 2: the previous `word-break: break-word` let a long
+         label WRAP inside the narrow dock while the real overlay — whose
+         container is the full browser-source viewport — rendered the same
+         label on one line, a genuine preview/stream lie). setup.ts forces
+         `white-space: nowrap` on this element instead and scales the
+         SCALE-BOX wrapper above to fit — same wrapping behaviour as the
+         stream, just visually shrunk. */
       .setup-preview {
         font-variant-numeric: tabular-nums;
-        margin-bottom: 0.6rem;
-        word-break: break-word;
         display: inline-flex;
       }
       /* Task 2.14 — the preview's own layout (flex-direction/align-items,
@@ -397,12 +412,15 @@
          INLINE by ../../shared/overlay-presentation.js's applyPresentation
          (the same function the real overlay renderer calls), not by
          per-layout CSS classes here — see setup.ts's renderPreviewBlock().
-         '.setup-preview-ghost' survives purely as a TEST-identification
-         marker (setup.ts's updatePreviewTestids toggles it on the ghost
-         node so existing specs can assert on it); it carries no properties
-         of its own so it can never fight the inline styles the shared
-         module already applied to the exact same element. */
+         '.setup-preview-ghost' marks the ghost node for tests
+         (setup.ts's updatePreviewTestids toggles it); it restates the
+         SAME opacity applyPresentation() already sets inline on this exact
+         element (a harmless, redundant override — inline styles always win
+         over a class) so this ruleset carries a real declaration a future
+         cleanup pass won't mistake for dead/orphaned CSS and delete, which
+         would silently break every spec keyed on this class existing. */
       .setup-preview-ghost {
+        opacity: 0.18;
       }
       /* Task 2.11 — six-layout gallery */
       .layout-gallery {

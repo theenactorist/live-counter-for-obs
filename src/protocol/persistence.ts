@@ -20,6 +20,16 @@ export interface StorageLike {
   getItem(k: string): string | null;
   setItem(k: string, v: string): void;
   removeItem(k: string): void;
+  // Fix wave (Task 2.14 review) — OPTIONAL key-enumeration capability, used
+  // only by clearAllLocal() below. Real `window.localStorage` always has
+  // both (it's the standard `Storage` interface); a minimal test fake may
+  // omit them, in which case clearAllLocal() degrades to reporting a
+  // "cannot enumerate" write error via the same onWriteError callback every
+  // other failure in this class reports through, rather than throwing.
+  // Optional (not a breaking change to the interface) so every existing
+  // fake StorageLike across the test suite keeps satisfying it unchanged.
+  readonly length?: number;
+  key?(index: number): string | null;
 }
 
 export interface LoadOutcome<T> {
@@ -64,30 +74,25 @@ const LOG_MAX_ENTRIES = 500;
 const DEFAULT_SETTINGS: DockSettings = { wsPort: 4455, wsPassword: '', schemaVersion: 1 };
 
 /**
- * Removes every `lc.*` key from a real Web-Storage-shaped store (production:
- * `window.localStorage`) — the local half of Task 2.14's guarded "Reset
- * everything" diagnostics action (PRD §9, AC 26). Deliberately typed against
- * the standard `Storage` shape (`.length`/`.key()`/`.removeItem()`), NOT this
- * module's own minimal `StorageLike` — enumerating every key the store
- * happens to hold (not just the fixed handful this class already knows the
- * name of) needs the full Web Storage API, which DockStorage's own
- * read/write paths were never meant to require. This is what makes the reset
- * genuinely exhaustive: fixed keys (session/presets/snapshot/settings/log),
- * the local-bus transport's `lc.bus.v1`, and every dynamically-suffixed
- * `lc.quarantine.<suffix>` record, with no risk of the list drifting out of
- * sync with this file as new `lc.*` keys are added later.
- *
- * Collects matching keys into an array FIRST, then removes them in a second
- * pass — removing while iterating by index would shift every subsequent
- * index and silently skip keys.
+ * Every `lc.*` key currently held by `store` — the local half of Task 2.14's
+ * guarded "Reset everything" diagnostics action (PRD §9, AC 26). Read-only;
+ * removal is `DockStorage.clearAllLocal()`'s job below (routed through
+ * `safeRemove` so ONE key's removal failing is caught+reported without
+ * preventing the others). Enumerating every key the store happens to hold —
+ * fixed keys (session/presets/snapshot/settings/log), the local-bus
+ * transport's `lc.bus.v1`, and every dynamically-suffixed
+ * `lc.quarantine.<suffix>` record — needs `length`/`key()`, which this
+ * module's own minimal `StorageLike` only carries optionally (see its own
+ * doc comment); `clearAllLocal()` checks for their presence before calling
+ * this.
  */
-export function clearAllLcKeys(store: Pick<Storage, 'length' | 'key' | 'removeItem'>): void {
+function lcKeysIn(store: Required<Pick<StorageLike, 'length' | 'key'>>): string[] {
   const keys: string[] = [];
   for (let i = 0; i < store.length; i++) {
     const k = store.key(i);
     if (k !== null && k.startsWith('lc.')) keys.push(k);
   }
-  for (const k of keys) store.removeItem(k);
+  return keys;
 }
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
@@ -412,16 +417,49 @@ export class DockStorage {
   }
 
   /**
+   * The local half of "Reset everything" (Task 2.14, AC 26; hardened per
+   * fix-wave review) — removes every `lc.*` key from `this.local`, the SAME
+   * injected store every other write in this class goes through. Fix-wave
+   * correction: the original version reached for a bare `window.localStorage`
+   * directly from diagnostics.ts, bypassing this class's own
+   * injectable-storage seam entirely (unlike every other mutating method
+   * here) and throwing straight out of an operator's confirm click on any
+   * failure, with the confirm box already hidden by then — no feedback at
+   * all. Now: enumeration failures (or a store that doesn't support
+   * `length`/`key` at all) and per-key removal failures alike are reported
+   * via the same `onWriteError` callback `safeSet`/`safeRemove` already use
+   * — surfaced through main.ts's existing "local storage write failed"
+   * banner, the same path every other storage failure in this app takes.
+   */
+  clearAllLocal(): void {
+    const store = this.local;
+    if (typeof store.length !== 'number' || typeof store.key !== 'function') {
+      this.reportWriteError('lc.*', new Error('This storage does not support key enumeration — nothing was cleared.'));
+      return;
+    }
+    let keys: string[];
+    try {
+      keys = lcKeysIn(store as Required<Pick<StorageLike, 'length' | 'key'>>);
+    } catch (err) {
+      this.reportWriteError('lc.*', err);
+      return;
+    }
+    for (const k of keys) this.safeRemove(k);
+  }
+
+  /**
    * The mirror half of "Reset everything" (Task 2.14, AC 26): clears both
    * persistent-data slots this class ever writes to, and (unlike the fire-
    * and-forget `mirrorSet` every other write uses) resolves only once both
    * attempts have SETTLED — never rejecting, even when there is no client or
-   * it is not currently identified. The caller (diagnostics.ts) awaits this
-   * before re-booting a fresh DockStorage instance: without that ordering, a
-   * still-in-flight clear could lose a race against the FRESH instance's own
-   * GetPersistentData read on the very next boot, which would resurrect the
-   * just-reset session/presets from a mirror that had not actually cleared
-   * yet.
+   * it is not currently identified. The caller (main.ts's `onResetAll`)
+   * awaits this — AFTER disposing the old controller and clearing local
+   * storage, BEFORE rebooting — for two reasons: (1) a still-in-flight clear
+   * could otherwise lose a race against a FRESH instance's own
+   * GetPersistentData read on the very next boot, resurrecting the
+   * just-reset session/presets from a mirror that hadn't actually cleared
+   * yet; (2) this call itself needs the CURRENT (not-yet-closed) client
+   * connection to reach OBS at all.
    */
   async resetPersistentMirror(): Promise<void> {
     if (this.client === null) return;

@@ -51,7 +51,6 @@ import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
-import { inlineContent, substituteLabel } from '../../shared/template-content.js';
 import { createPresentationNodes, applyPresentation, type PresentationNodes } from '../../shared/overlay-presentation.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
@@ -299,6 +298,59 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   previewNodes.contentRoot.dataset.testid = 'setup-preview';
   previewNodes.contentRoot.classList.add('setup-preview');
   previewNodes.numberEl.dataset.testid = 'setup-preview-number';
+  // Fix wave (review Important 2) — Setup-preview-ONLY styling, layered on
+  // top of what applyPresentation() itself sets (never touching the shared
+  // module, which stays byte-identical to what the overlay uses): forces
+  // single-line layout so a long label is measured/scaled to fit rather
+  // than WRAPPING inside the narrow dock — the real overlay's own
+  // `contentRoot` never wraps a label either (its container is the full
+  // browser-source viewport, effectively always wide enough), so a preview
+  // that wraps while the stream renders one line would be a real, visible
+  // lie about what the audience sees. `white-space` inherits to every
+  // child span that doesn't set its own (behindEl already sets one
+  // explicitly in the shared module; same value, harmless).
+  previewNodes.contentRoot.style.whiteSpace = 'nowrap';
+
+  // The box `fitPreviewToScale()` (below) scales via CSS transform to keep
+  // that natural, unwrapped preview inside the 300 px dock — assigned by
+  // `renderPreviewBlock()` on every render() call (a fresh element each
+  // time, since render() rebuilds the surrounding form from scratch).
+  let previewScaleBox: HTMLElement | null = null;
+
+  // Scales `previewScaleBox` down (uniformly, preserving aspect ratio) just
+  // enough that the preview's TRUE, unwrapped width fits the box's own
+  // available width — never up (a short label/number never gets
+  // artificially enlarged). The scale lives on the WRAPPER, never on
+  // `previewNodes.contentRoot` itself (same wrapper-vs-animated-node split
+  // already established for the textBehind ghost, above) — Test-animation's
+  // WAAPI `.animate()` call targets `contentRoot` directly (`setup-preview`),
+  // and a WAAPI animation's own `transform` keyframes fully REPLACE an
+  // element's inline `transform` for the animation's duration; putting the
+  // fit-scale there instead would have it visibly flash to full,
+  // unscaled size on every Test-animation click.
+  function fitPreviewToScale(): void {
+    const scaleBox = previewScaleBox;
+    if (!scaleBox) return;
+    // Reset before measuring — a previous render's own scale/height must
+    // never skew THIS render's natural-size read.
+    scaleBox.style.transform = 'none';
+    scaleBox.style.height = '';
+    const naturalWidth = previewNodes.contentRoot.scrollWidth;
+    const naturalHeight = previewNodes.contentRoot.scrollHeight;
+    const available = scaleBox.clientWidth;
+    if (available > 0 && naturalWidth > available) {
+      const factor = available / naturalWidth;
+      scaleBox.style.transformOrigin = 'top left';
+      scaleBox.style.transform = `scale(${factor})`;
+      // Compensates the wrapper's own LAYOUT height to the scaled-down
+      // VISUAL height — transform never changes an element's own layout
+      // footprint, so without this the box would keep its full, unscaled
+      // height and leave a tall empty gap beneath the now-smaller preview.
+      scaleBox.style.height = `${naturalHeight * factor}px`;
+    } else {
+      scaleBox.style.height = `${naturalHeight}px`;
+    }
+  }
 
   // Assigns 'setup-preview-label'/'setup-preview-label-after' to whichever
   // node is actually carrying the label for the CURRENT layout — mirrors the
@@ -431,38 +483,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function previewValue(): number {
     const s = parseIntStrict(ui.startValue);
     return s !== null && isValidCountValue(s) ? s : 0;
-  }
-
-  // Feeds the `setup-template-example` hint only (a single-line "what would
-  // this look like" indicator) — the actual per-layout shape is what
-  // renderPreviewBlock()'s `setup-preview` element itself renders, below.
-  // Layout-aware (fix wave): mirrors applyLayoutContent()'s real-renderer
-  // logic via the shared inlineContent/substituteLabel helpers, always
-  // including the number (review minor — a stacked/behind label with no
-  // token used to render as just the bare label text, with no digit
-  // anywhere in the hint).
-  function previewText(): string {
-    const v = previewValue();
-    const valueText = String(v);
-    // numberOnly ignores the label entirely (PRD §8.8) — same rule
-    // applyLayoutContent() enforces in the real overlay renderer.
-    if (ui.layout === 'numberOnly') return valueText;
-    const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
-    if (ui.layout === 'textAfter') {
-      const { before, after } = inlineContent('textAfter', template);
-      return `${before}${valueText}${after}`;
-    }
-    if (ui.layout === 'textBefore') {
-      const { before, after } = inlineContent('textBefore', template);
-      return `${before}${valueText}${after}`;
-    }
-    // textAbove/textBelow/textBehind: a token in the label already
-    // substitutes the number in-place (substituteLabel) — appending it AGAIN
-    // would duplicate it. A token-less label gets the number appended so the
-    // hint never shows just the bare label with no digit anywhere.
-    if (template === null) return valueText;
-    if (template.includes('{count}')) return substituteLabel(template, valueText);
-    return `${template} ${valueText}`;
   }
 
   async function performSave(force: boolean): Promise<void> {
@@ -868,20 +888,29 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // visible, at the TOP of the form (per the PRD §9 order) — `render()`
   // below appends the returned wrap wherever that order says, but this
   // function's own job is just building it fresh each call from `nodes`'
-  // already-mutated state.
+  // already-mutated state. Test animation moved to the Animation group
+  // (PRD §9 item 6) — see `renderTestAnimButton()` below; `setup-preview`
+  // (the animation's actual target) lives here regardless of where its own
+  // trigger button is mounted.
   function renderPreviewBlock(): HTMLElement {
     const wrap = el('div', { class: 'setup-preview-wrap' });
+    const scaleBox = el('div', { class: 'setup-preview-scale-box' });
+    previewScaleBox = scaleBox;
 
     const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
     applyPresentation(previewNodes, { style: buildStyle(), template, value: String(previewValue()) });
     updatePreviewTestids(ui.layout);
 
-    wrap.appendChild(previewNodes.contentRoot);
+    scaleBox.appendChild(previewNodes.contentRoot);
+    wrap.appendChild(scaleBox);
+    return wrap;
+  }
 
+  // PRD §9 item 6 ("Animation — type, target, duration, Test animation").
+  function renderTestAnimButton(): HTMLElement {
     const testBtn = button('setup-test-anim', 'Test animation', { disabled: ui.animType === 'none' });
     testBtn.addEventListener('click', () => playTestAnimation());
-    wrap.appendChild(testBtn);
-    return wrap;
+    return testBtn;
   }
 
   // Task 2.14 — a `<fieldset>`/`<legend>` group with a visible heading, per
@@ -985,7 +1014,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         ),
       );
     }
-    labelChildren.push(el('div', { 'data-testid': 'setup-template-example', class: 'field-hint' }, previewText()));
+    // Fix wave (review minor): the old one-line "setup-template-example"
+    // hint was a SECOND, hand-written summary of what the label would
+    // render as — now that the real WYSIWYG preview sits at the top of this
+    // form (rendered by the exact same shared code the overlay uses), a
+    // parallel hand-rolled string is pure redundancy with a real risk of
+    // contradicting it (its stacked/behind-layout branch used to invent a
+    // "label value" concatenation the actual renderer never produces).
+    // Deleted rather than reconciled — the real preview already shows this,
+    // more faithfully, above.
     labelChildren.push(
       formRow(
         'Label size (px)',
@@ -1055,13 +1092,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     counterStyleChildren.push(formRow('Typeface', renderFontSelect()));
     root.appendChild(group('setup-group-counter-style', 'Counter style', counterStyleChildren));
 
-    // PRD §9 item 6 — Animation: type, target, duration, Test animation
-    // (Test animation itself lives inside the preview block above).
+    // PRD §9 item 6 — Animation: type, target, duration, Test animation.
     root.appendChild(
       group('setup-group-animation', 'Animation', [
         formRow('Animation type', renderAnimTypeSelect()),
         formRow('Animation target', renderAnimTargetSelect()),
         formRow('Animation duration (ms)', renderAnimDuration()),
+        renderTestAnimButton(),
       ]),
     );
 
@@ -1112,6 +1149,12 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     root.appendChild(actions);
 
     container.appendChild(root);
+    // Measuring the preview's natural (unwrapped) size requires it to
+    // already be part of the connected document — `scrollWidth`/`scrollHeight`
+    // on a still-detached tree read 0 (or an unreliable value) in every
+    // browser this project targets, so this MUST run after the attach
+    // above, never inside renderPreviewBlock() itself.
+    fitPreviewToScale();
     restoreFocus(container, focusSnapshot);
   }
 

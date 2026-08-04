@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
-import { DockStorage, clearAllLcKeys, type StorageLike, type OverlaySnapshot } from '../../src/protocol/persistence.js';
+import { DockStorage, type StorageLike, type OverlaySnapshot } from '../../src/protocol/persistence.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession, serializePresets } from '../../src/engine/migrate.js';
@@ -24,6 +24,17 @@ class MapStorage implements StorageLike {
   }
   keys(): string[] {
     return [...this.map.keys()];
+  }
+  // Fix wave (Task 2.14 review) — the OPTIONAL enumeration capability
+  // StorageLike now carries (real window.localStorage always has both),
+  // needed so DockStorage.clearAllLocal() tests below can exercise it
+  // through this SAME fake every other test in this file already uses,
+  // rather than a separate one-off class.
+  get length(): number {
+    return this.map.size;
+  }
+  key(index: number): string | null {
+    return [...this.map.keys()][index] ?? null;
   }
 }
 
@@ -617,59 +628,85 @@ describe('DockStorage — write failures never throw', () => {
 });
 
 // --- Task 2.14: Reset everything (PRD §9, AC 26) --------------------------
+// Fix wave (review): clearAllLocal() is a DockStorage METHOD, not a bare
+// exported function taking a raw `window.localStorage` — it routes through
+// `this.local`, the SAME injected StorageLike every other write in this
+// class uses, so a test can exercise it via an injected fake exactly like
+// every other DockStorage write path in this file.
 
-/** A minimal stand-in for the real Web Storage API (window.localStorage in production) — length/key()/removeItem(), the enumeration surface clearAllLcKeys() needs and DockStorage's own minimal StorageLike deliberately lacks. */
-class FakeWebStorage {
-  private readonly map = new Map<string, string>();
-  get length(): number {
-    return this.map.size;
-  }
-  key(index: number): string | null {
-    return [...this.map.keys()][index] ?? null;
-  }
-  getItem(k: string): string | null {
-    return this.map.has(k) ? (this.map.get(k) as string) : null;
-  }
-  setItem(k: string, v: string): void {
-    this.map.set(k, v);
-  }
-  removeItem(k: string): void {
-    this.map.delete(k);
-  }
-}
-
-describe('clearAllLcKeys', () => {
+describe('DockStorage.clearAllLocal', () => {
   it('removes every lc.* key (fixed and dynamically-suffixed) and leaves unrelated keys untouched', () => {
-    const store = new FakeWebStorage();
-    store.setItem('lc.session.v1', '{}');
-    store.setItem('lc.presets.v1', '[]');
-    store.setItem('lc.snapshot.v1', '{}');
-    store.setItem('lc.settings.v1', '{}');
-    store.setItem('lc.log.v1', '[]');
-    store.setItem('lc.bus.v1', '{}');
-    store.setItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd', 'garbage');
-    store.setItem('lc.diag-probe.v1', '1');
-    store.setItem('someOtherApp.settings', 'keep me');
-    store.setItem('unrelated', 'keep me too');
+    const local = new MapStorage();
+    local.setItem('lc.session.v1', '{}');
+    local.setItem('lc.presets.v1', '[]');
+    local.setItem('lc.snapshot.v1', '{}');
+    local.setItem('lc.settings.v1', '{}');
+    local.setItem('lc.log.v1', '[]');
+    local.setItem('lc.bus.v1', '{}');
+    local.setItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd', 'garbage');
+    local.setItem('lc.diag-probe.v1', '1');
+    local.setItem('someOtherApp.settings', 'keep me');
+    local.setItem('unrelated', 'keep me too');
+    const storage = new DockStorage(local, null);
 
-    clearAllLcKeys(store);
+    storage.clearAllLocal();
 
-    expect(store.getItem('lc.session.v1')).toBeNull();
-    expect(store.getItem('lc.presets.v1')).toBeNull();
-    expect(store.getItem('lc.snapshot.v1')).toBeNull();
-    expect(store.getItem('lc.settings.v1')).toBeNull();
-    expect(store.getItem('lc.log.v1')).toBeNull();
-    expect(store.getItem('lc.bus.v1')).toBeNull();
-    expect(store.getItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd')).toBeNull();
-    expect(store.getItem('lc.diag-probe.v1')).toBeNull();
-    expect(store.getItem('someOtherApp.settings')).toBe('keep me');
-    expect(store.getItem('unrelated')).toBe('keep me too');
+    expect(local.getItem('lc.session.v1')).toBeNull();
+    expect(local.getItem('lc.presets.v1')).toBeNull();
+    expect(local.getItem('lc.snapshot.v1')).toBeNull();
+    expect(local.getItem('lc.settings.v1')).toBeNull();
+    expect(local.getItem('lc.log.v1')).toBeNull();
+    expect(local.getItem('lc.bus.v1')).toBeNull();
+    expect(local.getItem('lc.quarantine.2026-08-03T00-00-00-000Z-ab12cd')).toBeNull();
+    expect(local.getItem('lc.diag-probe.v1')).toBeNull();
+    expect(local.getItem('someOtherApp.settings')).toBe('keep me');
+    expect(local.getItem('unrelated')).toBe('keep me too');
   });
 
   it('is a no-op on an empty store (never throws)', () => {
-    const store = new FakeWebStorage();
-    expect(() => clearAllLcKeys(store)).not.toThrow();
-    expect(store.length).toBe(0);
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    expect(() => storage.clearAllLocal()).not.toThrow();
+    expect(local.length).toBe(0);
+  });
+
+  it('reports via onWriteError (never throws) when the injected store does not support key enumeration', () => {
+    // A minimal StorageLike — deliberately omits length/key, exactly the
+    // shape every OTHER fake in this file (before this task) already had.
+    const local: StorageLike = {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+    };
+    const errors: string[] = [];
+    const storage = new DockStorage(local, null, (key) => errors.push(key));
+
+    expect(() => storage.clearAllLocal()).not.toThrow();
+    expect(errors).toContain('lc.*');
+  });
+
+  it('a failing removeItem is caught and reported per-key, without preventing the others from being removed', () => {
+    const local = new ThrowingStorage();
+    // ThrowingStorage's own getItem/removeItem always throw/return null; a
+    // hand-built wrapper adds just enough enumeration to drive
+    // clearAllLocal() into calling safeRemove() for two real keys, one of
+    // which (the underlying ThrowingStorage) always fails.
+    const keys = ['lc.session.v1', 'lc.presets.v1'];
+    const enumerable: StorageLike = {
+      getItem: local.getItem.bind(local),
+      setItem: local.setItem.bind(local),
+      removeItem: local.removeItem.bind(local),
+      length: keys.length,
+      key: (i) => keys[i] ?? null,
+    };
+    const errors: string[] = [];
+    const storage = new DockStorage(enumerable, null, (key) => errors.push(key));
+
+    expect(() => storage.clearAllLocal()).not.toThrow();
+    // Both keys' removal failures were reported individually — the first
+    // failing did not abort the loop before the second was even attempted.
+    expect(errors).toContain('lc.session.v1');
+    expect(errors).toContain('lc.presets.v1');
   });
 });
 

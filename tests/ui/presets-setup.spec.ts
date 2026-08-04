@@ -6,7 +6,8 @@ import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { createSession } from '../../src/engine/counter.js';
-import type { OverlayLayout, StyleConfig } from '../../src/engine/types.js';
+import type { OverlayLayout } from '../../src/engine/types.js';
+import { DEFAULT_STYLE } from '../../src/shared/default-style.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
@@ -221,7 +222,7 @@ test.describe('dock Setup + Presets views', () => {
   // identically, which was the bug. This replaces the old
   // "template validation: missing {count} blocks Save and Start..." test,
   // which asserted the (now-removed) blocking behavior.
-  test('a label with no {count} never blocks Save/Start; a token still substitutes into the live example', async ({
+  test('a label with no {count} never blocks Save/Start; a token still substitutes into the live WYSIWYG preview', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -237,12 +238,17 @@ test.describe('dock Setup + Presets views', () => {
       await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeEnabled();
       // Default layout (textBefore): a token-less label is placed before the
-      // number, exactly the operator's literal text with nothing inserted.
-      await expect(page.getByTestId('setup-template-example')).toHaveText('no token here7');
+      // number, exactly the operator's literal text with nothing inserted —
+      // fix wave (review minor): asserted against the REAL WYSIWYG preview
+      // now, not a second hand-written summary string (deleted; it risked
+      // contradicting this exact preview).
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('no token here');
+      await expect(page.getByTestId('setup-preview-number')).toHaveText('7');
 
       await page.getByTestId('setup-template').fill('Lives: {count}');
       await expect(page.getByTestId('setup-template-error')).toHaveCount(0);
-      await expect(page.getByTestId('setup-template-example')).toHaveText('Lives: 7');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('Lives: ');
+      await expect(page.getByTestId('setup-preview-number')).toHaveText('7');
       await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeEnabled();
     } finally {
@@ -1698,20 +1704,20 @@ test.describe('dock Setup + Presets views', () => {
         await page.getByTestId('tab-setup').click();
         await page.getByTestId('setup-start').fill('5');
 
-        const commonStyle: Omit<StyleConfig, 'layout'> = {
-          fontFamily: 'Inter',
-          fontWeight: 700,
-          numberSizePx: 96,
-          textSizePx: 24,
-          numberColor: '#ffffff',
-          textColor: '#cccccc',
-          alignH: 'center',
-          alignV: 'middle',
-          outline: null,
-          shadow: null,
-          background: null,
-          paddingPx: 8,
-        };
+        // Fix wave (review Important 3): driven from the SAME exported
+        // fixture the overlay renderer's own fallback uses
+        // (src/shared/default-style.ts), rather than a hand-copied literal
+        // — a future change to any of these numbers now automatically
+        // flows into BOTH sides of this comparison instead of silently
+        // desyncing the test from reality. Setup's own defaultUiState()
+        // derives byte-identical numbers (DEFAULT_NUMBER_SIZE_PX=96,
+        // DEFAULT_TEXT_SIZE_PX=24, etc.) for exactly this reason: if either
+        // side ever drifts from DEFAULT_STYLE, the computed-style
+        // comparison below (not just the hand-derived one here) will catch
+        // it, since the OVERLAY side is built from this import while the
+        // SETUP side is read live off the actual rendered page, never
+        // hand-typed.
+        const { layout: _defaultLayout, ...commonStyle } = DEFAULT_STYLE;
         const session = createSession({ startValue: 0, finishValue: 1000, mode: 'manual' }, Date.now());
 
         const layouts: OverlayLayout[] = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
@@ -1735,6 +1741,24 @@ test.describe('dock Setup + Presets views', () => {
           await page.getByTestId(`setup-layout-${layout}`).click();
           await page.getByTestId('setup-template').fill(template ?? '');
           await expect(page.getByTestId('setup-preview-number')).toHaveText('5');
+
+          // Fix wave (review Important 3) — a genuine computed-style
+          // comparison across the two pages, not just relative geometry:
+          // for the SAME StyleConfig, the number's actual font-size and
+          // font-family must read identically on both. (Setup's preview
+          // may be visually SCALED via a CSS transform to fit the 300 px
+          // dock — transform never changes computed style values, only
+          // rendered position/size, so this holds regardless of scaling.)
+          const overlayNumberStyle = await overlayPage.getByTestId('overlay-number').evaluate((el) => {
+            const s = getComputedStyle(el);
+            return { fontSize: s.fontSize, fontFamily: s.fontFamily };
+          });
+          const setupNumberStyle = await page.getByTestId('setup-preview-number').evaluate((el) => {
+            const s = getComputedStyle(el);
+            return { fontSize: s.fontSize, fontFamily: s.fontFamily };
+          });
+          expect(setupNumberStyle.fontSize).toBe(overlayNumberStyle.fontSize);
+          expect(setupNumberStyle.fontFamily).toBe(overlayNumberStyle.fontFamily);
 
           if (layout === 'numberOnly') {
             // Neither page has a label node showing anything.
@@ -1984,6 +2008,84 @@ test.describe('dock Setup + Presets views', () => {
       // — the field never resurfaces during editing either.
       await row.getByTestId('preset-load').click();
       await expect(page.getByTestId('setup-description')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Fix wave (review minor) — the ONE surviving path that must preserve an
+  // older preset's description now that Setup's own Save always writes
+  // null: export/import never touches the field at all, so a preset
+  // carrying one round-trips through a full export -> wipe -> import cycle
+  // untouched (presets.ts's onExport/onImportApply spread the loaded Preset
+  // object through as-is; neither reads nor writes `description`).
+  test('export→import preserves an older preset\'s description untouched, even though Setup can no longer show or edit it', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+
+      // Seed directly into storage — the ONLY way to create a preset with a
+      // description now that Setup has no field for it (mirrors an older
+      // preset saved before this change, or one hand-authored/imported from
+      // elsewhere).
+      await page.evaluate(() => {
+        const now = new Date().toISOString();
+        const preset = {
+          schemaVersion: 2,
+          id: 'desc-roundtrip',
+          title: 'Has A Description',
+          description: 'Carried through export/import untouched',
+          startValue: 0,
+          finishValue: 10,
+          mode: 'manual',
+          intervalSeconds: 1,
+          template: null,
+          style: {
+            fontFamily: 'Inter',
+            fontWeight: 700,
+            numberSizePx: 96,
+            textSizePx: 24,
+            numberColor: '#ffffff',
+            textColor: '#cccccc',
+            alignH: 'center',
+            alignV: 'middle',
+            outline: null,
+            shadow: null,
+            background: null,
+            paddingPx: 8,
+            layout: 'numberOnly',
+          },
+          animation: { type: 'none', target: 'number', durationMs: 300 },
+          completion: { kind: 'hold' },
+          createdAt: now,
+          updatedAt: now,
+        };
+        window.localStorage.setItem('lc.presets.v1', JSON.stringify([preset]));
+      });
+
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
+      const clip = await page.evaluate(() => navigator.clipboard.readText());
+      const envelope = JSON.parse(clip) as { presets: Array<{ description: string | null }> };
+      expect(envelope.presets[0]!.description).toBe('Carried through export/import untouched');
+
+      // Wipe, then import back from the pasted envelope alone.
+      await page.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(clip);
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toBeVisible();
+
+      const stored = await page.evaluate(
+        () => JSON.parse(window.localStorage.getItem('lc.presets.v1') ?? '[]') as Array<{ description: string | null }>,
+      );
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.description).toBe('Carried through export/import untouched');
     } finally {
       await mock.close();
     }

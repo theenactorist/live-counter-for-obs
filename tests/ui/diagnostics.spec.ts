@@ -1215,4 +1215,67 @@ test.describe('Diagnostics view', () => {
     await expect.poll(() => allLcKeys(page)).toEqual([]);
     await expect(page.getByTestId('diag-reset-done')).toBeVisible();
   });
+
+  // Fix wave (review Important 1) — the OLD controller/timer must be
+  // stopped BEFORE storage is cleared, not after. The original sequence
+  // cleared localStorage + awaited the (real websocket round-trip) mirror
+  // clear, THEN rebooted — which only tears down the old controller INSIDE
+  // boot(), at the very end. An automatic session's still-running AutoTimer
+  // ticks independently of that await; a tick landing in that window calls
+  // storage.saveSession() (writing a fresh `lc.session.v1` right back) —
+  // the operator was told "everything cleared" and got a resurrected
+  // session on the next boot.
+  test('reset-all: an automatic session mid-tick does not resurrect after the reset (old controller/timer stopped BEFORE storage is cleared)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('1000');
+      await page.getByTestId('setup-mode').selectOption('automatic');
+      // The fastest available tick (SPEED_LEVELS' own minimum) — the
+      // shortest interval in which a still-running timer could land a tick
+      // inside the widened window below.
+      await page.getByTestId('setup-interval').selectOption('0.25');
+      await page.getByTestId('setup-start-session').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      // A freshly-created automatic session starts 'paused' (createSession's
+      // own rule), NOT ticking — `auto-start` ("Resume", here) is what
+      // actually arms the AutoTimer. Without this click there is no
+      // still-running timer for the race below to matter at all.
+      await page.getByTestId('auto-start').click();
+
+      // Let it actually start ticking before touching Diagnostics.
+      await page.waitForTimeout(400);
+
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // Widens resetPersistentMirror()'s own round trip well past several
+      // 0.25s tick intervals — if the old controller/timer were NOT
+      // disposed before this await (the bug this test guards against), at
+      // least one tick would land in the window and write a fresh session
+      // straight back into the storage this action just cleared.
+      mock.delayResponsesFor('SetPersistentData', 1200);
+
+      await page.getByTestId('diag-reset-all').click();
+      await page.getByTestId('reset-all-confirm').click();
+
+      // Past the delayed mirror clear, with a settle margin — several
+      // 0.25s tick intervals have elapsed inside this window.
+      await page.waitForTimeout(1600);
+
+      await expect.poll(() => allLcKeys(page)).toEqual([]);
+
+      // Back to first-run on Live too — no resurrected session anywhere.
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('connect-card')).toBeVisible();
+      await expect(page.getByTestId('current-value')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

@@ -309,16 +309,45 @@ function main(): void {
       storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
       boot(port, password);
     };
-    // Task 2.14 — diagnostics.ts's guarded "Reset everything" action already
-    // cleared every `lc.*` localStorage key + the persistent-data mirror by
-    // the time this fires; re-reading settings here (rather than hardcoding
-    // a default) is what actually proves the reboot lands on first-run state
-    // — `bootStorage.loadSettings()` now finds nothing on disk and returns
-    // its own built-in defaults, the same path a genuinely fresh install
-    // takes. Never `location.reload()` (brief): Playwright cannot drive a
-    // real page navigation from inside the page that is reloading, and a
-    // reload would also discard the one-time `justReset` flag below.
-    const onResetAll = (): void => {
+    // Task 2.14, hardened per fix-wave review (Important 1) — captures THIS
+    // boot()'s controller/storage the same way `storageForSave` does above,
+    // for the same reason: the outer bindings get reassigned by a LATER
+    // reconnect, and this callback must always act against the instances it
+    // was actually built to tear down.
+    const controllerForReset = controller;
+    const storageForReset = storage;
+    const onResetAll = async (): Promise<void> => {
+      // Stop the OLD controller/timer/heartbeat FIRST — before touching
+      // storage at all. dispose() is idempotent (this same instance gets
+      // dispose()'d again, harmlessly, by boot()'s own teardown block below
+      // once it runs) and, per its own contract, makes dispatch() a
+      // PERMANENT no-op from this line on. Without this ordering, an
+      // automatic session's still-running AutoTimer could dispatch a 'tick'
+      // in the window this function awaits below (which can be SECONDS
+      // wide — resetPersistentMirror() waits on a real websocket round
+      // trip) — that tick calls storage.saveSession() (and mirrorSet()),
+      // writing a fresh session right back after clearAllLocal() below had
+      // already removed it. The operator would be told "everything
+      // cleared" and then find a resurrected session on the next boot.
+      controllerForReset.dispose();
+
+      // Local half — routes through the injected storage seam (never a
+      // bare `window.localStorage` reach); failures are caught and reported
+      // via the existing onWriteError -> banner-ws path, never thrown here.
+      storageForReset.clearAllLocal();
+
+      // Mirror half — still needs the CURRENT (not yet closed) client
+      // connection, so this runs before boot()'s own teardown below closes
+      // it. Awaited: a still-in-flight clear could otherwise lose a race
+      // against the fresh boot's own GetPersistentData read.
+      await storageForReset.resetPersistentMirror();
+
+      // `bootStorage.loadSettings()` now finds nothing on disk (just
+      // cleared above) and returns its own built-in defaults — the same
+      // path a genuinely fresh install takes. Never `location.reload()`
+      // (brief): Playwright cannot drive a real page navigation from
+      // inside the page that is reloading, and a reload would also discard
+      // the one-time `justReset` flag below.
       const freshSettings = bootStorage.loadSettings();
       boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
     };

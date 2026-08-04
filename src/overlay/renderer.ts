@@ -128,9 +128,14 @@ function toStatePayload(payload: unknown): StatePayload | null {
   };
 }
 
-// splitTemplate/substituteLabel now live in ../shared/template-content.js —
-// shared with the Setup view's own layout preview (Task 2.11) so the two
-// never drift, the same reason ../shared/animation-keyframes.js exists.
+// Node creation + layout/content/style application now live in
+// ../shared/overlay-presentation.js (Task 2.14 extraction) — Setup's
+// embedded WYSIWYG preview calls the exact same `createPresentationNodes`/
+// `applyPresentation` against its own node set, so the two can never
+// structurally drift. That module in turn builds on
+// ../shared/template-content.js's splitTemplate/substituteLabel/
+// inlineContent (Task 2.11), the same reason ../shared/animation-keyframes.js
+// exists — this file no longer imports either directly.
 
 export function mountOverlayRenderer(
   container: HTMLElement,

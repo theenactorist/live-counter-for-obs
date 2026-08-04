@@ -20,7 +20,7 @@
 // below.
 import type { ObsWsClient } from '../protocol/obsws-client.js';
 import type { Bus, BusMessage } from '../protocol/bus.js';
-import { clearAllLcKeys, type DockStorage, type DockSettings } from '../protocol/persistence.js';
+import type { DockStorage, DockSettings } from '../protocol/persistence.js';
 import { VERSION } from '../shared/version.js';
 
 export interface DiagnosticsViewHandle {
@@ -38,13 +38,19 @@ export interface MountDiagnosticsViewOptions {
   /** Persists + triggers a full reconnect via main.ts's existing boot() path. */
   onSaveSettings: (port: number, password: string) => void;
   /**
-   * Task 2.14 — clears every `lc.*` localStorage key + the persistent-data
-   * mirror slots (this view's own `performResetAll()` does the clearing;
-   * this callback re-boots the dock through main.ts's existing `boot()`
-   * path, per the brief: never `location.reload()`, since Playwright cannot
-   * drive a real page navigation from inside the page it just reloaded).
+   * Task 2.14, hardened per fix-wave review — owns the ENTIRE guarded
+   * "Reset everything" sequence (this view only shows the confirm/cancel
+   * UI): disposes the OLD controller/timer/heartbeat FIRST (so nothing can
+   * write a fresh session back mid-clear), clears every `lc.*` localStorage
+   * key, awaits the persistent-data mirror clear, then re-boots the dock
+   * through main.ts's existing `boot()` path — never `location.reload()`,
+   * since Playwright cannot drive a real page navigation from inside the
+   * page it just reloaded. Moved out of this view entirely (previously did
+   * the local clear itself via a bare `window.localStorage` reach) because
+   * only main.ts holds the references needed to stop the OLD stack before
+   * touching storage at all.
    */
-  onResetAll: () => void;
+  onResetAll: () => Promise<void>;
   /** True for the ONE mount right after a reset-all reboot — shows the one-time confirmation banner, then behaves exactly like any other mount. */
   justReset?: boolean;
   /** Overrides the 10s "overlay seen" threshold (test seam, mirrors mountLiveView's `overlaySilenceMs`). */
@@ -1193,21 +1199,19 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   });
   resetAllConfirmBtn.addEventListener('click', () => {
     resetAllConfirmBox.hidden = true;
-    // Local half first (clearAllLcKeys — every `lc.*` key, including the
-    // dynamically-suffixed quarantine records and the local-bus transport
-    // key), then AWAIT the persistent-data mirror clear (never throwing —
-    // see DockStorage.resetPersistentMirror's own doc comment) before
-    // handing off to main.ts to re-boot the dock through its EXISTING
-    // boot() path — never `location.reload()` (brief: Playwright cannot
-    // drive a real page navigation initiated from inside the page that is
-    // reloading). Awaiting matters: re-booting before the mirror clear
-    // lands would let the FRESH boot's own GetPersistentData read race
-    // against (and possibly lose to) our own SetPersistentData(null),
-    // resurrecting the just-reset session/presets from a mirror that had
-    // not actually cleared yet.
-    clearAllLcKeys(window.localStorage);
-    void opts.storage.resetPersistentMirror().then(() => {
-      opts.onResetAll();
+    // The entire sequence — dispose the OLD controller/timer/heartbeat
+    // FIRST, clear local storage, await the persistent-data mirror clear,
+    // THEN re-boot — is owned by main.ts's `onResetAll` (fix wave, Important
+    // 1): only main.ts holds the references needed to stop the old stack
+    // before anything touches storage. See that callback's own doc comment
+    // for why the ordering matters (an automatic session's still-running
+    // timer would otherwise write a fresh session back mid-clear).
+    void opts.onResetAll().catch((err) => {
+      // Defense in depth only — onResetAll is designed to never reject
+      // (every step it owns already catches/reports its own failures), but
+      // a click handler must never produce an unhandled rejection regardless.
+      // eslint-disable-next-line no-console
+      console.error('[dock] reset-all failed', err);
     });
   });
 
