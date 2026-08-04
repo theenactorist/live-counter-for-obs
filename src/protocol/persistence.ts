@@ -343,8 +343,20 @@ export class DockStorage {
     return Math.max(this.maxSeenRevision, this.localSessionRevision());
   }
 
+  // Task 3.0 (ledger: "Number.isSafeInteger guard in noteRevision") —
+  // `Number.isFinite` alone accepts any finite float, including one well
+  // past `Number.MAX_SAFE_INTEGER` (e.g. 2**60): `isNonNegativeInteger` (the
+  // shape check every stored Session/SessionTombstone's `revision` goes
+  // through) only requires `Number.isInteger`, which is mathematically true
+  // for an exact power of two that large, so a corrupted-but-schema-valid
+  // record could still poison `maxSeenRevision` with a value integer
+  // arithmetic can no longer represent precisely (`x + 1 === x` beyond that
+  // bound) — permanently breaking the "seed the next session one above
+  // everything this lineage has seen" monotonicity F5 relies on.
+  // `Number.isSafeInteger` rejects both that case and NaN (already excluded
+  // by `isFinite` too, but now for the same reason as everything else here).
   private noteRevision(revision: number): void {
-    if (Number.isFinite(revision) && revision > this.maxSeenRevision) this.maxSeenRevision = revision;
+    if (Number.isSafeInteger(revision) && revision > this.maxSeenRevision) this.maxSeenRevision = revision;
   }
 
   // The conflict rule is unchanged ("higher `revision` wins"), but it now

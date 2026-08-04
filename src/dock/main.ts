@@ -244,6 +244,18 @@ function main(): void {
   // onActivate callback); boot() only assigns it.
   let wsBannerPoll: ReturnType<typeof setInterval> | null = null;
   let disconnectedSince: number | null = null;
+  // Task 3.0 (carry-forward fix wave) — true for the whole span of
+  // `onResetAll` (below), including the awaited `resetPersistentMirror()`
+  // round trip — which can take seconds on a slow/unreachable OBS — during
+  // which the OLD, not-yet-torn-down Diagnostics view (boot() only rebuilds
+  // it AFTER that await resolves) is still fully interactive. Declared here,
+  // outside boot(), so it survives the reconnect boot() calls at the end of
+  // BOTH onSaveSettings and onResetAll themselves — a settings-save attempted
+  // mid-reset used to write a fresh `lc.settings.v1` (and kick off its OWN
+  // reconnect) that could land either before or after clearAllLocal()/
+  // resetPersistentMirror(), racing the reset's own final boot() with no
+  // guarantee which "everything cleared" the operator actually ended up with.
+  let resetInFlight = false;
 
   function showBannerWs(text: string): void {
     shell.bannerWs.textContent = text;
@@ -351,9 +363,19 @@ function main(): void {
     // reconnect, and both callers are torn down and remounted by that same
     // boot() call anyway).
     const storageForSave = storage;
-    const onSaveSettings = (port: number, password: string): void => {
+    // Task 3.0 (carry-forward fix wave) — returns a refusal NOTE (never
+    // thrown, never surfaced any other way) instead of saving, whenever a
+    // reset is in flight; `null` on the normal, accepted path. Only
+    // Diagnostics' own Settings form actually reads the return value and
+    // shows it (see diagnostics.ts's `settings-save` handler) — Live's
+    // Connect card (the other of this "one implementation, two entry
+    // points" callback's two callers) ignores it, same as it always ignored
+    // this function's `void` return before.
+    const onSaveSettings = (port: number, password: string): string | null => {
+      if (resetInFlight) return 'Reset in progress — try again in a moment';
       storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
       boot(port, password);
+      return null;
     };
     // Task 2.14, hardened per fix-wave review (Important 1) — captures THIS
     // boot()'s controller/storage the same way `storageForSave` does above,
@@ -363,39 +385,50 @@ function main(): void {
     const controllerForReset = controller;
     const storageForReset = storage;
     const onResetAll = async (): Promise<void> => {
-      // Stop the OLD controller/timer/heartbeat FIRST — before touching
-      // storage at all. dispose() is idempotent (this same instance gets
-      // dispose()'d again, harmlessly, by boot()'s own teardown block below
-      // once it runs) and, per its own contract, makes dispatch() a
-      // PERMANENT no-op from this line on. Without this ordering, an
-      // automatic session's still-running AutoTimer could dispatch a 'tick'
-      // in the window this function awaits below (which can be SECONDS
-      // wide — resetPersistentMirror() waits on a real websocket round
-      // trip) — that tick calls storage.saveSession() (and mirrorSet()),
-      // writing a fresh session right back after clearAllLocal() below had
-      // already removed it. The operator would be told "everything
-      // cleared" and then find a resurrected session on the next boot.
-      controllerForReset.dispose();
+      // Task 3.0 (carry-forward fix wave) — set BEFORE anything else runs,
+      // cleared in `finally` regardless of how this settles (resetPersistent
+      // Mirror() never rejects, but this is cheap insurance against ever
+      // leaving a future settings-save permanently refused). See
+      // `resetInFlight`'s own doc comment (declared outside boot()) for why a
+      // guard is needed here at all.
+      resetInFlight = true;
+      try {
+        // Stop the OLD controller/timer/heartbeat FIRST — before touching
+        // storage at all. dispose() is idempotent (this same instance gets
+        // dispose()'d again, harmlessly, by boot()'s own teardown block below
+        // once it runs) and, per its own contract, makes dispatch() a
+        // PERMANENT no-op from this line on. Without this ordering, an
+        // automatic session's still-running AutoTimer could dispatch a 'tick'
+        // in the window this function awaits below (which can be SECONDS
+        // wide — resetPersistentMirror() waits on a real websocket round
+        // trip) — that tick calls storage.saveSession() (and mirrorSet()),
+        // writing a fresh session right back after clearAllLocal() below had
+        // already removed it. The operator would be told "everything
+        // cleared" and then find a resurrected session on the next boot.
+        controllerForReset.dispose();
 
-      // Local half — routes through the injected storage seam (never a
-      // bare `window.localStorage` reach); failures are caught and reported
-      // via the existing onWriteError -> banner-ws path, never thrown here.
-      storageForReset.clearAllLocal();
+        // Local half — routes through the injected storage seam (never a
+        // bare `window.localStorage` reach); failures are caught and reported
+        // via the existing onWriteError -> banner-ws path, never thrown here.
+        storageForReset.clearAllLocal();
 
-      // Mirror half — still needs the CURRENT (not yet closed) client
-      // connection, so this runs before boot()'s own teardown below closes
-      // it. Awaited: a still-in-flight clear could otherwise lose a race
-      // against the fresh boot's own GetPersistentData read.
-      await storageForReset.resetPersistentMirror();
+        // Mirror half — still needs the CURRENT (not yet closed) client
+        // connection, so this runs before boot()'s own teardown below closes
+        // it. Awaited: a still-in-flight clear could otherwise lose a race
+        // against the fresh boot's own GetPersistentData read.
+        await storageForReset.resetPersistentMirror();
 
-      // `bootStorage.loadSettings()` now finds nothing on disk (just
-      // cleared above) and returns its own built-in defaults — the same
-      // path a genuinely fresh install takes. Never `location.reload()`
-      // (brief): Playwright cannot drive a real page navigation from
-      // inside the page that is reloading, and a reload would also discard
-      // the one-time `justReset` flag below.
-      const freshSettings = bootStorage.loadSettings();
-      boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
+        // `bootStorage.loadSettings()` now finds nothing on disk (just
+        // cleared above) and returns its own built-in defaults — the same
+        // path a genuinely fresh install takes. Never `location.reload()`
+        // (brief): Playwright cannot drive a real page navigation from
+        // inside the page that is reloading, and a reload would also discard
+        // the one-time `justReset` flag below.
+        const freshSettings = bootStorage.loadSettings();
+        boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
+      } finally {
+        resetInFlight = false;
+      }
     };
     const connectSettings = { wsPort, wsPassword, schemaVersion: 1 as const };
 

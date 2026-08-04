@@ -1467,4 +1467,44 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 3.0: carry-forward fix wave — settings-save during a reset ---
+  test('reset-all: a settings-save attempted while the reset is still in flight is refused, and never writes lc.settings.v1', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // Widens onResetAll's own resetPersistentMirror() round trip well past
+      // the window this test needs to attempt a save inside — the OLD
+      // Diagnostics view (boot() only tears it down AFTER this await
+      // resolves) is still fully mounted and interactive the whole time.
+      mock.delayResponsesFor('SetPersistentData', 1500);
+
+      await page.getByTestId('diag-reset-all').click();
+      await page.getByTestId('reset-all-confirm').click();
+
+      // A settings-save attempted WHILE the reset is still in flight.
+      await page.getByTestId('settings-port').fill('39999');
+      await page.getByTestId('settings-save').click();
+
+      const error = page.getByTestId('diag-settings-error');
+      await expect(error).toBeVisible();
+      await expect(error).toHaveText('Reset in progress — try again in a moment');
+
+      // Never wrote a fresh lc.settings.v1 during the reset.
+      expect(await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'))).toBeNull();
+
+      // Past the delayed mirror clear: the reset itself completed normally,
+      // and lc.settings.v1 is STILL absent — the refused save left no trace,
+      // not merely a delayed one.
+      await expect(page.getByTestId('diag-reset-done')).toBeVisible({ timeout: 5000 });
+      expect(await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'))).toBeNull();
+    } finally {
+      await mock.close();
+    }
+  });
 });

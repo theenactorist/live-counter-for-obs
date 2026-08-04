@@ -1077,4 +1077,38 @@ test.describe('dock Live view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 3.0: carry-forward fix wave — "Restoring session…" -----------
+  // Before ControllerState.initializing existed, `session: null` was
+  // indistinguishable from "nothing to restore, ever": a slow identify (up
+  // to IDENTIFY_WAIT_MS before the persistent-data mirror is even reachable
+  // — see main.ts) showed "No active session — create one in Setup" for the
+  // ENTIRE wait, real recovery in flight or not (deferred Phase 2 concern:
+  // "may deserve a Restoring… placeholder in Phase 3").
+  test('slow init: "Restoring session…" shows instead of "No active session", with no premature flash of the latter', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // Identify itself stays fast (no Connect-card race to reason about —
+      // isConnected() flips true almost immediately); only the SESSION
+      // LOAD's own GetPersistentData response is held back, so
+      // controller.init() cannot resolve — and `initializing` cannot flip
+      // false — until this delay elapses.
+      mock.delayResponsesFor('GetPersistentData', 1500);
+      await openDock(page, { port: mock.port, devhook: false });
+
+      const restoring = page.getByTestId('live-restoring');
+      await expect(restoring).toBeVisible();
+      await expect(restoring).toHaveText('Restoring session…');
+      await expect(page.getByTestId('live-empty')).toHaveCount(0);
+
+      // Once init() resolves (nothing was ever stored — a genuine "no
+      // session"), it settles into the ordinary empty state.
+      await expect(page.getByTestId('live-empty')).toBeVisible({ timeout: 5000 });
+      await expect(restoring).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

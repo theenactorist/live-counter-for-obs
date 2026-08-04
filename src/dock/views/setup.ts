@@ -53,6 +53,7 @@ import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 import { createPresentationNodes, applyPresentation, animationTargets, type PresentationNodes } from '../../shared/overlay-presentation.js';
+import { unsupportedGlyphs } from '../../shared/glyphs.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -241,6 +242,21 @@ interface SetupUiState {
   // discards them — clearing markers there would silently revert an edit on
   // the SECOND round-trip even though nothing was ever applied.
   dirtyFields: Set<string>;
+  // Task 3.0 (carry-forward fix wave, parked ruling) — the FULL `StyleConfig`
+  // of the most recently loaded preset, set only by `loadPreset()`. This form
+  // has never modelled seven of `StyleConfig`'s thirteen fields (fontWeight/
+  // alignH/alignV/outline/shadow/background/paddingPx — no control exists for
+  // any of them), so `buildStyle()` used to always rebuild those seven from
+  // hardcoded defaults, flattening an IMPORTED preset's outline/shadow/etc.
+  // on every Save (and, transitively, Start — both call buildStyle()). This
+  // is the base `buildStyle()` spreads before overriding only the fields the
+  // form actually models — `null` (never loaded anything this page session)
+  // falls back to the exact same hardcoded defaults as before, so a
+  // never-imported/blank form's Save/Start behavior is unchanged. Update's
+  // OWN base is different (and needed no new field here): a running
+  // session's live `presentation.style`, already threaded into
+  // `resolvePresentation` as its `presentation` parameter.
+  baseStyle: StyleConfig | null;
 }
 
 interface FocusSnapshot {
@@ -338,6 +354,7 @@ function defaultUiState(): SetupUiState {
     titleError: false,
     saveConfirmText: null,
     dirtyFields: new Set(),
+    baseStyle: null,
   };
 }
 
@@ -601,22 +618,47 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return numberSizeValue() !== null && textSizeValue() !== null;
   }
 
+  // Task 3.0 (carry-forward fix wave, parked ruling) — an imported preset's
+  // numberSizePx/textSizePx is authored OUTSIDE this form (by whatever wrote
+  // the preset, or hand-edited into an export envelope) and can carry a value
+  // past MIN_SIZE_PX/MAX_SIZE_PX. Before this, `loadPreset()` copied it in
+  // verbatim, `numberSizeValue()`/`textSizeValue()` returned null for it (out
+  // of bounds), and every button gated by `styleValid()` — Save, Start, AND
+  // Update — went disabled with nothing to click and fix but the field itself
+  // (recoverable, but the operator has to notice and retype it manually).
+  // Clamping at load time, into a field ALREADY marked dirty by
+  // `loadPreset()`'s own `dirtyFromPreset` set, means the visible value is
+  // immediately valid and immediately what Update/Save will actually apply —
+  // never a disabled button with an invisible-until-you-look reason.
+  function clampToSizeBounds(n: number): number {
+    return Math.min(MAX_SIZE_PX, Math.max(MIN_SIZE_PX, Math.round(n)));
+  }
+
+  // Task 3.0 (carry-forward fix wave) — the seven fields this form has never
+  // modelled, defaulted exactly as `buildStyle()` always hardcoded them,
+  // for a form that has never loaded a preset (`ui.baseStyle === null`).
+  const UNMODELLED_STYLE_DEFAULTS: Pick<
+    StyleConfig,
+    'fontWeight' | 'alignH' | 'alignV' | 'outline' | 'shadow' | 'background' | 'paddingPx'
+  > = { fontWeight: 700, alignH: 'center', alignV: 'middle', outline: null, shadow: null, background: null, paddingPx: 8 };
+
   function buildStyle(): StyleConfig {
+    // Task 3.0 (parked ruling) — spread the loaded preset's full style (or
+    // the hardcoded defaults, for a form that never loaded one) FIRST, then
+    // override only the six fields this form actually models. Before this,
+    // the seven unmodelled fields (outline/shadow/background/fontWeight/
+    // align/padding) were always rebuilt from the hardcoded defaults below,
+    // silently flattening an IMPORTED preset's outline/shadow/etc. on every
+    // Save (and Start, which also calls this).
     return {
+      ...(ui.baseStyle ?? UNMODELLED_STYLE_DEFAULTS),
       fontFamily: ui.fontFamily,
-      fontWeight: 700,
       // Non-null by construction: every caller is gated behind
       // canSave()/canStart(), both of which require styleValid().
       numberSizePx: numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX,
       textSizePx: textSizeValue() ?? DEFAULT_TEXT_SIZE_PX,
       numberColor: ui.numberColor,
       textColor: ui.textColor,
-      alignH: 'center',
-      alignV: 'middle',
-      outline: null,
-      shadow: null,
-      background: null,
-      paddingPx: 8,
       layout: ui.layout,
     };
   }
@@ -849,10 +891,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   //
   // The non-operator-editable `StyleConfig` fields (fontWeight/alignH/
   // alignV/outline/shadow/background/paddingPx) are not tracked as dirty at
-  // all — Setup has never exposed a control for any of them, in this task
-  // or any earlier one — so they're always the same hardcoded constants
-  // `buildStyle()` itself has always produced, matching every OTHER caller
-  // of `buildStyle()` in this file (`onStartSession()`/`performSave()`).
+  // all — Setup has never exposed a control for any of them, in this task or
+  // any earlier one. Task 3.0 (carry-forward fix wave, parked ruling) fixed
+  // what they resolve TO, though: they used to always be the hardcoded
+  // constants below regardless of what was actually live, silently
+  // flattening a preset-backed session's outline/shadow/etc. back to
+  // defaults on every Update. They now come from `presentation.style` itself
+  // (the live look, spread first, below) — matching `buildStyle()`'s own
+  // fix, which spreads the loaded preset's full style for the
+  // `presentation === null` branch just above.
   function resolvePresentation(
     presentation: ControllerState['presentation'],
   ): { style: StyleConfig; template: string | null; animation: AnimationConfig } {
@@ -879,19 +926,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const animDurationMs = ui.dirtyFields.has('animDurationMs') ? ui.animDurationMs : liveAnimation.durationMs;
 
     return {
+      // Task 3.0 — spread the LIVE style first (the seven unmodelled fields
+      // survive untouched), then override only the six this form models.
       style: {
+        ...presentation.style,
         fontFamily,
-        fontWeight: 700,
         numberSizePx,
         textSizePx,
         numberColor,
         textColor,
-        alignH: 'center',
-        alignV: 'middle',
-        outline: null,
-        shadow: null,
-        background: null,
-        paddingPx: 8,
         layout,
       },
       template,
@@ -1185,7 +1228,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     try {
       opts.controller.startSession(cfg, style, template, animation);
     } catch (err) {
-      ui.error = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
+      // Task 3.0 (parked ruling) — an off-menu `ui.intervalSeconds` (e.g.
+      // carried in, dirty, from a loaded preset — `canStart()` never checks
+      // SPEED_LEVELS membership) makes `createSession()` throw its own raw,
+      // engine-vocabulary message ("createSession: intervalSeconds must be
+      // one of [...]; got 1.3"). Every OTHER error this catch can plausibly
+      // see is defense-in-depth for a case `canStart()` should have already
+      // prevented (see the comment above), so this one substitution is
+      // enough to keep an operator from ever reading "createSession:" on
+      // screen — the raw message is still the fallback for anything else.
+      ui.error = message.includes('intervalSeconds must be one of')
+        ? 'Interval must be one of the listed speeds'
+        : message;
       render();
       return;
     }
@@ -1387,7 +1442,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return select;
   }
 
-  function renderIntervalSelect(): HTMLSelectElement {
+  function renderIntervalSelect(hasActiveSession: boolean): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-interval' }) as HTMLSelectElement;
     // Final gate wave (F3) — a live session can legitimately run at an
     // interval that is not a SPEED_LEVELS entry (engine reconfigure rule 5
@@ -1403,8 +1458,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // `loadPreset()` (a preset's own interval), which is a pending choice,
     // not the session's current rate, so labelling it "(current)" would be
     // its own small lie.
+    //
+    // Task 3.0 (parked ruling) — ALSO only while a session is actually
+    // active: `displayMode` (this row's own visibility gate, in render()
+    // below) falls back to `ui.mode` once a session ends, and `ui.mode` can
+    // still read 'automatic' from before that session started (it is never
+    // reset by starting OR ending one — only the Mode select and
+    // loadPreset() ever write it). Without this, a clean off-menu
+    // `ui.intervalSeconds` left over from the ended session's own prefill
+    // kept rendering "(current)" describing a session that no longer exists.
     const offMenu =
-      !(SPEED_LEVELS as readonly number[]).includes(ui.intervalSeconds) && !ui.dirtyFields.has('intervalSeconds');
+      hasActiveSession &&
+      !(SPEED_LEVELS as readonly number[]).includes(ui.intervalSeconds) &&
+      !ui.dirtyFields.has('intervalSeconds');
     if (offMenu) {
       const current = el(
         'option',
@@ -1828,7 +1894,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     counterChildren.push(formRow('Mode', renderModeSelect(activeSession)));
     if (displayMode === 'automatic') {
-      counterChildren.push(formRow('Interval', renderIntervalSelect()));
+      counterChildren.push(formRow('Interval', renderIntervalSelect(activeSession !== null)));
     }
     root.appendChild(group('setup-group-counter', 'Counter', counterChildren));
 
@@ -1861,6 +1927,21 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           'div',
           { 'data-testid': 'setup-template-token-hint', class: 'field-hint' },
           'This label contains {count}, which sets where the number goes.',
+        ),
+      );
+    }
+    // Task 3.0 (AC 31) — a heads-up, never a block: a character outside the
+    // bundled fonts' latin coverage still renders (the browser substitutes a
+    // system font for it), so this never disables Save/Start/Update, unlike
+    // every OTHER inline error in this form. Up to 5 offending characters,
+    // unique and in the order they first appear in the label.
+    const offendingGlyphs = unsupportedGlyphs(ui.template);
+    if (offendingGlyphs.length > 0) {
+      labelChildren.push(
+        el(
+          'div',
+          { 'data-testid': 'setup-glyph-warning', class: 'field-hint' },
+          `may not display: ${offendingGlyphs.slice(0, 5).join(' ')}`,
         ),
       );
     }
@@ -2099,11 +2180,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.intervalSeconds = preset.intervalSeconds;
       ui.template = preset.template ?? '';
       ui.layout = preset.style.layout;
-      ui.numberSizePx = String(preset.style.numberSizePx);
+      // Task 3.0 (parked ruling) — clamped into MIN_SIZE_PX/MAX_SIZE_PX
+      // immediately, rather than copied verbatim: an out-of-bounds imported
+      // size (e.g. a hand-edited export envelope) used to leave the field
+      // showing an invalid value with Save/Start/Update all disabled and no
+      // visible reason beyond the field's own error text. Both fields are
+      // already in `dirtyFromPreset` below, so the clamped value — not the
+      // preset's original out-of-bounds one — is what Update/Save apply.
+      ui.numberSizePx = String(clampToSizeBounds(preset.style.numberSizePx));
       ui.numberColor = preset.style.numberColor;
-      ui.textSizePx = String(preset.style.textSizePx);
+      ui.textSizePx = String(clampToSizeBounds(preset.style.textSizePx));
       ui.textColor = preset.style.textColor;
       ui.fontFamily = preset.style.fontFamily;
+      // Task 3.0 (parked ruling) — the loaded preset's FULL style, so
+      // buildStyle() can spread the seven fields this form never modelled
+      // (outline/shadow/background/fontWeight/align/padding) instead of
+      // flattening them to defaults on the next Save/Start. See
+      // `SetupUiState.baseStyle`'s own doc comment.
+      ui.baseStyle = preset.style;
       ui.animType = preset.animation.type;
       ui.animTarget = preset.animation.target;
       ui.animDurationMs = preset.animation.durationMs;

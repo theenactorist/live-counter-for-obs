@@ -1160,6 +1160,152 @@ describe('SessionController — init()', () => {
   });
 });
 
+describe('SessionController — initializing flag (Task 3.0)', () => {
+  it('starts true and flips false once init() resolves, with no identify wait at all', async () => {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    expect(controller.getState().initializing).toBe(true);
+    await controller.init();
+    expect(controller.getState().initializing).toBe(false);
+  });
+
+  it('flips false even when the identify window elapses unresolved (no session to restore)', async () => {
+    const local = new MapStorage();
+    const stored = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+    local.setItem(KEY_SESSION, serializeSession(stored));
+    const client = new ObsWsClient({ url: 'ws://127.0.0.1:39282', eventSubscriptions: 0, backoffMs: [50_000, 50_000] });
+    wsClients.push(client);
+    const storage = new DockStorage(local, client);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const identified = awaitIdentified(client, 300);
+    const initPromise = controller.init({ identified });
+    client.connect();
+    await initPromise;
+
+    expect(controller.getState().initializing).toBe(false);
+  });
+});
+
+// Task 3.0 (carry-forward fix wave) — the ledger's "init-window re-stamp"
+// item: `init()` waits at most IDENTIFY_WAIT_MS for the ws to identify before
+// consulting the persistent-data mirror (live-safety:F2), but a genuinely
+// slow identify (well past that window, e.g. OBS still booting) used to mean
+// the mirror was NEVER read at all for the rest of that boot — a session
+// that only lives in the mirror (localStorage lost) was gone for good, even
+// though the ws eventually came up. `init()` now wires up ONE retry for the
+// first identify that happens after a missed window, re-reading the SAME
+// storage.loadSession() path — clobber-guarded exactly like init() itself,
+// so an operator who starts their own session during the wait is never
+// overwritten by whatever the mirror re-read finds later.
+describe('SessionController — cold-start identify retry (Task 3.0)', () => {
+  it('a mirror-only session missed by the identify window is adopted once the client actually identifies (delayIdentify(3000) vs. a 2.5s window)', async () => {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+
+    // Seed the mirror through a separate, already-identified client, exactly
+    // as a previous dock session's SetPersistentData would have.
+    const seeder = await connectedClient(mock.url);
+    let mirrored = createSession({ startValue: 0, finishValue: 100, mode: 'manual' }, 1000);
+    mirrored = applyCommand(mirrored, { type: 'jump', value: 42, nonce: 'seed-1' }, 1100).session;
+    await seeder.request('SetPersistentData', {
+      realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+      slotName: 'live-counter/session',
+      slotValue: mirrored,
+    });
+
+    // Identify arrives well past the 2.5s wait window this test uses — the
+    // OLD one-shot wait would give up for the rest of the boot; localStorage
+    // is empty too, so there is nothing else to fall back to.
+    mock.delayIdentify(3000);
+
+    const local = new MapStorage(); // localStorage lost: CEF profile cleared / OBS reinstall
+    const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
+    wsClients.push(client);
+    const storage = new DockStorage(local, client);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const identified = awaitIdentified(client, 2500);
+    const initPromise = controller.init({ identified, onIdentified: (fn) => client.on('identified', fn) });
+    client.connect();
+    await initPromise;
+
+    // The window elapsed unresolved; nothing to restore from localStorage.
+    expect(controller.getState().session).toBeNull();
+    expect(controller.getState().recovered).toBe(false);
+
+    // Wait past the real identify (~3s mark) for the retry's own
+    // GetPersistentData round trip to land.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    const state = controller.getState();
+    expect(state.session?.currentValue).toBe(42);
+    expect(state.session?.finishValue).toBe(100);
+    expect(state.recovered).toBe(true);
+  }, 10000);
+
+  it('never clobbers an operator-started session with the delayed mirror re-read', async () => {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+
+    const seeder = await connectedClient(mock.url);
+    const mirrored = createSession({ startValue: 0, finishValue: 100, mode: 'manual' }, 1000);
+    await seeder.request('SetPersistentData', {
+      realm: 'OBS_WEBSOCKET_DATA_REALM_GLOBAL',
+      slotName: 'live-counter/session',
+      slotValue: mirrored,
+    });
+
+    mock.delayIdentify(3000);
+
+    const local = new MapStorage();
+    const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
+    wsClients.push(client);
+    const storage = new DockStorage(local, client);
+    const bus = new Bus(client, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    const identified = awaitIdentified(client, 2500);
+    const initPromise = controller.init({ identified, onIdentified: (fn) => client.on('identified', fn) });
+    client.connect();
+    await initPromise;
+
+    expect(controller.getState().session).toBeNull();
+
+    // The operator starts a fresh session of their own during the wait —
+    // before the delayed identify (and therefore the retry) ever fires.
+    controller.startSession({ startValue: 0, finishValue: 20, mode: 'manual' }, styleFixture(), null, null);
+    const operatorSession = controller.getState().session;
+    expect(operatorSession).not.toBeNull();
+
+    // Wait past the real identify (~3s mark) — the retry must see
+    // `session !== null` and skip adopting the mirrored one.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    expect(controller.getState().session).toEqual(operatorSession);
+  }, 10000);
+});
+
 // F5, fix round 2. `revision` restarted at 0 for every new session, so the
 // mirror's "higher revision wins" rule was meaningless across sessions and
 // broke in BOTH directions. SessionController.startSession now seeds a new

@@ -43,8 +43,13 @@ export interface MountDiagnosticsViewOptions {
   storage: DockStorage;
   /** The settings this controller/client stack is CURRENTLY connected with — seeds the form. */
   initialSettings: DockSettings;
-  /** Persists + triggers a full reconnect via main.ts's existing boot() path. */
-  onSaveSettings: (port: number, password: string) => void;
+  /**
+   * Persists + triggers a full reconnect via main.ts's existing boot() path.
+   * Task 3.0 (carry-forward fix wave) — returns a refusal note to show
+   * instead (e.g. "Reset in progress — try again in a moment") when main.ts
+   * declined to act on it, or `null` on the normal, accepted path.
+   */
+  onSaveSettings: (port: number, password: string) => string | null;
   /**
    * Task 2.14, hardened per fix-wave review — owns the ENTIRE guarded
    * "Reset everything" sequence (this view only shows the confirm/cancel
@@ -833,7 +838,15 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       return;
     }
     settingsError.hidden = true;
-    opts.onSaveSettings(port, passwordInput.value);
+    // Task 3.0 (carry-forward fix wave) — a reset in flight refuses the
+    // save (main.ts's `resetInFlight` guard) and hands back a note instead
+    // of persisting/reconnecting; reuses this SAME box the port-validation
+    // error above already uses rather than a second inline-error element.
+    const refusal = opts.onSaveSettings(port, passwordInput.value);
+    if (refusal !== null) {
+      settingsError.hidden = false;
+      settingsError.textContent = refusal;
+    }
   });
 
   // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so

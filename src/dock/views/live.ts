@@ -361,7 +361,17 @@ export function mountLiveView(
       connectCardEverShown = false;
       if (cardWanted) container.appendChild(renderDisconnectedChip());
       if (session === null) {
-        container.appendChild(renderLiveEmpty());
+        // Task 3.0 (carry-forward fix wave) — while `init()` is still
+        // resolving (identify can take up to IDENTIFY_WAIT_MS before the
+        // persistent-data mirror is even reachable — see main.ts), `session`
+        // reads `null` regardless of whether a recovery is actually about to
+        // land. Before `initializing` existed, that null was indistinguishable
+        // from "nothing to restore, ever" and this pane said so — a real
+        // "no active session" flash on every slow-identify boot, restored
+        // session or not. Deliberately does NOT also gate the Connect card
+        // above: that card is about connectivity, not session existence, and
+        // showing it makes no claim this fix needs to correct.
+        container.appendChild(state.initializing ? renderLiveRestoring() : renderLiveEmpty());
       } else {
         container.appendChild(renderLive(session, state));
       }
@@ -381,6 +391,18 @@ export function mountLiveView(
       render();
     });
     return chip;
+  }
+
+  // Task 3.0 (carry-forward fix wave) — see the `state.initializing` check at
+  // this function's one call site, above, for the full story. Deliberately
+  // minimal (no Add-overlay button, no recovered/clamp banners — none of
+  // those can be meaningfully true yet: `recovered`/`clamp` are still at
+  // their construction defaults and `session` is still null) — this is a
+  // placeholder for "don't know yet", not a second empty state to maintain.
+  function renderLiveRestoring(): HTMLElement {
+    const wrap = el('div', { 'data-testid': 'live-restoring', class: 'live-empty' });
+    wrap.appendChild(el('div', {}, 'Restoring session…'));
+    return wrap;
   }
 
   function renderLiveEmpty(): HTMLElement {

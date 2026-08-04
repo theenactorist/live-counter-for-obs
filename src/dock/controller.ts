@@ -51,6 +51,17 @@ export interface ControllerState {
   // it where the operator lands AND Setup's copy can never outlive the
   // session it describes.
   clamp: { from: number; to: number } | null;
+  // Task 3.0 (carry-forward fix wave) — true from construction until init()
+  // resolves. A slow/awaited identify (the ws hasn't identified yet, so
+  // init() is still awaiting `opts.identified` before it can even consult the
+  // persistent-data mirror) used to leave `session: null` and `initializing`
+  // didn't exist at all — Live's empty state read that exactly like "no
+  // session was ever restored" and said so, even when a recovery was still
+  // in flight (deferred Phase 2 concern: "may deserve a Restoring… placeholder
+  // in Phase 3"). Consumers that only care about the final answer (every
+  // existing one) can keep ignoring this; Live's empty state is the one place
+  // that now checks it (see views/live.ts's `renderLiveRestoring`).
+  initializing: boolean;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -93,6 +104,13 @@ export class SessionController {
   private snapshot: OverlaySnapshot | null = null;
   private lastAction: { label: string; value: number } | null = null;
   private recovered = false;
+  // Task 3.0 — see `ControllerState.initializing`'s own doc comment above.
+  // False the instant init() has done everything it is ever going to do for
+  // this boot (including the cold-start retry wiring below, which fires
+  // asynchronously afterward and does NOT flip this back to true — a missed
+  // identify window is a one-shot best-effort recovery, not a second
+  // "initializing" phase).
+  private initializing = true;
 
   // style/template are NOT part of Session — they live only as controller
   // instance state, set by startSession() (or later re-derived via
@@ -153,6 +171,7 @@ export class SessionController {
       recovered: this.recovered,
       presentation: this.style !== null ? { style: this.style, template: this.template, animation: this.animation } : null,
       clamp: this.clamp,
+      initializing: this.initializing,
     };
   }
 
@@ -199,9 +218,21 @@ export class SessionController {
    *   that already knows the client is up) = load immediately, exactly as
    *   before. The promise must never REJECT and must always settle: an
    *   OBS-down boot has to finish restoring from localStorage promptly.
+   * @param opts.onIdentified Task 3.0 (cold-start identify retry) — a
+   *   subscribe function for the ws client's own 'identified' lifecycle event
+   *   (matches `ObsWsClient.on`'s own signature: pass a listener, get an
+   *   unsubscribe function back), threaded in from the OUTSIDE rather than
+   *   handing this controller the client itself (it only ever gets the Bus —
+   *   see the class-level doc comment). Only ever consulted when `identified`
+   *   above resolved `false` (the window elapsed with the ws still not up)
+   *   AND no session was found in that window: the moment the ws actually
+   *   identifies later, this fires ONE extra mirror re-read (the ledger's
+   *   "init-window re-stamp") — see the clobber-guarded call below. Omitted
+   *   (every existing caller/test) = no retry is ever wired, identical to
+   *   before this task.
    */
-  async init(opts: { identified?: Promise<boolean> } = {}): Promise<void> {
-    if (opts.identified) await opts.identified;
+  async init(opts: { identified?: Promise<boolean>; onIdentified?: (fn: () => void) => () => void } = {}): Promise<void> {
+    const identifiedInTime = opts.identified ? await opts.identified : true;
     // A settings-save reconnect can dispose this instance while the await
     // above is still pending (the operator fixing a wrong port is exactly the
     // case where it lasts the full timeout). A disposed controller must never
@@ -219,51 +250,86 @@ export class SessionController {
     // session always wins.
     if (this.session === null) {
       this.snapshot = this.storage.loadSnapshot();
-
-      let session = outcome.value;
-      this.recovered = session !== null;
-
-      // A stored automatic session that was `running` when the dock last
-      // closed cannot resume ticking silently on load — restore it as
-      // `paused` instead, WITHOUT running it through applyCommand/tick (that
-      // would consume a phantom interval of elapsed wall-clock time). Persist
-      // the corrected shape back immediately so a second reload sees `paused`
-      // too, not `running` again.
-      if (session !== null && session.mode === 'automatic' && session.status === 'running') {
-        session = { ...session, status: 'paused', revision: session.revision + 1, updatedAt: new Date(this.nowMs()).toISOString() };
-        this.storage.saveSession(session);
-      }
-
-      this.session = session;
-
-      // Phase 2 final-review fix (live-safety:F3): scheduleHoldThenHide's
-      // handle is in-memory only, so a dock reload / OBS restart / settings-
-      // save reconnect DURING the hold window used to restore a
-      // status:'complete', holdThenHide session verbatim with nothing left to
-      // fire the completionHide — the overlay held the final number on
-      // Program forever, silently dropping the completion behaviour the
-      // operator configured (PRD §8.5). Re-arm it here. The window restarts
-      // from now (a fresh full N seconds) rather than being reconstructed
-      // from updatedAt: the persisted shape carries no "hold started at"
-      // field, and over-holding is the strictly safer failure than
-      // under-holding a number that is still on air.
-      if (
-        session !== null &&
-        session.status === 'complete' &&
-        session.completion.kind === 'holdThenHide' &&
-        session.overlayVisible
-      ) {
-        this.scheduleHoldThenHide(session.completion.seconds ?? 0);
-      }
-
+      this.applyLoadedSession(outcome.value);
       if (outcome.warning !== null) {
         this.storage.log('session-load', outcome.warning);
       }
     }
 
+    this.initializing = false;
     await this.broadcast();
     this.notify();
     this.startHeartbeat();
+
+    // Task 3.0 (cold-start identify retry) — the identify window elapsed
+    // unresolved (`!identifiedInTime`) AND nothing was adopted above (the
+    // SAME clobber-guard condition, re-checked): the mirror was never
+    // actually reachable during THIS load, so it may still be holding a
+    // session localStorage lost. Wire ONE re-read for the first identify that
+    // happens afterward — never clobbers an operator-started session, since
+    // the retry itself re-checks `this.session === null` right before
+    // adopting anything (see retryColdStartLoad below).
+    if (!identifiedInTime && this.session === null && opts.onIdentified) {
+      const unsubscribe = opts.onIdentified(() => {
+        unsubscribe();
+        void this.retryColdStartLoad();
+      });
+    }
+  }
+
+  // Shared by init()'s own clobber-guarded load and the cold-start retry
+  // below — both need the exact same "restore from storage" handling: a
+  // stored `running` automatic session comes back `paused` (never replayed
+  // through applyCommand/tick), and a restored `complete`+holdThenHide
+  // session re-arms its pending hide. Never touches `snapshot` (loadSnapshot()
+  // is local-only — no mirror component, no identify-timing story of its own —
+  // so init() reads it once and the retry has nothing new to learn there).
+  private applyLoadedSession(session: Session | null): void {
+    // Phase 2 final-review fix (live-safety:F3): scheduleHoldThenHide's
+    // handle is in-memory only, so a dock reload / OBS restart / settings-
+    // save reconnect DURING the hold window used to restore a
+    // status:'complete', holdThenHide session verbatim with nothing left to
+    // fire the completionHide — the overlay held the final number on
+    // Program forever, silently dropping the completion behaviour the
+    // operator configured (PRD §8.5). Re-arm it here. The window restarts
+    // from now (a fresh full N seconds) rather than being reconstructed
+    // from updatedAt: the persisted shape carries no "hold started at"
+    // field, and over-holding is the strictly safer failure than
+    // under-holding a number that is still on air.
+    if (session !== null && session.mode === 'automatic' && session.status === 'running') {
+      session = { ...session, status: 'paused', revision: session.revision + 1, updatedAt: new Date(this.nowMs()).toISOString() };
+      this.storage.saveSession(session);
+    }
+
+    this.session = session;
+    this.recovered = session !== null;
+
+    if (
+      session !== null &&
+      session.status === 'complete' &&
+      session.completion.kind === 'holdThenHide' &&
+      session.overlayVisible
+    ) {
+      this.scheduleHoldThenHide(session.completion.seconds ?? 0);
+    }
+  }
+
+  // Task 3.0 — the "first later identified event" half of the cold-start
+  // retry init() wires up above. Re-checks BOTH halves of the clobber guard
+  // (disposed, and `session !== null`) again here, not just at wiring time:
+  // this runs on a real event, arbitrarily later than init() returned, and an
+  // operator-started session (or a settings-save reconnect tearing this
+  // instance down) can land at any point in between.
+  private async retryColdStartLoad(): Promise<void> {
+    if (this.disposed || this.session !== null) return;
+    const outcome = await this.storage.loadSession();
+    if (this.disposed || this.session !== null) return;
+    this.applyLoadedSession(outcome.value);
+    if (outcome.warning !== null) {
+      this.storage.log('session-load', outcome.warning);
+    }
+    await this.broadcast();
+    this.notify();
   }
 
   // Guarded by `disposed` for the same reason adoptPresentation and
