@@ -59,7 +59,21 @@ export type Command =
       | 'showOverlay' | 'hideOverlay' | 'tick' | 'completionHide'; nonce: string }
   | { type: 'jump'; value: number; nonce: string }
   | { type: 'setMode'; mode: Mode; nonce: string }
-  | { type: 'endSession'; keepOverlay: boolean; nonce: string };
+  | { type: 'endSession'; keepOverlay: boolean; nonce: string }
+  // Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — updates a
+  // RUNNING session's range/interval/completion in place, without resetting
+  // `currentValue` to `startValue` the way starting a fresh session does
+  // (that's the whole point: "update session" vs. "start session"). See
+  // counter.ts's `reconfigure` handler doc comment for the full clamp/
+  // never-auto-complete/undo-clear contract this command follows.
+  | {
+      type: 'reconfigure';
+      startValue: number;
+      finishValue: number;
+      intervalSeconds: number;
+      completion: CompletionConfig;
+      nonce: string;
+    };
 
 export type RejectReason = 'out-of-range' | 'invalid-state' | 'invalid-value' | 'duplicate-nonce';
 

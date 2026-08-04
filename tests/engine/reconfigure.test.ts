@@ -1,0 +1,274 @@
+// Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — "update session"
+// reconfigures a RUNNING session's range/interval/completion in place,
+// without resetting currentValue to startValue the way starting a fresh
+// session does. See counter.ts's `reconfigure` handler doc comment for the
+// three binding semantics this suite locks down: never auto-complete, only
+// ever EXIT complete (reusing exitComplete, never a parallel rule), and
+// always clear the undo stack.
+import { describe, it, expect } from 'vitest';
+import { createSession, applyCommand } from '../../src/engine/counter.js';
+import type { CompletionConfig } from '../../src/engine/types.js';
+
+const T0 = 1_754_000_000_000;
+const mk = () => createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, T0);
+let n = 0;
+const nonce = () => `t-${++n}`;
+
+function reconfigureCmd(overrides: {
+  startValue: number;
+  finishValue: number;
+  intervalSeconds?: number;
+  completion?: CompletionConfig;
+}) {
+  return {
+    type: 'reconfigure' as const,
+    startValue: overrides.startValue,
+    finishValue: overrides.finishValue,
+    intervalSeconds: overrides.intervalSeconds ?? 1,
+    completion: overrides.completion ?? ({ kind: 'hold' } as CompletionConfig),
+    nonce: nonce(),
+  };
+}
+
+describe('reconfigure — accept path', () => {
+  it('applies the new range/interval/completion, bumps revision, keeps currentValue and direction when the value is still in range', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // at 1
+    const revBefore = s.revision;
+
+    const r = applyCommand(
+      s,
+      reconfigureCmd({ startValue: 0, finishValue: 100, intervalSeconds: 2, completion: { kind: 'hide' } }),
+      T0,
+    );
+
+    expect(r.accepted).toBe(true);
+    expect(r.session.startValue).toBe(0);
+    expect(r.session.finishValue).toBe(100);
+    expect(r.session.intervalSeconds).toBe(2);
+    expect(r.session.completion).toEqual({ kind: 'hide' });
+    expect(r.session.currentValue).toBe(1); // unchanged: still in range
+    expect(r.session.direction).toBe('up'); // unchanged
+    expect(r.session.revision).toBe(revBefore + 1);
+    expect(r.effects).toEqual([]); // value didn't change: no animate
+  });
+
+  it('emits an animate effect only when the clamped/kept value actually changes', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // at 1
+    const r = applyCommand(s, reconfigureCmd({ startValue: 5, finishValue: 50 }), T0); // 1 is now below lo=5
+    expect(r.accepted).toBe(true);
+    expect(r.session.currentValue).toBe(5);
+    expect(r.effects).toEqual([{ kind: 'animate' }]);
+  });
+});
+
+describe('reconfigure — clamping', () => {
+  it('clamps currentValue above the new hi down to the new hi', () => {
+    let s = mk();
+    for (let i = 0; i < 23; i++) s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    expect(s.currentValue).toBe(23);
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 10 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.currentValue).toBe(10);
+    expect(r.effects).toEqual([{ kind: 'animate' }]);
+  });
+
+  it('clamps currentValue below the new lo up to the new lo', () => {
+    let s = createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, T0);
+    s = applyCommand(s, { type: 'jump', value: 3, nonce: nonce() }, T0).session;
+    const r = applyCommand(s, reconfigureCmd({ startValue: 10, finishValue: 50 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.currentValue).toBe(10);
+  });
+
+  it('a value already inside the new range is left untouched (no clamp, no animate)', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'jump', value: 20, nonce: nonce() }, T0).session;
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 30 }), T0);
+    expect(r.session.currentValue).toBe(20);
+    expect(r.effects).toEqual([]);
+  });
+});
+
+describe('reconfigure — clears the undo stack', () => {
+  it('undoStack is empty after reconfigure, even when it had entries before', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    expect(s.undoStack.length).toBeGreaterThan(0);
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0);
+    expect(r.session.undoStack).toEqual([]);
+
+    // ...and undo is now a genuine no-op (invalid-state), not silently
+    // restoring a value from outside the new range.
+    const undoResult = applyCommand(r.session, { type: 'undo', nonce: nonce() }, T0);
+    expect(undoResult.accepted).toBe(false);
+    expect(undoResult.rejection).toBe('invalid-state');
+  });
+});
+
+describe('reconfigure — never auto-completes', () => {
+  it('landing exactly on the new active boundary HOLDS there: status unchanged, no completed effect', () => {
+    let s = mk(); // manual, 0->50, idle
+    s = applyCommand(s, { type: 'jump', value: 23, nonce: nonce() }, T0).session;
+    expect(s.status).toBe('idle');
+
+    // New finish = 23: the current value now sits exactly on the (up) boundary.
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 23 }), T0);
+    expect(r.session.currentValue).toBe(23);
+    expect(r.session.status).toBe('idle'); // NOT 'complete'
+    expect(r.effects).not.toContainEqual({ kind: 'completed', completion: expect.anything() });
+    expect(r.effects).not.toContainEqual({ kind: 'overlay', visible: false });
+  });
+
+  it('an automatic RUNNING session landing on the new boundary via clamp stays running, not complete', () => {
+    let s = createSession({ startValue: 0, finishValue: 100, mode: 'automatic' }, T0);
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    for (let i = 0; i < 23; i++) s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
+    expect(s.currentValue).toBe(23);
+    expect(s.status).toBe('running');
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 10 }), T0); // clamps to 10 = new boundary
+    expect(r.session.currentValue).toBe(10);
+    expect(r.session.status).toBe('running'); // never forced into complete
+    expect(r.effects).toEqual([{ kind: 'animate' }]);
+  });
+
+  it('a session already complete, reconfigured so the value STILL sits on the (possibly new) boundary, stays complete', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
+    expect(s.status).toBe('complete');
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50 }), T0); // unchanged range
+    expect(r.session.status).toBe('complete');
+    expect(r.session.currentValue).toBe(50);
+    expect(r.effects).not.toContainEqual({ kind: 'completed', completion: expect.anything() });
+  });
+});
+
+describe('reconfigure — exits complete when the boundary moves away', () => {
+  it('manual: was complete, new range clamps/keeps the value off the new boundary -> idle', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
+    expect(s.status).toBe('complete');
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0); // 50 is no longer the boundary (100 is)
+    expect(r.session.status).toBe('idle');
+    expect(r.session.currentValue).toBe(50); // still in range, untouched
+  });
+
+  it('automatic: was complete, boundary moves away -> paused (same mapping as exitComplete)', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'automatic' }, T0);
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session; // complete at 2
+    expect(s.status).toBe('complete');
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 10 }), T0);
+    expect(r.session.status).toBe('paused');
+    expect(r.session.currentValue).toBe(2);
+  });
+
+  it('re-shows an overlay the engine hid on completion (hiddenByCompletion), reusing exitComplete exactly', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'jump', value: 2, nonce: nonce() }, T0).session; // complete; engine hid it
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(true);
+
+    // Widen the range so 2 is no longer the boundary -> exits complete.
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 10 }), T0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toContainEqual({ kind: 'overlay', visible: true });
+  });
+
+  it('does NOT force-show an overlay the OPERATOR hid before completion (exitComplete\'s own re-show gate)', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0).session; // operator hides BEFORE completion
+    s = applyCommand(s, { type: 'jump', value: 2, nonce: nonce() }, T0).session; // completes at 2
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(false); // operator owns the hide, not the engine
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 10 }), T0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(false); // NOT force-shown
+    expect(r.effects).not.toContainEqual({ kind: 'overlay', visible: true });
+  });
+});
+
+describe('reconfigure — validation rejects invalid-value with the SAME session reference and no change', () => {
+  it('rejects a non-integer startValue', () => {
+    const s = mk();
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0.5, finishValue: 50 }), T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+    expect(r.effects).toEqual([]);
+  });
+
+  it('rejects an out-of-range finishValue (> MAX_VALUE)', () => {
+    const s = mk();
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 1_000_000 }), T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+  });
+
+  it('rejects a negative startValue', () => {
+    const s = mk();
+    const r = applyCommand(s, reconfigureCmd({ startValue: -1, finishValue: 50 }), T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+  });
+
+  it('rejects equal startValue/finishValue', () => {
+    const s = mk();
+    const r = applyCommand(s, reconfigureCmd({ startValue: 5, finishValue: 5 }), T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+  });
+
+  it('rejects an intervalSeconds not in SPEED_LEVELS', () => {
+    const s = mk();
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 1.234 }), T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+  });
+
+  it('rejects an invalid completion config (holdThenHide with non-positive seconds)', () => {
+    const s = mk();
+    const r = applyCommand(
+      s,
+      reconfigureCmd({ startValue: 0, finishValue: 50, completion: { kind: 'holdThenHide', seconds: 0 } }),
+      T0,
+    );
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+    expect(r.session).toBe(s);
+  });
+
+  it('a rejected reconfigure leaves the undo stack and status completely untouched', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    const before = s;
+    const r = applyCommand(s, reconfigureCmd({ startValue: 5, finishValue: 5 }), T0);
+    expect(r.session).toBe(before);
+    expect(r.session.undoStack).toEqual(before.undoStack);
+  });
+});
+
+describe('reconfigure — does not mutate the input session', () => {
+  it('accepted call on a frozen session does not throw', () => {
+    const s = Object.freeze(mk());
+    expect(() => applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0)).not.toThrow();
+  });
+});

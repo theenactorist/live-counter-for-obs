@@ -196,6 +196,13 @@ function mulberry32(seed: number): () => number {
 // commands (session teardown / dock-owned completion hide) rather than part
 // of the count-changing core loop this replay oracle exercises, so including
 // them would churn the deterministic sequence without adding coverage here.
+// `reconfigure` (Task 2.18) is excluded for a second, stronger reason on top
+// of that: it changes startValue/finishValue themselves, i.e. the very RANGE
+// this oracle's determinism is checked against — a seed's replay is only
+// meaningful (byte-identical JSON.stringify across runs) if every step
+// operates against the SAME fixed range, so mixing in a command that moves
+// the goalposts would make two "identical" replays diverge for reasons that
+// have nothing to do with a genuine behavioral regression.
 const BARE_COMMAND_TYPES = [
   'increment', 'decrement', 'undo', 'reverse', 'reset',
   'start', 'pause', 'resume', 'faster', 'slower',

@@ -386,6 +386,76 @@ function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResul
   return accept(s, { status: 'idle', hiddenByCompletion: false }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
 }
 
+// Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — "update
+// session": reconfigures a RUNNING session's range/interval/completion
+// without resetting `currentValue` to the new `startValue` (unlike starting
+// a fresh session via createSession/`start`Session). Validation mirrors
+// createSession's rules exactly (integers in [0, MAX_VALUE], startValue !==
+// finishValue, intervalSeconds in SPEED_LEVELS, a structurally valid
+// completion) — any failure rejects `invalid-value` with the SAME session
+// reference and no change at all, same contract as `jump`'s out-of-range
+// rejection.
+//
+// Three binding semantics (controller clarification):
+//  1. NEVER auto-completes: a clamped/unchanged value that lands exactly on
+//     the new active boundary just HOLDS there — status stays whatever it
+//     already was, no `completed` effect, no completion-hide side effect.
+//     Completion is only ever reached by counting INTO it (increment/
+//     decrement/jump/tick/undo) — an operator lowering the target to the
+//     value the session is already sitting at must not blow away the
+//     overlay mid-service.
+//  2. Exits complete when the boundary moves away: if the session WAS
+//     `complete` and the (possibly clamped) value no longer sits on the new
+//     active boundary, this defers to the EXACT SAME `exitComplete` every
+//     other exit-only transition already uses — not a parallel rule — so
+//     manual -> idle / automatic -> paused and the hiddenByCompletion
+//     re-show gate behave identically here. `exitComplete` is itself a
+//     no-op when `s.status !== 'complete'`, so combined with rule 1 the net
+//     effect is: status changes ONLY in the "was complete, no longer at the
+//     boundary" case; every other combination leaves it untouched.
+//  3. Clears `undoStack` unconditionally: earlier entries can reference
+//     values outside the NEW range (restoring one is the whole point of
+//     `undo`), and restoring one after a reconfigure would break the range
+//     invariant every other engine command guarantees.
+function reconfigure(
+  s: Session,
+  startValue: number,
+  finishValue: number,
+  intervalSeconds: number,
+  completion: CompletionConfig,
+  nowMs: number,
+): ApplyResult {
+  if (!isValidCountValue(startValue) || !isValidCountValue(finishValue) || startValue === finishValue) {
+    return reject(s, 'invalid-value');
+  }
+  if (!(SPEED_LEVELS as readonly number[]).includes(intervalSeconds)) return reject(s, 'invalid-value');
+  if (!isCompletionConfig(completion)) return reject(s, 'invalid-value');
+
+  const { lo, hi } = rangeOf({ startValue, finishValue });
+  const currentValue = Math.min(Math.max(s.currentValue, lo), hi);
+  const valueChanged = currentValue !== s.currentValue;
+  const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+
+  const boundary = activeBoundary({ startValue, finishValue, direction: s.direction });
+  const atBoundary = currentValue === boundary;
+
+  // Rule 2 above: only ever EXITS complete, and only in the one combination
+  // that requires it. Every other combination (including rule 1's "lands on
+  // the boundary but wasn't already complete") passes the pre-reconfigure
+  // status/overlay/flag straight through, unchanged.
+  const { status, overlayVisible, hiddenByCompletion, effects } =
+    s.status === 'complete' && !atBoundary
+      ? exitComplete(s, baseEffects)
+      : { status: s.status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects: baseEffects };
+
+  return accept(
+    s,
+    { startValue, finishValue, intervalSeconds, completion, currentValue, undoStack: [], status, overlayVisible, hiddenByCompletion },
+    nowMs,
+    effects,
+  );
+}
+
 export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResult {
   switch (cmd.type) {
     case 'increment':
@@ -422,6 +492,8 @@ export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResu
       return endSession(s, cmd.keepOverlay, nowMs);
     case 'completionHide':
       return completionHide(s, nowMs);
+    case 'reconfigure':
+      return reconfigure(s, cmd.startValue, cmd.finishValue, cmd.intervalSeconds, cmd.completion, nowMs);
 
     default: {
       // Exhaustiveness guard: if Command ever grows a new variant without a case

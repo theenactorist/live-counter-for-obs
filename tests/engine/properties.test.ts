@@ -19,7 +19,12 @@ function deepFreeze<T>(x: T): T {
 // `endSession` and `completionHide` are deliberately excluded from this
 // arbitrary — both are dock-internal lifecycle commands, not part of the
 // count-changing core loop these invariants exercise (mirrors the exclusion
-// in migrate.ts's replaySeed command menu).
+// in migrate.ts's replaySeed command menu). `reconfigure` (Task 2.18) is
+// excluded too, and for a stronger reason: it changes startValue/finishValue
+// themselves — the very range `rangeOf`/`activeBoundary` below check the
+// invariants against — so mixing it in would invalidate the "value never
+// leaves the range" property rather than exercise it (dedicated coverage
+// lives in tests/engine/reconfigure.test.ts instead).
 const cmdArb = fc.oneof(
   ...(['increment', 'decrement', 'undo', 'reverse', 'reset', 'start', 'pause', 'resume',
       'faster', 'slower', 'showOverlay', 'hideOverlay', 'tick'] as const)

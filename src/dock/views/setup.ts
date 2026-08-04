@@ -45,11 +45,12 @@
 // Escaping discipline: template (label) text and titles are operator
 // content — every dynamic string this view renders goes through
 // `textContent`/`.value`, never `innerHTML`.
-import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout } from '../../engine/types.js';
+import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout, Session } from '../../engine/types.js';
 import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION } from '../../engine/types.js';
 import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
+import { generateNonce } from '../../protocol/bus.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 import { createPresentationNodes, applyPresentation, animationTargets, type PresentationNodes } from '../../shared/overlay-presentation.js';
 
@@ -131,6 +132,13 @@ export interface SetupViewHandle {
   destroy(): void;
   /** Prefills the form from an existing preset and enters editing mode (called by the Presets view via main.ts). */
   loadPreset(preset: Preset): void;
+  // Task 2.18 — main.ts calls this whenever the Setup tab is (re)activated
+  // (mirrors presets.ts's/diagnostics.ts's own refresh()). Re-syncs the
+  // reconfigure-relevant fields from the ACTIVE session so "Update session"
+  // always starts from the live truth, unless the operator is currently
+  // editing a preset (loadPreset() already prefilled from THAT instead, and
+  // switching tabs away and back must not clobber it).
+  refresh(): void;
 }
 
 export interface MountSetupViewOptions {
@@ -177,6 +185,13 @@ interface SetupUiState {
   editing: EditingState | null;
   conflict: ConflictKind;
   error: string | null;
+  // Task 2.18 — set after a successful "Update session" whose reconfigure
+  // clamped the running session's currentValue into the (possibly narrowed)
+  // new range; names the pre-clamp and post-clamp values. Persists across
+  // tab switches (this view is only ever hidden, never unmounted) until the
+  // next Update session click, so the operator sees it whether they check
+  // right away or after a moment on Live.
+  reconfigureWarning: string | null;
 }
 
 interface FocusSnapshot {
@@ -271,18 +286,30 @@ function defaultUiState(): SetupUiState {
     editing: null,
     conflict: null,
     error: null,
+    reconfigureWarning: null,
   };
 }
 
 export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptions): SetupViewHandle {
   const ui = defaultUiState();
+  // Task 2.18 — prefill from an already-active session at mount time (the
+  // "on mount" half of the brief's "prefill on mount/tab-activation"; the
+  // "tab-activation" half is `refresh()`, on the returned handle, below).
+  // Covers a fresh boot that recovers/keeps a session already running before
+  // this view (or the operator) ever touches it — e.g. a reload, or a
+  // session started via Presets' `preset-start` before Setup was visited.
+  const activeSessionAtMount = opts.controller.getState().session;
+  if (activeSessionAtMount) prefillFromSession(activeSessionAtMount);
   // Phase 2 final-review fix (code-quality:P2-Q-03): performSave() awaits
   // storage and then render()s, and main.ts's boot() (settings-save
   // reconnect) can tear this view down mid-await — the operator fixing a bad
   // port is exactly when that happens. Without this flag the stale
   // continuation repaints THIS mount's form (old title, old values, handlers
-  // closed over a disposed controller) over the freshly-mounted replacement,
-  // and Setup has no onActivate refresh hook to heal it.
+  // closed over a disposed controller) over the freshly-mounted replacement.
+  // Task 2.18's `refresh()` (below) does not change this: it is a targeted
+  // prefill-on-tab-activation hook, not a general resync, so it would never
+  // by itself notice or repaint over a stale in-flight write — `destroyed`
+  // still carries the whole guarantee here.
   let destroyed = false;
 
   // Task 2.14 — the embedded WYSIWYG preview's own node set, created ONCE at
@@ -513,6 +540,32 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return rangeValid() && completionValid() && styleValid();
   }
 
+  // Task 2.18 — gated identically to canStart() (the reconfigure command
+  // validates the exact same range/completion rules createSession does, and
+  // Update also applies presentation via buildStyle()) PLUS an active
+  // session actually existing to reconfigure.
+  function canUpdate(): boolean {
+    return opts.controller.getState().session !== null && rangeValid() && completionValid() && styleValid();
+  }
+
+  // Task 2.18 — copies the reconfigure-relevant fields of an ACTIVE session
+  // into the form: startValue/finishValue/intervalSeconds/completion, plus
+  // `mode` (not itself part of the `reconfigure` command — it has no mode
+  // field — but needed here so the Interval row's own visibility gate,
+  // `ui.mode === 'automatic'`, reflects reality). Deliberately does NOT touch
+  // `title`/`editing`/label/style/animation fields: Session carries none of
+  // those (they live only on Preset, or as controller-instance-only state
+  // with no public getter), so "prefill from it" is scoped to what the
+  // session actually owns.
+  function prefillFromSession(session: Session): void {
+    ui.startValue = String(session.startValue);
+    ui.finishValue = String(session.finishValue);
+    ui.mode = session.mode;
+    ui.intervalSeconds = session.intervalSeconds;
+    ui.completionKind = session.completion.kind;
+    ui.completionSeconds = session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
+  }
+
   function previewValue(): number {
     const s = parseIntStrict(ui.startValue);
     return s !== null && isValidCountValue(s) ? s : 0;
@@ -615,6 +668,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function onStartSession(): void {
     if (!canStart()) return;
     ui.error = null;
+    // A clamp warning from a PREVIOUS session's Update session is stale the
+    // moment a brand new session starts.
+    ui.reconfigureWarning = null;
     const startValue = parseIntStrict(ui.startValue)!;
     const finishValue = parseIntStrict(ui.finishValue)!;
     const cfg: SessionConfig = {
@@ -644,6 +700,68 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       render();
       return;
     }
+    opts.onSessionStarted();
+  }
+
+  // Task 2.18 — "update session": applies the form's presentation (style/
+  // template/animation) via the existing `adoptPresentation`, then
+  // reconfigures the ACTIVE session's range/interval/completion in place via
+  // the engine's `reconfigure` command — never `startSession()`, which would
+  // reset currentValue to the new startValue and is exactly the "restart"
+  // behavior this button exists to avoid. `mode` is deliberately NOT part of
+  // the reconfigure payload (the command has no mode field — switching
+  // manual/automatic mid-session is `setMode`'s job, not this one's).
+  function onUpdateSession(): void {
+    if (!canUpdate()) return;
+    const activeSession = opts.controller.getState().session;
+    // Defensive: canUpdate() already required a non-null session, but guards
+    // against the vanishingly small window where it ends between the click
+    // and this handler running (e.g. another dock window's endSession).
+    if (!activeSession) return;
+
+    ui.error = null;
+    ui.reconfigureWarning = null;
+
+    const startValue = parseIntStrict(ui.startValue)!;
+    const finishValue = parseIntStrict(ui.finishValue)!;
+    const completion = buildCompletion();
+    const style = buildStyle();
+    // Task 2.17 — same fix as onStartSession()/performSave() above: the
+    // broadcast template must carry the operator's literal spaces, not a
+    // trimmed copy.
+    const template = ui.template.trim().length > 0 ? ui.template : null;
+    const animation = buildAnimation();
+    const previousValue = activeSession.currentValue;
+
+    // Presentation rides adoptPresentation() (controller clarification) —
+    // independent of, and broadcast separately from, the reconfigure command
+    // itself.
+    opts.controller.adoptPresentation(style, template, animation);
+
+    const result = opts.controller.dispatch({
+      type: 'reconfigure',
+      startValue,
+      finishValue,
+      intervalSeconds: ui.intervalSeconds,
+      completion,
+      nonce: generateNonce(),
+    });
+
+    if (!result.accepted) {
+      // canUpdate()'s gates mirror reconfigure's own validation exactly, so
+      // this should be unreachable in practice — defense in depth only, same
+      // spirit as onStartSession()'s try/catch above.
+      ui.error = 'Could not update the session: the configuration is invalid.';
+      render();
+      return;
+    }
+
+    if (result.session.currentValue !== previousValue) {
+      ui.reconfigureWarning =
+        `Current value ${previousValue} was outside the new range and was clamped to ${result.session.currentValue}.`;
+    }
+
+    render();
     opts.onSessionStarted();
   }
 
@@ -1035,6 +1153,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     if (ui.conflict !== null) root.appendChild(renderConflict(ui.conflict));
     if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
+    // Task 2.18 — set by a successful Update session whose reconfigure
+    // clamped the running session's value into the new range; see the
+    // `reconfigureWarning` field doc comment above.
+    if (ui.reconfigureWarning) {
+      root.appendChild(
+        el('div', { 'data-testid': 'setup-reconfigure-warning', class: 'field-error' }, ui.reconfigureWarning),
+      );
+    }
 
     // PRD §9 item 1 — the WYSIWYG preview is always visible, at the very
     // top: "a preview to show the person setting up what the end result
@@ -1232,6 +1358,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const start = button('setup-start-session', 'Start session', { disabled: !canStart() });
     start.addEventListener('click', () => onStartSession());
     actions.appendChild(start);
+
+    // Task 2.18 — "Update session", beside Start session (brief: "render
+    // Update session beside Start session"). Always rendered (same pattern
+    // as Save/Start above) rather than conditionally omitted when no session
+    // is active — just disabled, via the SAME canUpdate() gate read fresh
+    // every render(), so its enabled state can never go stale between
+    // renders without this view needing a live controller subscription.
+    const update = button('setup-update-session', 'Update session', { disabled: !canUpdate() });
+    update.addEventListener('click', () => onUpdateSession());
+    actions.appendChild(update);
+
     root.appendChild(actions);
 
     container.appendChild(root);
@@ -1275,6 +1412,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
       ui.conflict = null;
       ui.error = null;
+      ui.reconfigureWarning = null;
+      render();
+    },
+    // Task 2.18 — called by main.ts whenever the Setup tab is (re)activated.
+    // Re-syncs the reconfigure-relevant fields from the ACTIVE session
+    // (`prefillFromSession`, above) so "Update session" always starts from
+    // the live truth — UNLESS the operator is currently editing a preset
+    // (`ui.editing !== null`): `loadPreset()` already populated the form
+    // from THAT preset, and main.ts calls it immediately before activating
+    // this tab (see `onLoadPreset` in main.ts), so re-deriving from the
+    // session here would silently clobber the freshly-loaded preset the
+    // instant the tab switch's onActivate callback ran.
+    refresh(): void {
+      if (destroyed) return;
+      if (ui.editing === null) {
+        const session = opts.controller.getState().session;
+        if (session) prefillFromSession(session);
+      }
       render();
     },
   };

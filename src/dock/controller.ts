@@ -48,6 +48,8 @@ const LABELS: Record<Command['type'], string> = {
   completionHide: 'Hide',
   setMode: 'Mode',
   endSession: 'End',
+  // Task 2.18 — "update session" reconfigures a running session in place.
+  reconfigure: 'Update',
 };
 
 export class SessionController {
@@ -435,6 +437,13 @@ export class SessionController {
         break;
       case 'faster':
       case 'slower':
+      // Task 2.18 — a reconfigure's interval change re-arms the timer in
+      // place, exactly like faster/slower: `AutoTimer.setIntervalSeconds`
+      // already no-ops safely when the timer isn't running (just updates the
+      // stored interval for a future start()) and preserves accrued time
+      // when it is, so no separate running-state check is needed here
+      // either.
+      case 'reconfigure':
         if (result.session.intervalSeconds !== prevInterval) {
           this.timer.setIntervalSeconds(result.session.intervalSeconds);
         }

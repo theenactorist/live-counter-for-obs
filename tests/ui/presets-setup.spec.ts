@@ -6,7 +6,7 @@ import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { createSession } from '../../src/engine/counter.js';
-import type { OverlayLayout } from '../../src/engine/types.js';
+import type { CompletionConfig, Mode, OverlayLayout } from '../../src/engine/types.js';
 import { DEFAULT_STYLE } from '../../src/shared/default-style.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2426,6 +2426,229 @@ test.describe('dock Setup + Presets views', () => {
         const row = page.getByTestId('preset-row').filter({ hasText: 'Spacey Export' });
         await row.getByTestId('preset-load').click();
         await expect(page.getByTestId('setup-template')).toHaveValue('Hello x ');
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+
+  // --- Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27): "Update
+  // session" — reconfigures a RUNNING session's range/interval/completion
+  // from Setup without resetting its current value (unlike Start session,
+  // which always replaces). ------------------------------------------------
+  test.describe('Task 2.18: Update session', () => {
+    interface HookStartCfg {
+      startValue: number;
+      finishValue: number;
+      mode: Mode;
+      intervalSeconds?: number;
+      completion?: CompletionConfig;
+    }
+
+    /** Starts a session via the devhook test seam, bypassing Setup's own form entirely — so a later visit to the Setup tab proves genuine prefill-from-session, not leftover form state. */
+    async function startSessionViaHook(page: Page, cfg: HookStartCfg): Promise<void> {
+      await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+      await page.evaluate((c) => {
+        (window as unknown as { __lc: { startSession: (cfg: unknown) => void } }).__lc.startSession(c);
+      }, cfg);
+    }
+
+    test('prefills from the active session, reconfigures without restarting, and repaints the overlay with the new presentation', async ({
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port }); // devhook default true — see openDock()
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        await startSessionViaHook(dock, { startValue: 0, finishValue: 50, mode: 'manual' });
+        const plus = dock.getByTestId('btn-plus');
+        for (let i = 0; i < 23; i++) await plus.click();
+        await expect(dock.getByTestId('current-value')).toHaveText('23');
+
+        await dock.getByTestId('tab-setup').click();
+        // Prefilled from the ACTIVE session — started via the devhook seam,
+        // never touching this form — proving genuine prefill, not leftover
+        // default form state (defaults are '0'/'10', not '0'/'50').
+        await expect(dock.getByTestId('setup-start')).toHaveValue('0');
+        await expect(dock.getByTestId('setup-finish')).toHaveValue('50');
+        await expect(dock.getByTestId('setup-update-session')).toBeEnabled();
+
+        await dock.getByTestId('setup-finish').fill('30');
+        await dock.getByTestId('setup-template').fill('Score: {count}');
+        await dock.getByTestId('setup-number-size').fill('150');
+
+        await dock.getByTestId('setup-update-session').click();
+
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(dock.getByTestId('current-value')).toHaveText('23'); // unchanged: no restart
+        await expect(dock.getByTestId('progress-line')).toContainText('23 of 30');
+
+        // The overlay — a separate real page, driven only by the dock's own
+        // broadcast — repaints with the new range AND the new presentation.
+        await expect(overlay.getByTestId('overlay-number')).toHaveText('23');
+        await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Score: ');
+        const numberFontSize = await overlay
+          .getByTestId('overlay-number')
+          .evaluate((el) => getComputedStyle(el).fontSize);
+        expect(numberFontSize).toBe('150px');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('clamps the current value into a narrowed range and shows a warning naming the old and new value', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+        const plus = page.getByTestId('btn-plus');
+        for (let i = 0; i < 23; i++) await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('23');
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-finish')).toHaveValue('50');
+        await page.getByTestId('setup-finish').fill('10');
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('current-value')).toHaveText('10'); // clamped to the new hi
+
+        await page.getByTestId('tab-setup').click();
+        const warning = page.getByTestId('setup-reconfigure-warning');
+        await expect(warning).toBeVisible();
+        await expect(warning).toContainText('23');
+        await expect(warning).toContainText('10');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('never auto-completes: reconfiguring the finish down to the current value holds without entering complete or hiding the overlay', async ({
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port }); // devhook default true
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        // kind:'hide' gives a genuine, visible consequence if this regresses:
+        // an accidental completion entry would hide the overlay outright.
+        await startSessionViaHook(dock, {
+          startValue: 0,
+          finishValue: 50,
+          mode: 'manual',
+          completion: { kind: 'hide' },
+        });
+        const plus = dock.getByTestId('btn-plus');
+        for (let i = 0; i < 23; i++) await plus.click();
+        await expect(dock.getByTestId('current-value')).toHaveText('23');
+        await expect(overlay.getByTestId('overlay-number')).toHaveText('23');
+
+        await dock.getByTestId('tab-setup').click();
+        await dock.getByTestId('setup-finish').fill('23'); // exactly the current value: a would-be boundary
+        await dock.getByTestId('setup-update-session').click();
+
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(dock.getByTestId('current-value')).toHaveText('23');
+        // Never (re-)entered complete: the overlay is still showing, not
+        // hidden by a phantom completion-hide.
+        await expect(dock.getByTestId('status-chip')).toHaveText('SHOWING');
+        await expect(overlay.getByTestId('overlay-number')).toHaveText('23');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Update session is disabled with no active session; becomes enabled once one starts', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('20');
+        await page.getByTestId('setup-start-session').click();
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Start session from Setup still replaces an active session immediately, with no confirmation prompt (existing behaviour intact)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click();
+        await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        await page.getByTestId('setup-finish').fill('20');
+        await page.getByTestId('setup-start-session').click();
+
+        // No confirmation dialog anywhere — replaces immediately at the new
+        // start value, exactly as before this task.
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('current-value')).toHaveText('5');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('loading a preset into Setup while a session is active is not clobbered by the session prefill on tab re-activation', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 1, finish: 99, title: 'Editable Preset' });
+        await page.getByTestId('setup-save').click();
+
+        // Confirm the save has actually landed (performSave() is async)
+        // before reusing these SAME start/finish fields for an unrelated
+        // session below — otherwise the two would race.
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Editable Preset');
+        await page.getByTestId('tab-setup').click();
+
+        // Start an unrelated active session directly from this same form.
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-presets').click();
+        // -> setupHandle.loadPreset() runs, THEN tabs.activate('setup') fires
+        // main.ts's onActivate('setup') -> setupHandle.refresh(). If refresh()
+        // didn't skip re-prefilling while ui.editing is set, this would
+        // silently overwrite the just-loaded preset with the active
+        // session's own 0/50.
+        await page.getByTestId('preset-load').click();
+
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await expect(page.getByTestId('setup-editing-title')).toContainText('Editable Preset');
+        await expect(page.getByTestId('setup-start')).toHaveValue('1');
+        await expect(page.getByTestId('setup-finish')).toHaveValue('99');
       } finally {
         await mock.close();
       }

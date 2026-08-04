@@ -167,6 +167,14 @@ function main(): void {
   const tabs = wireTabs(shell, (name) => {
     if (name === 'presets') presetsHandle?.refresh();
     else if (name === 'diagnostics') diagnosticsHandle?.refresh();
+    // Task 2.18 — re-syncs Setup's reconfigure-relevant fields from the
+    // active session every time the operator (re)activates this tab (the
+    // "tab-activation" half of "prefill the form from it on mount/tab-
+    // activation"; setup.ts's mountSetupView itself covers the "on mount"
+    // half). `setupHandle` is declared further down in this function but
+    // already assigned by the time any tab OTHER than the default ('live')
+    // can be activated — see wireTabs()'s own doc comment.
+    else if (name === 'setup') setupHandle?.refresh();
   });
   // Every tab button shares the same `.tabs` parent (see dock.html) — any of
   // them reaches it.

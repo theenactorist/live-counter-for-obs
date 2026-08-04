@@ -389,6 +389,138 @@ describe('SessionController — timer wiring', () => {
   });
 });
 
+// Task 2.18 (operator feedback 2026-08-02, PRD §8.7) — dispatching
+// `reconfigure` follows the normal accepted-command path (dedup ->
+// applyCommand -> effects -> persist -> broadcast -> notify), same as any
+// other command; the one controller-specific behavior on top of that is
+// re-arming the AutoTimer at the new interval, in place, when it changed
+// while running — never a stop()/start() restart.
+describe('SessionController — reconfigure()', () => {
+  it('follows the normal accepted-command path: persists before it broadcasts, exactly once each', async () => {
+    const { storage, bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+
+    const saveSpy = vi.spyOn(storage, 'saveSession');
+    const sendSpy = vi.spyOn(bus, 'send');
+
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 100,
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce: 'rc-1',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(result.session.finishValue).toBe(100);
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(saveSpy.mock.invocationCallOrder[0]!).toBeLessThan(sendSpy.mock.invocationCallOrder[0]!);
+  });
+
+  it('clamps currentValue into the new range as part of the same accepted dispatch', async () => {
+    const { controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+    for (let i = 0; i < 23; i++) controller.dispatch({ type: 'increment', nonce: `i${i}` });
+    expect(controller.getState().session?.currentValue).toBe(23);
+
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 10,
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce: 'rc-2',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(result.session.currentValue).toBe(10); // clamped
+    expect(controller.getState().session?.currentValue).toBe(10);
+  });
+
+  it('rejects an invalid reconfigure (invalid-value) without persisting or broadcasting, and leaves the session untouched', async () => {
+    const { storage, bus, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+    const before = controller.getState().session;
+
+    const saveSpy = vi.spyOn(storage, 'saveSession');
+    const sendSpy = vi.spyOn(bus, 'send');
+
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 5,
+      finishValue: 5, // equal start/finish: invalid
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce: 'rc-3',
+    });
+
+    expect(result.accepted).toBe(false);
+    expect(result.rejection).toBe('invalid-value');
+    expect(result.session).toBe(before);
+    expect(controller.getState().session).toBe(before);
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('re-arms the timer at the new interval while an automatic session keeps running, preserving accrued time (no restart)', async () => {
+    const { rt, timer, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+      null,
+    );
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+    expect(timer.running).toBe(true);
+
+    rt.advanceTo(500); // half-way into the first 1s interval; nothing fires yet
+
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 100,
+      intervalSeconds: 2,
+      completion: { kind: 'hold' },
+      nonce: 'n2',
+    });
+    expect(result.accepted).toBe(true);
+    expect(timer.running).toBe(true); // still running — never stopped/restarted
+    expect(controller.getState().session?.status).toBe('running');
+
+    rt.advanceTo(1999); // just short of the accrued-time-preserving re-arm at t=2000
+    expect(controller.getState().session?.currentValue).toBe(0);
+
+    rt.advanceTo(2000); // lastTickAt(0) + the new 2000ms interval
+    expect(controller.getState().session?.currentValue).toBe(1);
+  });
+
+  it('does not touch the timer when the interval is unchanged', async () => {
+    const { timer, controller } = await setup();
+    controller.startSession(
+      { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 },
+      styleFixture(),
+      null,
+      null,
+    );
+    controller.dispatch({ type: 'start', nonce: 'n1' });
+
+    const setIntervalSpy = vi.spyOn(timer, 'setIntervalSeconds');
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 200,
+      intervalSeconds: 1, // unchanged
+      completion: { kind: 'hold' },
+      nonce: 'n2',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('SessionController — holdThenHide completion', () => {
   it('schedules a completionHide and, once fired, hides the overlay with hiddenByCompletion', async () => {
     const { scheduler, controller } = await setup();
