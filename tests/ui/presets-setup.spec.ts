@@ -2706,16 +2706,16 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
-    // --- Fix wave 2 (minor), REVISED in fix wave 3 (minor 2): fix wave 2
-    // made canUpdate() check `intervalSeconds ∈ SPEED_LEVELS`, which (without
-    // a substitution) left a session recovered with an off-menu interval
-    // PERMANENTLY unable to Update at all — worse for a MANUAL session
-    // specifically, since the Interval <select> only renders in automatic
-    // mode, so the operator has no field to dirty to override it. Fix wave 3
-    // substitutes the nearest SPEED_LEVELS entry on the inherit-from-session
-    // branch instead, so Update stays usable; this test now asserts THAT,
-    // replacing its fix-wave-2 "stays disabled" expectation.
-    test('a recovered MANUAL session with an off-menu interval still allows Update session (substitutes the nearest SPEED_LEVEL)', async ({
+    // --- Fix wave 4 (Important 2, coordinator re-review) REPLACES fix wave
+    // 3's "substitute the nearest SPEED_LEVEL" workaround entirely: it had
+    // its own bug (silently changing a RUNNING automatic session's actual
+    // tick rate as a side effect of an unrelated field's Update). The real
+    // fix is in the ENGINE now (`reconfigure` accepts an intervalSeconds
+    // that exactly matches the session's own current value regardless of
+    // SPEED_LEVELS membership) — so Setup no longer substitutes anything;
+    // an untouched interval passes straight through, unchanged, off-menu or
+    // not.
+    test('a recovered MANUAL session with an off-menu interval still allows Update session — the interval passes through UNCHANGED (no substitution)', async ({
       page,
     }) => {
       const mock = await startMockObs();
@@ -2747,31 +2747,85 @@ test.describe('dock Setup + Presets views', () => {
         await page.getByTestId('tab-setup').click();
         await expect(page.getByTestId('current-value')).toHaveText('0'); // sanity: the session really did recover
         // Manual mode: the Interval row doesn't render at all, so the
-        // operator has no way to dirty 'intervalSeconds' to fix this
-        // themselves — the substitution is the only thing keeping Update
-        // usable here.
+        // operator has no way to dirty 'intervalSeconds' to change it —
+        // and now doesn't need to, either.
         await expect(page.getByTestId('setup-interval')).toHaveCount(0);
         await expect(page.getByTestId('setup-update-session')).toBeEnabled();
 
+        await page.getByTestId('setup-finish').fill('80'); // an unrelated, genuine edit
         await page.getByTestId('setup-update-session').click();
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('progress-line')).toContainText('0 of 80');
 
         // Live's UI doesn't surface intervalSeconds for a manual session
         // (no automatic cluster) — read it back from the persisted session.
         const stored = await page.evaluate(
           () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { intervalSeconds: number },
         );
-        expect(stored.intervalSeconds).toBe(1.5); // nearest SPEED_LEVEL to 1.3
+        expect(stored.intervalSeconds).toBe(1.3); // UNCHANGED — no substitution
       } finally {
         await mock.close();
       }
     });
 
-    // --- Fix wave 1 (coordinator review, Important 3): `ui.mode` is
-    // prefilled and editable but was previously silently ignored by Update
-    // (reconfigure has no mode field). Update now dispatches `setMode` first
-    // when the form's mode differs from the session's.
-    test('Update session applies a mode change: manual -> automatic at the chosen interval shows the Live automatic cluster', async ({
+    // --- Fix wave 4 (Important 2, coordinator re-review) — the regression
+    // the reviewer found in fix wave 3: an off-menu interval on a RUNNING
+    // automatic session had its tick rate silently substituted to the
+    // nearest SPEED_LEVELS entry by an unrelated (label-only) Update. Must
+    // fail without the fix (i.e. this is the exact scenario the removed
+    // `nearestSpeedLevel` substitution used to break).
+    test('an automatic RUNNING session at an off-menu interval keeps its EXACT tick rate through an unrelated label-only Update', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.evaluate(() => {
+          const now = new Date().toISOString();
+          const session = {
+            schemaVersion: 1,
+            revision: 0,
+            presetId: null,
+            startValue: 0,
+            finishValue: 1000,
+            currentValue: 0,
+            direction: 'up',
+            mode: 'automatic',
+            status: 'running',
+            intervalSeconds: 1.3, // off-menu
+            overlayVisible: true,
+            hiddenByCompletion: false,
+            undoStack: [],
+            completion: { kind: 'hold' },
+            updatedAt: now,
+          };
+          window.localStorage.setItem('lc.session.v1', JSON.stringify(session));
+        });
+        await openDock(page, { port: mock.port, devhook: false }); // reload: recovers it, restored as paused
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('Score: {count}'); // label-only edit — never touches interval
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { intervalSeconds: number },
+        );
+        expect(stored.intervalSeconds).toBe(1.3); // EXACT rate preserved — no substitution to 1.5
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 4 (ruling 1, STRUCTURAL — supersedes fix waves 1 and 2's
+    // mode-dispatch entirely): Setup NEVER changes an active session's mode.
+    // Mode already has a dedicated control on the Live tab
+    // (`mode-toggle`/`auto-start`); Setup's own Mode select is now a
+    // disabled READ-OUT of the live session's mode whenever one is active,
+    // and `onUpdateSession` never dispatches `setMode` under any
+    // circumstance. ---------------------------------------------------
+
+    test('with a session active, the Mode select is disabled and displays the live session\'s mode', async ({
       page,
     }) => {
       const mock = await startMockObs();
@@ -2781,47 +2835,99 @@ test.describe('dock Setup + Presets views', () => {
 
         await page.getByTestId('tab-setup').click();
         await expect(page.getByTestId('setup-mode')).toHaveValue('manual');
-        await page.getByTestId('setup-mode').selectOption('automatic');
-        await page.getByTestId('setup-interval').selectOption('2');
-        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('setup-mode')).toBeDisabled();
 
-        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
-        // The automatic cluster (Task 2.10) only renders for an automatic
-        // session — its presence, at the chosen interval, IS the proof the
-        // mode change actually landed.
-        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
-        await expect(page.getByTestId('auto-start')).toBeVisible();
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('mode-toggle').click(); // manual -> automatic, from Live
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+        await expect(page.getByTestId('setup-mode')).toBeDisabled();
       } finally {
         await mock.close();
       }
     });
 
-    test('Update session applies a mode change: automatic (running) -> manual stops the timer', async ({ page }) => {
+    test('with no session active, Mode is editable and Start honours it as before', async ({ page }) => {
       const mock = await startMockObs();
       try {
-        await openDock(page, { port: mock.port }); // devhook default true
-        await startSessionViaHook(page, { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 });
-        await page.getByTestId('auto-start').click();
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toBeEnabled();
+
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-mode').selectOption('automatic');
+        await page.getByTestId('setup-interval').selectOption('2');
+        await page.getByTestId('setup-start-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // The reviewer's own repro: load a preset (whose own mode differs from
+    // the session), THEN change mode + start counting from LIVE, THEN
+    // return to Setup and click Update to apply an unrelated (range) edit —
+    // the session must stay in whatever mode Live put it in, still
+    // counting, and the mismatch note must explain why Setup's own Mode
+    // reads differently from the preset just loaded.
+    test('reviewer repro: load preset -> Live toggles mode + starts counting -> Setup Update leaves the session in its LIVE mode, still counting, with the mismatch note shown', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 80, title: 'Manual Preset' }); // mode defaults to 'manual'
+        await page.getByTestId('setup-save').click();
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Manual Preset');
+
+        // An unrelated ad hoc MANUAL session, active before the preset load.
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-row').filter({ hasText: 'Manual Preset' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await expect(page.getByTestId('setup-start')).toHaveValue('0');
+        await expect(page.getByTestId('setup-finish')).toHaveValue('80');
+        // Session is still manual at this point — no mismatch yet.
+        await expect(page.getByTestId('setup-mode-mismatch-note')).toHaveCount(0);
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('mode-toggle').click(); // manual -> automatic, from Live
+        await page.getByTestId('auto-start').click(); // start counting
         await expect(page.getByTestId('auto-pause')).toBeEnabled();
 
         await page.getByTestId('tab-setup').click();
+        // The preset (still loaded — ui.editing survives the round trip) is
+        // 'manual'; the session is now 'automatic' — the mismatch note
+        // explains it, and the disabled select shows the session's truth.
         await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
-        await page.getByTestId('setup-mode').selectOption('manual');
+        await expect(page.getByTestId('setup-mode')).toBeDisabled();
+        await expect(page.getByTestId('setup-mode-mismatch-note')).toContainText(
+          'This preset is Manual; the running session is Automatic. Switch it on the Live tab.',
+        );
+
         await page.getByTestId('setup-update-session').click();
 
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
-        await expect(page.getByTestId('auto-rate')).toHaveCount(0); // manual: no automatic cluster at all
-
-        // The timer must have actually stopped, not just the UI hiding the
-        // cluster. Fix wave 2 (minor, timing-fragility): capture the value
-        // immediately after Update rather than asserting a hardcoded '0' —
-        // a tick could plausibly have already landed during the preceding
-        // actions (this test failed once on a cold run for exactly that
-        // reason), and the actual claim under test is "no MORE ticks fire",
-        // not "it happens to still read its start value".
-        const valueAfterUpdate = await page.getByTestId('current-value').textContent();
-        await page.waitForTimeout(1500); // long enough for a still-running 1s timer to have ticked at least once
-        await expect(page.getByTestId('current-value')).toHaveText(valueAfterUpdate ?? '0');
+        // The session stayed in its LIVE mode (automatic) and kept counting
+        // — Update never touched mode.
+        await expect(page.getByTestId('auto-rate')).toBeVisible();
+        const valueRightAfterUpdate = Number(await page.getByTestId('current-value').textContent());
+        await page.waitForTimeout(1500);
+        const valueAfterWait = Number(await page.getByTestId('current-value').textContent());
+        expect(valueAfterWait).toBeGreaterThan(valueRightAfterUpdate); // still ticking
+        // ...and the preset's own range DID apply (Update isn't a no-op —
+        // just mode-inert).
+        await expect(page.getByTestId('progress-line')).toContainText('of 80');
       } finally {
         await mock.close();
       }
@@ -2929,7 +3035,11 @@ test.describe('dock Setup + Presets views', () => {
     //     were.
     // ------------------------------------------------------------------
 
-    test('loading a preset into an active session and clicking Update applies the PRESET config (not a silent no-op)', async ({
+    // Fix wave 4 (ruling 1) REWRITE: this test previously asserted Update
+    // applied the preset's MODE too — no longer true, and correctly so
+    // (Setup never touches mode). It still applies the preset's own
+    // range/interval, and the session's mode stays exactly what it was.
+    test('loading a preset into an active session and clicking Update applies the PRESET range/interval (never its mode)', async ({
       page,
     }) => {
       const mock = await startMockObs();
@@ -2959,14 +3069,32 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
         await expect(page.getByTestId('setup-start')).toHaveValue('0');
         await expect(page.getByTestId('setup-finish')).toHaveValue('200');
-        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
-        await expect(page.getByTestId('setup-interval')).toHaveValue('2');
+        // Mode select is a READ-OUT of the (still manual) running session —
+        // NOT the preset's own 'automatic' — and is disabled; the Interval
+        // row follows the same displayed mode, so it doesn't render at all.
+        await expect(page.getByTestId('setup-mode')).toHaveValue('manual');
+        await expect(page.getByTestId('setup-mode')).toBeDisabled();
+        await expect(page.getByTestId('setup-interval')).toHaveCount(0);
+        await expect(page.getByTestId('setup-mode-mismatch-note')).toContainText(
+          'This preset is Automatic; the running session is Manual. Switch it on the Live tab.',
+        );
 
         await page.getByTestId('setup-update-session').click();
 
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
         await expect(page.getByTestId('progress-line')).toContainText('0 of 200');
-        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
+        // Still manual: no automatic cluster at all, whatever the preset said.
+        await expect(page.getByTestId('auto-rate')).toHaveCount(0);
+
+        // The preset's own interval preference (2) DID apply to the session
+        // (loadPreset() marks 'intervalSeconds' dirty regardless of mode) —
+        // just not visibly, since Live has nothing to show it for a manual
+        // session. Confirmed directly from storage.
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { intervalSeconds: number; mode: string },
+        );
+        expect(stored.mode).toBe('manual');
+        expect(stored.intervalSeconds).toBe(2);
       } finally {
         await mock.close();
       }
@@ -3017,6 +3145,46 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
+    // --- Fix wave 4 (ruling 4): never let the form look authoritative when
+    // it isn't. A persistent notice appears the moment the displayed form
+    // (e.g. right after a preset load) differs from what the running
+    // session is actually running, and clears once Update actually applies it.
+    test('the "not applied yet" notice appears after loading a preset over a running session, and clears after Update', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 200, title: 'Different Range Preset' });
+        await page.getByTestId('setup-save').click();
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Different Range Preset');
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-row').filter({ hasText: 'Different Range Preset' }).getByTestId('preset-load').click();
+
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await expect(page.getByTestId('setup-not-applied-notice')).toBeVisible();
+        await expect(page.getByTestId('setup-not-applied-notice')).toContainText(
+          "These settings aren't applied yet — click Update session.",
+        );
+
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-not-applied-notice')).toHaveCount(0); // cleared: now matches reality
+      } finally {
+        await mock.close();
+      }
+    });
+
     // --- Fix wave 3, minor 1: Update's validation gate must agree with
     // Save/Start's completionValid() (integer hold-seconds), not just the
     // engine's own, more permissive isCompletionConfig (any positive finite
@@ -3039,14 +3207,12 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
-    // --- Confirming test (coordinator-requested): does a label-only Update
-    // (no range/interval/completion/mode change) hit the engine's `noop`
-    // path and leave undo history intact? RESULT: no — see the comment
-    // inline and the fix report for the full explanation; reported to the
-    // coordinator rather than changed in the engine, per instruction.
-    test('confirming test: a label-only Update clears undo history when the session already has any (does NOT hit the noop path)', async ({
-      page,
-    }) => {
+    // --- Fix wave 4 (ruling 3) REPLACES fix wave 3's confirming test:
+    // fix-wave-3's finding ("a label-only Update wipes undo history when
+    // any exists") is now the FIXED behavior, not a reported-but-unfixed
+    // gap — undo is cleared only when the RANGE itself changes; a label-
+    // only (or interval-only, or completion-only) Update leaves it intact.
+    test('a label-only Update preserves undo history (undo genuinely still works)', async ({ page }) => {
       const mock = await startMockObs();
       try {
         await openDock(page, { port: mock.port }); // devhook default true
@@ -3065,18 +3231,57 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
         await expect(page.getByTestId('current-value')).toHaveText('2'); // unchanged: no restart
 
-        // CONFIRMED RESULT: the reviewer's expectation was that a label-only
-        // Update — whose resolved reconfigure payload is IDENTICAL to the
-        // session's own range/interval/completion — hits the engine's
-        // `noop` path and leaves undo history intact. It does not.
-        // `reconfigure`'s own noop condition (deliberate, fix wave 1)
-        // requires an EMPTY undo stack IN ADDITION to an identical config —
-        // "an identical reconfigure with existing undo history still clears
-        // it, since clearing IS the change" was an explicit, tested rule
-        // from this task's first fix wave. With undo history already
-        // present (as in any realistic mid-service Update), the ACCEPT path
-        // runs instead and clears it — Undo is now disabled.
-        await expect(page.getByTestId('btn-undo')).toBeDisabled();
+        // Undo survives — not just "the button looks enabled": clicking it
+        // genuinely restores the prior value.
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+        await page.getByTestId('btn-undo').click();
+        await expect(page.getByTestId('current-value')).toHaveText('1');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('an interval-only Update (range unchanged) also preserves undo history', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 });
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click(); // manual bump before automation starts ticking (undo entry)
+        await expect(page.getByTestId('current-value')).toHaveText('1');
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-interval').selectOption('2'); // interval-only edit
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+        await page.getByTestId('btn-undo').click();
+        await expect(page.getByTestId('current-value')).toHaveText('0');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a range-changing Update still clears undo history', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click();
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-finish').fill('80'); // a genuine range change
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('btn-undo')).toBeDisabled(); // cleared — the range moved
       } finally {
         await mock.close();
       }

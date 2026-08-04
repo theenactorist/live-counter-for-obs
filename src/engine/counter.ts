@@ -397,13 +397,15 @@ function completionEqual(a: CompletionConfig, b: CompletionConfig): boolean {
 // session": reconfigures a RUNNING session's range/interval/completion
 // without resetting `currentValue` to the new `startValue` (unlike starting
 // a fresh session via createSession/`start`Session). Validation mirrors
-// createSession's rules exactly (integers in [0, MAX_VALUE], startValue !==
-// finishValue, intervalSeconds in SPEED_LEVELS, a structurally valid
+// createSession's rules for startValue/finishValue/completion (integers in
+// [0, MAX_VALUE], startValue !== finishValue, a structurally valid
 // completion) — any failure rejects `invalid-value` with the SAME session
 // reference and no change at all, same contract as `jump`'s out-of-range
-// rejection.
+// rejection. `intervalSeconds` validation is NOT identical to
+// createSession's — see rule 5 (fix wave 4).
 //
-// Binding semantics (controller clarification, fix wave 1):
+// Binding semantics (controller clarification, fix wave 1; corrected fix
+// wave 4 — see rules 3 and 5, and the fix-wave-4 report for why):
 //  1. NEVER auto-completes: a clamped/unchanged value that lands exactly on
 //     the new active boundary just HOLDS there — status stays whatever it
 //     already was, no `completed` effect, no completion-hide side effect.
@@ -427,11 +429,17 @@ function completionEqual(a: CompletionConfig, b: CompletionConfig): boolean {
 //     no-op when `s.status !== 'complete'`, so combined with rule 1 the net
 //     effect is: status changes ONLY in the "was complete, no longer at the
 //     boundary" case; every other combination leaves it untouched.
-//  3. Clears `undoStack` unconditionally (except in the true-no-op case
-//     below): earlier entries can reference values outside the NEW range
-//     (restoring one is the whole point of `undo`), and restoring one after
-//     a reconfigure would break the range invariant every other engine
-//     command guarantees.
+//  3. Fix wave 4 correction — undo is cleared ONLY when the RANGE
+//     (startValue/finishValue) actually changes, not on every accepted
+//     reconfigure. Every `UndoEntry.value` is guaranteed to fall within
+//     [lo, hi] (see move()/jump()/undo()'s own invariant) — only a RANGE
+//     change can possibly push an existing entry outside that guarantee.
+//     An interval-only or completion-only change leaves every existing
+//     entry exactly as valid as it already was, so undo history survives
+//     it untouched. (Fix wave 1's original rule — clear unconditionally —
+//     was proven wrong by a fix-wave-3 confirming test: a label-only Update,
+//     which resolves to an interval/completion-identical, range-identical
+//     reconfigure, was wiping undo history it had no reason to touch.)
 //  4. Direction: reconfiguring is a range change, not a direction change, so
 //     the operator's own `direction` is preserved WHEN the new range is the
 //     same orientation as the old one (e.g. widening/narrowing 0->50 into
@@ -444,6 +452,21 @@ function completionEqual(a: CompletionConfig, b: CompletionConfig): boolean {
 //     overlay on the wrong end. So direction is only ever carried over
 //     within the SAME orientation; a flipped orientation snaps `direction`
 //     to match the NEW range's own natural direction instead.
+//  5. Fix wave 4 (Important 2) — an `intervalSeconds` that exactly matches
+//     the session's OWN current value is ALWAYS valid, whether or not it is
+//     itself a `SPEED_LEVELS` member. An unchanged value can never be LESS
+//     valid than the state it already came from: if the session is already
+//     running (or was recovered) at some interval, leaving it untouched
+//     must never turn into a rejection just because that exact value isn't
+//     (or is no longer) a menu entry. Only a GENUINELY new interval value —
+//     one that actually differs from `s.intervalSeconds` — is held to the
+//     `SPEED_LEVELS` menu. (Fix wave 2 introduced the `SPEED_LEVELS` check
+//     here at all; fix wave 3 then "fixed" an off-menu-interval session's
+//     resulting unusable Update by substituting the nearest menu entry in
+//     the DOCK layer, which silently changed a RUNNING automatic session's
+//     tick rate as a side effect of an unrelated field's Update. This rule
+//     is the actual fix: the engine itself accepts the unchanged value, so
+//     the dock never needs to substitute anything.)
 function reconfigure(
   s: Session,
   startValue: number,
@@ -455,23 +478,28 @@ function reconfigure(
   if (!isValidCountValue(startValue) || !isValidCountValue(finishValue) || startValue === finishValue) {
     return reject(s, 'invalid-value');
   }
-  if (!(SPEED_LEVELS as readonly number[]).includes(intervalSeconds)) return reject(s, 'invalid-value');
+  // Rule 5 above.
+  if (intervalSeconds !== s.intervalSeconds && !(SPEED_LEVELS as readonly number[]).includes(intervalSeconds)) {
+    return reject(s, 'invalid-value');
+  }
   if (!isCompletionConfig(completion)) return reject(s, 'invalid-value');
 
-  // True no-op (rule 3's exception): every wire-level input is byte-identical
-  // to what's already stored AND there is no undo history to clear — nothing
-  // downstream (range, clamp, direction, boundary, status) can possibly
-  // differ either, since all of those are pure functions of these same
-  // inputs plus the session's own (untouched) currentValue/status. Matches
-  // every other command's own no-op contract (same reference, no revision
-  // bump) instead of manufacturing a revision bump for a click that changed
-  // nothing at all.
+  // True no-op: every wire-level input is byte-identical to what's already
+  // stored — nothing downstream (range, clamp, direction, boundary, status,
+  // undo) can possibly differ either, since all of those are pure functions
+  // of these same inputs plus the session's own (untouched) currentValue/
+  // status/undoStack. Fix wave 4 correction (rule 3): this is now
+  // unconditional on undo-stack size — undo history is not itself part of
+  // "the configuration", so an identical reconfigure is a true no-op
+  // regardless of how much undo history happens to exist, matching every
+  // other command's own no-op contract (same reference, no revision bump)
+  // instead of manufacturing a revision bump — and a stray undo-stack
+  // clear — for a click that changed nothing at all.
   if (
     startValue === s.startValue &&
     finishValue === s.finishValue &&
     intervalSeconds === s.intervalSeconds &&
-    completionEqual(completion, s.completion) &&
-    s.undoStack.length === 0
+    completionEqual(completion, s.completion)
   ) {
     return noop(s);
   }
@@ -498,6 +526,10 @@ function reconfigure(
       ? exitComplete(s, baseEffects)
       : { status: s.status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects: baseEffects };
 
+  // Rule 3 above: only a genuine RANGE change clears undo history.
+  const rangeChanged = startValue !== s.startValue || finishValue !== s.finishValue;
+  const undoStack = rangeChanged ? [] : s.undoStack;
+
   return accept(
     s,
     {
@@ -511,7 +543,7 @@ function reconfigure(
       completion: { ...completion },
       currentValue,
       direction,
-      undoStack: [],
+      undoStack,
       status,
       overlayVisible,
       hiddenByCompletion,

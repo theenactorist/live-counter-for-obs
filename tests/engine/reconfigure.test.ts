@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { activeBoundary } from '../../src/engine/types.js';
-import type { CompletionConfig } from '../../src/engine/types.js';
+import type { CompletionConfig, Session } from '../../src/engine/types.js';
 
 const T0 = 1_754_000_000_000;
 const mk = () => createSession({ startValue: 0, finishValue: 50, mode: 'manual' }, T0);
@@ -94,14 +94,14 @@ describe('reconfigure — clamping', () => {
   });
 });
 
-describe('reconfigure — clears the undo stack', () => {
-  it('undoStack is empty after reconfigure, even when it had entries before', () => {
+describe('reconfigure — clears the undo stack when the RANGE changes (fix wave 4: no longer unconditional)', () => {
+  it('undoStack is empty after a range-changing reconfigure, even when it had entries before', () => {
     let s = mk();
     s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
     s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
     expect(s.undoStack.length).toBeGreaterThan(0);
 
-    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0);
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0); // finishValue changes: a range change
     expect(r.session.undoStack).toEqual([]);
 
     // ...and undo is now a genuine no-op (invalid-state), not silently
@@ -109,6 +109,57 @@ describe('reconfigure — clears the undo stack', () => {
     const undoResult = applyCommand(r.session, { type: 'undo', nonce: nonce() }, T0);
     expect(undoResult.accepted).toBe(false);
     expect(undoResult.rejection).toBe('invalid-state');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 4 (Important 2, coordinator re-review) — an intervalSeconds that
+// exactly matches the session's OWN current value is ALWAYS valid, even if
+// it is itself off the SPEED_LEVELS menu (e.g. a recovered/legacy session).
+// Only a GENUINELY new interval value is held to the menu. This replaces
+// fix wave 3's dock-layer "substitute the nearest SPEED_LEVELS entry"
+// workaround, which had its own bug: it silently changed a RUNNING
+// automatic session's actual tick rate as a side effect of an unrelated
+// field's Update.
+// ---------------------------------------------------------------------------
+describe('reconfigure — an unchanged intervalSeconds is always valid, even off-menu (fix wave 4)', () => {
+  it('a manual session recovered at an off-menu interval (1.3) accepts a reconfigure that leaves it untouched', () => {
+    const s: Session = { ...mk(), intervalSeconds: 1.3 };
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 80, intervalSeconds: 1.3 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.intervalSeconds).toBe(1.3); // passed through unchanged, no substitution
+  });
+
+  it('an automatic RUNNING session at an off-menu interval (1.3) keeps that EXACT tick rate through an unrelated (completion-only) reconfigure', () => {
+    let s: Session = {
+      ...createSession({ startValue: 0, finishValue: 100, mode: 'automatic' }, T0),
+      intervalSeconds: 1.3,
+    };
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    expect(s.status).toBe('running');
+
+    // An unrelated (completion-only) reconfigure — the regression the
+    // reviewer found: fix wave 3's substitution would have silently changed
+    // this RUNNING session's tick rate to 1.5 (the nearest SPEED_LEVELS
+    // entry) even though nothing about the interval was touched.
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100, intervalSeconds: 1.3, completion: { kind: 'hide' } }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.status).toBe('running');
+    expect(r.session.intervalSeconds).toBe(1.3); // unchanged — no substitution
+  });
+
+  it('changing the interval away from an off-menu value still validates the NEW value against SPEED_LEVELS', () => {
+    const s: Session = { ...mk(), intervalSeconds: 1.3 };
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 1.234 }), T0); // a genuinely different, still off-menu value
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-value');
+  });
+
+  it('changing the interval away from an off-menu value to a real SPEED_LEVELS entry is accepted', () => {
+    const s: Session = { ...mk(), intervalSeconds: 1.3 };
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 2 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.intervalSeconds).toBe(2);
   });
 });
 
@@ -238,8 +289,8 @@ describe('reconfigure — validation rejects invalid-value with the SAME session
     expect(r.session).toBe(s);
   });
 
-  it('rejects an intervalSeconds not in SPEED_LEVELS', () => {
-    const s = mk();
+  it('rejects a GENUINELY NEW intervalSeconds not in SPEED_LEVELS (differs from the session\'s own current value)', () => {
+    const s = mk(); // interval 1 (default) — 1.234 is a real change, not a no-op passthrough
     const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 1.234 }), T0);
     expect(r.accepted).toBe(false);
     expect(r.rejection).toBe('invalid-value');
@@ -334,7 +385,7 @@ describe('reconfigure — direction only carries over within the same orientatio
 // with undo history still clears it (that IS a change); completion is
 // shallow-copied, not aliased (createSession's own documented discipline).
 // ---------------------------------------------------------------------------
-describe('reconfigure — true no-op vs. undo-clearing accept (fix wave 1)', () => {
+describe('reconfigure — true no-op is unconditional on undo-stack size (fix wave 4 correction)', () => {
   it('an identical reconfigure (same start/finish/interval/completion, empty undo stack) is a true no-op', () => {
     const s = mk(); // 0->50, interval 1 (default), completion hold (default)
     const r = applyCommand(
@@ -348,10 +399,19 @@ describe('reconfigure — true no-op vs. undo-clearing accept (fix wave 1)', () 
     expect(r.session.revision).toBe(s.revision);
   });
 
-  it('an identical reconfigure with a non-empty undo stack still clears it (accepted, not a no-op — clearing IS the change)', () => {
+  // Fix wave 4 correction: this used to assert the OPPOSITE (accepted, undo
+  // cleared, revision bumped) — fix wave 1's original rule cleared undo on
+  // EVERY accepted reconfigure, reasoning "clearing is itself the change"
+  // even for an otherwise-identical payload. A fix-wave-3 confirming test
+  // proved that wrong in practice (a label-only Update was wiping undo
+  // history for no reason connected to what it actually changed). An
+  // identical payload is now a true no-op REGARDLESS of undo-stack size —
+  // undo history isn't part of "the configuration" being compared.
+  it('an identical reconfigure with a non-empty undo stack is STILL a true no-op: same reference, undo history untouched, no revision bump', () => {
     let s = mk();
     s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // pushes an undo entry
     expect(s.undoStack.length).toBeGreaterThan(0);
+    const undoStackBefore = s.undoStack;
 
     const r = applyCommand(
       s,
@@ -359,9 +419,67 @@ describe('reconfigure — true no-op vs. undo-clearing accept (fix wave 1)', () 
       T0,
     );
     expect(r.accepted).toBe(true);
-    expect(r.session).not.toBe(s);
+    expect(r.session).toBe(s); // same reference: true no-op
+    expect(r.session.undoStack).toBe(undoStackBefore); // untouched
+    expect(r.session.revision).toBe(s.revision);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 4 (Important 3, coordinator re-review) — undo is cleared ONLY
+// when the RANGE (startValue/finishValue) actually changes. Every
+// UndoEntry.value is guaranteed to fall within [lo, hi] of the session's OWN
+// range (move()/jump()/undo()'s own invariant) — only a range change can
+// possibly invalidate that guarantee for an existing entry. An interval-only
+// or completion-only change leaves every entry exactly as valid as before,
+// so undo history survives it untouched. Replaces fix wave 1's "clears
+// unconditionally on any accepted reconfigure" rule, proven wrong by the
+// fix-wave-3 confirming test referenced above.
+// ---------------------------------------------------------------------------
+describe('reconfigure — undo history survives an interval-only or completion-only change (fix wave 4)', () => {
+  it('an interval-only change (range unchanged) preserves undo history', () => {
+    let s = mk(); // 0->50, interval 1
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    const undoStackBefore = s.undoStack;
+    expect(undoStackBefore.length).toBeGreaterThan(0);
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 2 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.intervalSeconds).toBe(2);
+    expect(r.session.undoStack).toEqual(undoStackBefore);
+
+    // ...and undo still genuinely works (restores a real prior value), not
+    // just "the array happens to look non-empty".
+    const undoResult = applyCommand(r.session, { type: 'undo', nonce: nonce() }, T0);
+    expect(undoResult.accepted).toBe(true);
+    expect(undoResult.session.currentValue).toBe(1);
+  });
+
+  it('a completion-only change (range unchanged) preserves undo history', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    const undoStackBefore = s.undoStack;
+    expect(undoStackBefore.length).toBeGreaterThan(0);
+
+    const r = applyCommand(
+      s,
+      reconfigureCmd({ startValue: 0, finishValue: 50, completion: { kind: 'hide' } }),
+      T0,
+    );
+    expect(r.accepted).toBe(true);
+    expect(r.session.completion).toEqual({ kind: 'hide' });
+    expect(r.session.undoStack).toEqual(undoStackBefore);
+  });
+
+  it('a range change (finishValue differs) still clears undo history', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    expect(s.undoStack.length).toBeGreaterThan(0);
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 80 }), T0);
+    expect(r.accepted).toBe(true);
     expect(r.session.undoStack).toEqual([]);
-    expect(r.session.revision).toBe(s.revision + 1);
   });
 });
 

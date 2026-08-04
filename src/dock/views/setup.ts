@@ -578,25 +578,27 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   // Task 2.18 — copies the reconfigure-relevant fields of an ACTIVE session
-  // into the form: startValue/finishValue/intervalSeconds/completion, plus
-  // `mode` (not itself part of the `reconfigure` command — it has no mode
-  // field — but needed here so the Interval row's own visibility gate,
-  // `ui.mode === 'automatic'`, reflects reality). Deliberately does NOT touch
-  // `title`/`editing`/label/style/animation fields: Session carries none of
-  // those (they live only on Preset, or as controller-instance-only state
-  // with no public getter), so "prefill from it" is scoped to what the
-  // session actually owns.
+  // into the form: startValue/finishValue/intervalSeconds/completion.
+  // Deliberately does NOT touch `title`/`editing`/label/style/animation
+  // fields: Session carries none of those (they live only on Preset, or as
+  // controller-instance-only state with no public getter), so "prefill from
+  // it" is scoped to what the session actually owns.
   //
   // Fix wave 2 (Important) — each field is now skipped individually when it
   // is in `ui.dirtyFields`, instead of the whole function being skipped (or
-  // not) as one unit. This is what lets Mode/Interval stay in sync with the
-  // live session (re-synced on every clean tab-activation) while a
-  // completely unrelated edit elsewhere in the form survives the same
-  // round-trip untouched.
+  // not) as one unit. This is what lets Interval stay in sync with the live
+  // session (re-synced on every clean tab-activation) while a completely
+  // unrelated edit elsewhere in the form survives the same round-trip
+  // untouched.
+  // Fix wave 4 (ruling 1, structural) — `mode` is no longer part of this
+  // function's job. Setup never writes a running session's mode (see
+  // `renderModeSelect`/`onUpdateSession` below) — Live's own mode-toggle is
+  // the only way to change it — so there is nothing here to keep in sync
+  // FROM the session for that field. `ui.mode` is now purely local form
+  // state, meaningful only for building a FRESH session via Start.
   function prefillFromSession(session: Session): void {
     if (!ui.dirtyFields.has('startValue')) ui.startValue = String(session.startValue);
     if (!ui.dirtyFields.has('finishValue')) ui.finishValue = String(session.finishValue);
-    if (!ui.dirtyFields.has('mode')) ui.mode = session.mode;
     if (!ui.dirtyFields.has('intervalSeconds')) ui.intervalSeconds = session.intervalSeconds;
     if (!ui.dirtyFields.has('completionKind')) ui.completionKind = session.completion.kind;
     if (!ui.dirtyFields.has('completionSeconds')) {
@@ -612,55 +614,36 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.dirtyFields.add(field);
   }
 
-  // Fix wave 3 (minor 2) — the nearest `SPEED_LEVELS` entry to an arbitrary
-  // number, used only to substitute for an off-menu `intervalSeconds` on a
-  // session this form never dirtied itself (see `reconfigureCommandFor`
-  // below). `SPEED_LEVELS` is short and fixed, so a linear scan is plenty.
-  function nearestSpeedLevel(value: number): number {
-    return (SPEED_LEVELS as readonly number[]).reduce((closest, level) =>
-      Math.abs(level - value) < Math.abs(closest - value) ? level : closest,
-    );
-  }
-
-  // Fix wave 2 (Important + minor) — resolves what `reconfigure` should
-  // actually be dispatched with: the OPERATOR's own value for each field the
-  // operator actually touched (`ui.dirtyFields`), and the LIVE session's
-  // CURRENT value for every field they didn't — never this form's possibly-
-  // stale displayed value for an untouched field (which used to blindly
-  // dispatch whatever `ui.*` happened to show, silently reverting a
-  // Faster/Slower or mode change made from Live in the meantime). Returns
-  // `null` only when a DIRTY numeric field fails to parse — `canUpdate()`
-  // below pre-validates the result through the engine's own `applyCommand`
-  // (not a hand-rolled duplicate of its rules) before this is ever actually
-  // dispatched, so a rejection is never silently partial.
+  // Fix wave 2 (Important + minor), corrected in fix wave 4 (ruling 1: mode
+  // removed entirely; ruling 2: no substitution) — resolves what
+  // `reconfigure` should actually be dispatched with: the OPERATOR's own
+  // value for each field the operator actually touched (`ui.dirtyFields`),
+  // and the LIVE session's CURRENT value for every field they didn't —
+  // never this form's possibly-stale displayed value for an untouched field
+  // (which used to blindly dispatch whatever `ui.*` happened to show,
+  // silently reverting a Faster/Slower made from Live in the meantime).
+  // Returns `null` only when a DIRTY numeric field fails to parse —
+  // `canUpdate()` below pre-validates the result through the engine's own
+  // `applyCommand` (not a hand-rolled duplicate of its rules) before this is
+  // ever actually dispatched, so a rejection is never silently partial.
   //
-  // Fix wave 3 (minor 2) — a session's `intervalSeconds` is only EVER
-  // written by an operator through this form's own `<select>` (dirty ->
-  // always a genuine `SPEED_LEVELS` member by construction), so the
-  // off-menu case can only arise on the INHERIT-from-session branch (a
-  // recovered/legacy session; `isSession` admits any positive finite
-  // interval, not just `SPEED_LEVELS` members). Under `mode: 'manual'` the
-  // Interval row doesn't even render, so the operator has no way to dirty
-  // this field and override it — the resulting session would otherwise be
-  // permanently un-reconfigurable (Update always rejected on this ONE
-  // field, no message, no fix). Since `reconfigure` itself has no way to
-  // ACCEPT an off-menu value regardless, substituting the nearest
-  // `SPEED_LEVELS` entry here is the only option that keeps Update usable
-  // at all — safe because the substituted value only ever takes effect
-  // once this reconfigure is actually dispatched, at which point the
-  // session's interval was already off-menu and thus not something any
-  // other code path could have been relying on staying exactly that value.
+  // Fix wave 4 (Important 2, structural correction) — the inherit-from-
+  // session branch for `intervalSeconds` now passes `session.intervalSeconds`
+  // straight through, UNCHANGED, with no substitution. Fix wave 3's "nearest
+  // SPEED_LEVELS entry" workaround (removed here) had its own bug: it
+  // silently changed a RUNNING automatic session's actual tick rate as a
+  // side effect of an unrelated field's Update. The real fix lives in the
+  // ENGINE now — `reconfigure` itself accepts an intervalSeconds that
+  // exactly matches the session's own current value regardless of
+  // SPEED_LEVELS membership (see counter.ts's reconfigure doc, rule 5) — so
+  // passing the untouched value straight through is always safe.
   function reconfigureCommandFor(
     session: Session,
   ): { type: 'reconfigure'; startValue: number; finishValue: number; intervalSeconds: number; completion: CompletionConfig; nonce: string } | null {
     const startValue = ui.dirtyFields.has('startValue') ? parseIntStrict(ui.startValue) : session.startValue;
     const finishValue = ui.dirtyFields.has('finishValue') ? parseIntStrict(ui.finishValue) : session.finishValue;
     if (startValue === null || finishValue === null) return null;
-    const intervalSeconds = ui.dirtyFields.has('intervalSeconds')
-      ? ui.intervalSeconds
-      : (SPEED_LEVELS as readonly number[]).includes(session.intervalSeconds)
-        ? session.intervalSeconds
-        : nearestSpeedLevel(session.intervalSeconds);
+    const intervalSeconds = ui.dirtyFields.has('intervalSeconds') ? ui.intervalSeconds : session.intervalSeconds;
     const completionKind = ui.dirtyFields.has('completionKind') ? ui.completionKind : session.completion.kind;
     const completionSecondsValue = ui.dirtyFields.has('completionSeconds')
       ? ui.completionSeconds
@@ -670,22 +653,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return { type: 'reconfigure', startValue, finishValue, intervalSeconds, completion, nonce: '' };
   }
 
-  // Fix wave 2 — same per-field resolution as `reconfigureCommandFor`, for
-  // the one field `reconfigure` itself has no room for.
-  function resolvedModeFor(session: Session): Mode {
-    return ui.dirtyFields.has('mode') ? ui.mode : session.mode;
-  }
-
   // Task 2.18, hardened in fix wave 2 (minor) — an active session to
   // reconfigure, PLUS the resolved payload (per-field dirty-aware, above)
   // actually passing the engine's own validation. Calling `applyCommand`
   // directly (pure — no side effects: no persistence, no broadcast, no nonce
   // consumed) is what closes the gap a hand-duplicated rule set left open —
-  // it previously never checked `intervalSeconds ∈ SPEED_LEVELS` at all, so
-  // a session recovered with an off-menu interval could reach a REAL
-  // dispatch that the engine then rejected, after a `setMode` had already
-  // been applied (see `onUpdateSession`'s doc comment for why dispatch order
-  // alone isn't enough without this).
+  // it previously never checked `intervalSeconds ∈ SPEED_LEVELS` at all.
+  // Fix wave 4: that check is now the ENGINE's own rule 5 (unchanged values
+  // always pass), so this pre-validation naturally inherits it with no
+  // Setup-side special-casing.
   //
   // Fix wave 3 (minor 1) — ALSO requires `completionValid()`: the engine's
   // own `isCompletionConfig` only requires `seconds` to be a positive finite
@@ -700,6 +676,36 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const cmd = reconfigureCommandFor(session);
     if (!cmd) return false;
     return applyCommand(session, cmd, Date.now()).accepted;
+  }
+
+  // Fix wave 4 (ruling 4) — true when the CURRENT form would, if Update were
+  // clicked right now, actually change something about the session's
+  // range/interval/completion (i.e. `reconfigureCommandFor`'s result
+  // differs from what the session already has). Drives the "these settings
+  // aren't applied yet" notice in render() — the honest answer to a loaded
+  // preset (or an unfinished edit) sitting in front of a running session
+  // that hasn't been applied. Returns false (nothing to report) whenever
+  // there's no active session or the payload fails to resolve at all —
+  // `canUpdate()` already covers whether Update is actually clickable;
+  // this is purely about whether the DISPLAYED form differs from reality.
+  function formDiffersFromSession(session: Session): boolean {
+    const cmd = reconfigureCommandFor(session);
+    if (!cmd) return true; // an unparseable dirty field is definitely "not applied"
+    return (
+      cmd.startValue !== session.startValue ||
+      cmd.finishValue !== session.finishValue ||
+      cmd.intervalSeconds !== session.intervalSeconds ||
+      !completionEqualForNotice(cmd.completion, session.completion)
+    );
+  }
+
+  // Small local completion-equality check for the notice above — mirrors
+  // the engine's own `completionEqual` (kind + optional seconds), which
+  // isn't exported (Setup already routes every actual validity/acceptance
+  // question through `applyCommand`, so a public export was never needed
+  // before; this one comparison is display-only, not a validity decision).
+  function completionEqualForNotice(a: CompletionConfig, b: CompletionConfig): boolean {
+    return a.kind === b.kind && a.seconds === b.seconds;
   }
 
   function previewValue(): number {
@@ -802,12 +808,12 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // here on the theory that a successful Save makes the form "authoritative
     // again" the same way Start/Update do. That was wrong for Save
     // specifically: saving a PRESET applies nothing to the running SESSION —
-    // `reconfigureCommandFor`/`resolvedModeFor` resolve an untouched field
-    // from the LIVE SESSION, so clearing dirty markers here made a
-    // just-typed, just-saved value (e.g. a new finish typed right before
-    // Save) silently invisible to a following Update, which would then
-    // dispatch the SESSION's old value instead — a silent no-op with no
-    // error. Only Start and Update actually make the form equal to the
+    // `reconfigureCommandFor` resolves an untouched field from the LIVE
+    // SESSION, so clearing dirty markers here made a just-typed, just-saved
+    // value (e.g. a new finish typed right before Save) silently invisible
+    // to a following Update, which would then dispatch the SESSION's old
+    // value instead — a silent no-op with no error. Only Start and Update
+    // actually make the form equal to the
     // session (Start by building a brand-new session FROM these exact
     // fields; Update by applying them) — Save does neither, so it must
     // leave `dirtyFields` untouched.
@@ -863,46 +869,30 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // avoid — then applies the form's presentation (style/template/animation)
   // via the existing `adoptPresentation`.
   //
-  // Fix wave 1 (Important 3): `reconfigure` itself has no `mode` field
-  // (switching manual/automatic mid-session was always `setMode`'s job), but
-  // `ui.mode` IS prefilled from, and editable alongside, the reconfigure
-  // fields — so a mode change here was previously silently dropped.
-  //
-  // Fix wave 2 (Important) — fix wave 1 dispatched `setMode` whenever
-  // `ui.mode` differed from the session's, which reintroduced the exact
-  // problem per-field tracking exists to prevent: if an UNRELATED field was
-  // dirty (so `refresh()` correctly left the WHOLE form untouched, Mode
-  // included) while the session's mode/interval had changed from Live in
-  // the meantime, `ui.mode` could be stale — clicking Update to apply the
-  // unrelated edit would then silently dispatch `setMode` back to whatever
-  // stale value the form still showed, killing a running automatic count.
-  // `resolvedModeFor`/`reconfigureCommandFor` (above) resolve EVERY field
-  // — mode included — the operator's value when THAT field is dirty, the
-  // live session's current value otherwise; only a genuinely dirty, genuinely
-  // different mode dispatches `setMode`, and it does so FIRST so
-  // `reconfigure`'s own exit-complete mapping (manual -> idle / automatic ->
-  // paused) evaluates against the FINAL mode. `setMode` never rejects (see
-  // counter.ts), so there is no failure path to handle for it.
+  // Fix wave 4 (ruling 1, STRUCTURAL — supersedes fix waves 1 and 2's mode
+  // handling entirely): Setup NEVER changes an active session's mode.
+  // `reconfigure` has no mode field; fix wave 1 bolted a `setMode` dispatch
+  // onto this handler whenever `ui.mode` differed from the session's, and
+  // fix wave 2 made that resolution per-field-dirty-aware instead of
+  // whole-form. Both were faithful to their own rulings, but the CLASS of
+  // bug survived both patches: a stale `ui.mode`, however it got stale,
+  // dispatching `setMode` as a side effect of an Update that was never
+  // about mode at all. The actual fix is structural: this function no
+  // longer reads `ui.mode` or dispatches `setMode` under ANY circumstance.
+  // Mode already has a dedicated, correct control — Live's own mode-toggle
+  // — and `renderModeSelect()` (below) now DISABLES its own select and
+  // displays the session's live mode whenever one is active, so there is no
+  // longer a form field capable of going stale in a way that could reach
+  // here at all.
   //
   // Fix wave 1 (minor fold-in) — `reconfigure` dispatches BEFORE
   // `adoptPresentation`, so a rejection leaves the PRESENTATION side
   // untouched (no stray style/template change with no matching range
-  // update). Fix wave 2 correction: that comment previously overstated the
-  // claim to "nothing applied" — a `setMode` dispatched first (when `mode`
-  // is dirty and different) would NOT have been undone by a subsequent
-  // `reconfigure` rejection, since `setMode` never fails and is a genuinely
-  // separate, already-committed dispatch by the time `reconfigure` even
-  // runs. Fix wave 2 (minor) actually closes that gap instead of just
-  // documenting it: `canUpdate()` now pre-validates the EXACT reconfigure
-  // payload through the engine's own `applyCommand` (including
-  // `intervalSeconds ∈ SPEED_LEVELS`, which the old hand-rolled gate never
-  // checked at all — reachable from e.g. a session recovered with an
-  // off-menu interval) BEFORE the button is even clickable. So in current
-  // behavior, reaching a rejection here — with or without a `setMode`
-  // already dispatched — should be unreachable through this UI; the
-  // `!result.accepted` branch below is defense in depth only, matching
-  // `onStartSession()`'s own try/catch above, not a claim that the ordering
-  // alone makes rejection consequence-free.
+  // update). With mode entirely out of this function's scope (fix wave 4),
+  // `canUpdate()`'s pre-validation via the engine's own `applyCommand` means
+  // reaching a real rejection here should be unreachable through this UI;
+  // the `!result.accepted` branch below is defense in depth only, matching
+  // `onStartSession()`'s own try/catch above.
   function onUpdateSession(): void {
     if (!canUpdate()) return;
     const activeSession = opts.controller.getState().session;
@@ -915,16 +905,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.reconfigureWarning = null;
 
     const previousValue = activeSession.currentValue;
-
-    // `activeSession` is read once, before either dispatch below, and reused
-    // for BOTH the mode resolution and the reconfigure payload — safe
-    // because `setMode` never touches startValue/finishValue/intervalSeconds/
-    // completion, so a stale reference for those specific fields is a
-    // non-issue even though `setMode` itself may run first.
-    const mode = resolvedModeFor(activeSession);
-    if (mode !== activeSession.mode) {
-      opts.controller.dispatch({ type: 'setMode', mode, nonce: generateNonce() });
-    }
 
     const cmd = reconfigureCommandFor(activeSession);
     if (!cmd) {
@@ -1037,16 +1017,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return row;
   }
 
-  function renderModeSelect(): HTMLSelectElement {
+  // Fix wave 4 (ruling 1, structural) — while a session is ACTIVE, this
+  // select is a pure READ-OUT of the session's own live mode: disabled, and
+  // its selected option reflects `activeSession.mode`, never `ui.mode`
+  // (which can genuinely differ in that state — e.g. right after loading a
+  // preset whose own mode differs from the running session's; see the
+  // mismatch note in `render()`). With no active session, it behaves as
+  // before: editable, feeds `ui.mode` for a future Start.
+  function renderModeSelect(activeSession: Session | null): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-mode' }) as HTMLSelectElement;
+    const displayMode: Mode = activeSession ? activeSession.mode : ui.mode;
     for (const m of ['manual', 'automatic'] as const) {
       const opt = el('option', { value: m }, m === 'manual' ? 'Manual' : 'Automatic') as HTMLOptionElement;
-      opt.selected = m === ui.mode;
+      opt.selected = m === displayMode;
       select.appendChild(opt);
     }
+    select.disabled = activeSession !== null;
     select.addEventListener('change', () => {
       ui.mode = select.value as Mode;
-      markDirty('mode');
       render();
     });
     return select;
@@ -1358,6 +1346,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     const root = el('div', { 'data-testid': 'setup-root' });
 
+    // Fix wave 4 — read once per render, used by the Mode select, the
+    // Interval row's visibility gate, the mode-mismatch note (ruling 1),
+    // and the "not applied yet" staleness notice (ruling 4).
+    const activeSession = opts.controller.getState().session;
+
     if (ui.editing) {
       root.appendChild(
         el('div', { 'data-testid': 'setup-editing-title', class: 'banner banner-info' }, `Editing "${ui.title}"`),
@@ -1378,6 +1371,23 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         el('div', { 'data-testid': 'setup-reconfigure-warning', class: 'banner banner-warn' }, ui.reconfigureWarning),
       );
     }
+
+    // Fix wave 4 (ruling 1) — a loaded preset's own mode can genuinely
+    // differ from the running session's (Setup no longer ever applies a
+    // mode change itself). Rather than silently ignore that mismatch, name
+    // it and point at the one place it CAN be changed.
+    if (ui.editing !== null && activeSession !== null && ui.mode !== activeSession.mode) {
+      const presetModeLabel = ui.mode === 'automatic' ? 'Automatic' : 'Manual';
+      const sessionModeLabel = activeSession.mode === 'automatic' ? 'Automatic' : 'Manual';
+      root.appendChild(
+        el(
+          'div',
+          { 'data-testid': 'setup-mode-mismatch-note', class: 'banner banner-warn' },
+          `This preset is ${presetModeLabel}; the running session is ${sessionModeLabel}. Switch it on the Live tab.`,
+        ),
+      );
+    }
+
 
     // PRD §9 item 1 — the WYSIWYG preview is always visible, at the very
     // top: "a preview to show the person setting up what the end result
@@ -1412,8 +1422,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         { min: '0', max: '999999', step: '1' },
       ),
     );
-    const counterChildren = [twoColRow(startField, finishField), formRow('Mode', renderModeSelect())];
-    if (ui.mode === 'automatic') {
+    // Fix wave 4 (ruling 1) — the Interval row's visibility gate follows
+    // whichever mode is actually DISPLAYED (the live session's, while one is
+    // active; `ui.mode` otherwise) — the same source `renderModeSelect`
+    // itself renders from, so the two can never disagree about whether
+    // Interval belongs on screen.
+    const displayMode: Mode = activeSession ? activeSession.mode : ui.mode;
+    const counterChildren = [twoColRow(startField, finishField), formRow('Mode', renderModeSelect(activeSession))];
+    if (displayMode === 'automatic') {
       counterChildren.push(formRow('Interval', renderIntervalSelect()));
     }
     root.appendChild(group('setup-group-counter', 'Counter', counterChildren));
@@ -1590,6 +1606,21 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ),
     );
 
+    // Fix wave 4 (ruling 4) — the honest answer to a loaded preset (or an
+    // unfinished edit) sitting in front of a running session: if what's
+    // displayed doesn't match what the session is actually running, say so
+    // persistently, right above the action buttons, rather than let the
+    // form look authoritative when it isn't.
+    if (activeSession !== null && formDiffersFromSession(activeSession)) {
+      root.appendChild(
+        el(
+          'div',
+          { 'data-testid': 'setup-not-applied-notice', class: 'banner banner-warn' },
+          "These settings aren't applied yet — click Update session.",
+        ),
+      );
+    }
+
     const actions = el('div', { class: 'btn-row' });
     const save = button('setup-save', ui.editing ? 'Update preset' : 'Save preset', { disabled: !canSave() });
     save.addEventListener('click', () => {
@@ -1661,17 +1692,25 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // every field above is an AUTHORED value the operator is actively
       // looking at (the preset's own numbers), not something to treat as
       // "clean" (matching the live session). With them marked clean,
-      // `reconfigureCommandFor`/`resolvedModeFor` would resolve each one
-      // from the LIVE SESSION instead — so clicking Update session right
-      // after loading a preset silently dispatched the session's OWN
-      // existing values (a no-op) while the operator was looking at the
-      // preset's numbers on screen, with no error at all. Marking every
-      // field this method just wrote as dirty instead means Update actually
-      // applies what's displayed; `ui.editing` (set above) already shields
-      // all of them from being overwritten by `refresh()`'s prefill in the
-      // meantime, same as it always has.
+      // `reconfigureCommandFor` would resolve each one from the LIVE
+      // SESSION instead — so clicking Update session right after loading a
+      // preset silently dispatched the session's OWN existing values (a
+      // no-op) while the operator was looking at the preset's numbers on
+      // screen, with no error at all. Marking every field this method just
+      // wrote as dirty instead means Update actually applies what's
+      // displayed; `ui.editing` (set above) already shields all of them
+      // from being overwritten by `refresh()`'s prefill in the meantime,
+      // same as it always has.
+      //
+      // Fix wave 4 (ruling 1) — 'mode' is deliberately EXCLUDED from this
+      // set: Setup never applies a mode change to a running session (see
+      // `renderModeSelect`/`onUpdateSession`), so there is no longer any
+      // resolution logic that reads a 'mode' dirty marker at all. `ui.mode`
+      // is still written above (for the mismatch note, and for a future
+      // Start), just not tracked as "dirty" — that concept no longer
+      // applies to this field.
       ui.dirtyFields = new Set([
-        'title', 'startValue', 'finishValue', 'mode', 'intervalSeconds', 'template', 'layout',
+        'title', 'startValue', 'finishValue', 'intervalSeconds', 'template', 'layout',
         'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
         'animType', 'animTarget', 'animDurationMs', 'completionKind', 'completionSeconds',
       ]);
