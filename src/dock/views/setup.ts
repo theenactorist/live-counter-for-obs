@@ -48,7 +48,7 @@
 import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout, Session } from '../../engine/types.js';
 import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION } from '../../engine/types.js';
 import { applyCommand, type SessionConfig } from '../../engine/counter.js';
-import type { SessionController } from '../controller.js';
+import type { SessionController, ControllerState } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
@@ -76,6 +76,17 @@ const ANIMATION_TARGET_LABELS: Record<(typeof ANIMATION_TARGETS)[number], string
 };
 const COMPLETION_KINDS = ['hold', 'hide', 'holdThenHide'] as const;
 const FONTS = ['Inter', 'Oswald'] as const;
+
+// Fix wave 5 (ruling 2/3) — the `ui.dirtyFields` keys `prefillFromSession`/
+// `resolvePresentation`/`presentationCommandFor` treat as "presentation",
+// mirroring the reconfigure-relevant field list those same functions
+// already use for session fields. Kept as one list so the "is ANY
+// presentation field dirty" check can never silently drift from the set of
+// fields actually being prefilled/resolved.
+const PRESENTATION_FIELDS = [
+  'template', 'layout', 'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
+  'animType', 'animTarget', 'animDurationMs',
+] as const;
 
 // Task 2.11 — the six-layout gallery (operator feedback, PRD §8.8). Order
 // here is the order the thumbnails render in.
@@ -335,8 +346,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // future boot() reordering) — cheap correctness with no real-boot cost,
   // rather than a claim (the old comment's, now corrected) that it covers a
   // scenario main.ts's own boot() order never actually produces.
-  const activeSessionAtMount = opts.controller.getState().session;
-  if (activeSessionAtMount) prefillFromSession(activeSessionAtMount);
+  const stateAtMount = opts.controller.getState();
+  if (stateAtMount.session) prefillFromSession(stateAtMount.session, stateAtMount.presentation);
   // Phase 2 final-review fix (code-quality:P2-Q-03): performSave() awaits
   // storage and then render()s, and main.ts's boot() (settings-save
   // reconnect) can tear this view down mid-await — the operator fixing a bad
@@ -579,10 +590,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   // Task 2.18 — copies the reconfigure-relevant fields of an ACTIVE session
   // into the form: startValue/finishValue/intervalSeconds/completion.
-  // Deliberately does NOT touch `title`/`editing`/label/style/animation
-  // fields: Session carries none of those (they live only on Preset, or as
-  // controller-instance-only state with no public getter), so "prefill from
-  // it" is scoped to what the session actually owns.
   //
   // Fix wave 2 (Important) — each field is now skipped individually when it
   // is in `ui.dirtyFields`, instead of the whole function being skipped (or
@@ -596,13 +603,57 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // the only way to change it — so there is nothing here to keep in sync
   // FROM the session for that field. `ui.mode` is now purely local form
   // state, meaningful only for building a FRESH session via Start.
-  function prefillFromSession(session: Session): void {
+  // Fix wave 5 (residual, coordinator re-review) — `intervalSeconds` is
+  // ALSO skipped when the session is currently `mode: 'manual'`: the
+  // Interval row doesn't render at all in that mode (see the Counter
+  // group's own gate, below), so silently marking it dirty from
+  // `loadPreset()` (see that method) would apply a value the operator can
+  // never see on screen — this same function, though, still SYNCS the
+  // field from a manual session's own value when it's clean, since that's
+  // just keeping the (invisible, but still real) form state accurate for
+  // whenever the session becomes automatic again.
+  //
+  // Fix wave 5 (ruling 2, coordinator re-review — closing the round's
+  // Critical finding) — presentation fields (label/style/animation) now get
+  // EXACTLY the same treatment, prefilled from `presentation` (this
+  // controller instance's own live style/template/animation, exposed via
+  // `ControllerState.presentation`) when the corresponding field is clean.
+  // Before this, a dock restart of a preset-backed session correctly
+  // restored the on-air look via `adoptPresentation()` (Task 2.6), but
+  // Setup's OWN form had no way to learn that — it stayed at its compiled-
+  // in defaults, so ANY Update (even a pure range bump) would silently
+  // broadcast those defaults over the actually-live look. `presentation`
+  // being `null` (an ad hoc session with no preset, or one whose preset was
+  // deleted — see `ControllerState`'s own doc comment) leaves every
+  // presentation field exactly as it already was — there is nothing live to
+  // learn, and ruling 5 (see `resolvePresentation`/`formDiffersFromSession`
+  // below) handles that case at the point Update/the notice actually act on
+  // it, not here.
+  function prefillFromSession(session: Session, presentation: ControllerState['presentation']): void {
     if (!ui.dirtyFields.has('startValue')) ui.startValue = String(session.startValue);
     if (!ui.dirtyFields.has('finishValue')) ui.finishValue = String(session.finishValue);
     if (!ui.dirtyFields.has('intervalSeconds')) ui.intervalSeconds = session.intervalSeconds;
     if (!ui.dirtyFields.has('completionKind')) ui.completionKind = session.completion.kind;
     if (!ui.dirtyFields.has('completionSeconds')) {
       ui.completionSeconds = session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
+    }
+
+    if (presentation) {
+      if (!ui.dirtyFields.has('template')) ui.template = presentation.template ?? '';
+      if (!ui.dirtyFields.has('layout')) ui.layout = presentation.style.layout;
+      if (!ui.dirtyFields.has('numberSizePx')) ui.numberSizePx = String(presentation.style.numberSizePx);
+      if (!ui.dirtyFields.has('numberColor')) ui.numberColor = presentation.style.numberColor;
+      if (!ui.dirtyFields.has('textSizePx')) ui.textSizePx = String(presentation.style.textSizePx);
+      if (!ui.dirtyFields.has('textColor')) ui.textColor = presentation.style.textColor;
+      if (!ui.dirtyFields.has('fontFamily')) ui.fontFamily = presentation.style.fontFamily;
+      // A known presentation with a null `animation` (e.g. devhook's own
+      // default call) still has a real, if unremarkable, animation
+      // configuration in spirit — defaults to the same "none" shape
+      // `defaultUiState()` itself starts from.
+      const animation = presentation.animation ?? { type: 'none' as const, target: 'number' as const, durationMs: 300 };
+      if (!ui.dirtyFields.has('animType')) ui.animType = animation.type;
+      if (!ui.dirtyFields.has('animTarget')) ui.animTarget = animation.target;
+      if (!ui.dirtyFields.has('animDurationMs')) ui.animDurationMs = animation.durationMs;
     }
   }
 
@@ -653,6 +704,93 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return { type: 'reconfigure', startValue, finishValue, intervalSeconds, completion, nonce: '' };
   }
 
+  // Fix wave 5 (ruling 3, coordinator re-review) — resolves the FULL
+  // presentation payload `adoptPresentation()` should actually receive,
+  // field by field: the operator's own value when a `PRESENTATION_FIELDS`
+  // key is dirty, and the LIVE presentation's own value when it isn't —
+  // exactly `reconfigureCommandFor`'s own per-field split, for the same
+  // reason: `ui.*` for a clean field is only as fresh as the last
+  // `prefillFromSession()` call (mount or the last clean tab-activation),
+  // which could be stale if the presentation changed elsewhere since (e.g.
+  // another dock window's own `adoptPresentation()`) without this Setup
+  // instance ever re-activating.
+  //
+  // Ruling 5 — when `presentation` is `null` (this controller instance has
+  // never learned a live presentation: an ad hoc session with no preset, or
+  // one whose preset has since been deleted), there is no live value to
+  // inherit for a clean field, so this always resolves the WHOLE thing from
+  // the form directly — the operator can see every value on screen that's
+  // about to apply, matching the pre-fix-wave-5 behavior this function
+  // replaces (which is why this is the one branch fix wave 5 didn't need to
+  // change).
+  //
+  // The non-operator-editable `StyleConfig` fields (fontWeight/alignH/
+  // alignV/outline/shadow/background/paddingPx) are not tracked as dirty at
+  // all — Setup has never exposed a control for any of them, in this task
+  // or any earlier one — so they're always the same hardcoded constants
+  // `buildStyle()` itself has always produced, matching every OTHER caller
+  // of `buildStyle()` in this file (`onStartSession()`/`performSave()`).
+  function resolvePresentation(
+    presentation: ControllerState['presentation'],
+  ): { style: StyleConfig; template: string | null; animation: AnimationConfig } {
+    if (presentation === null) {
+      return { style: buildStyle(), template: ui.template.trim().length > 0 ? ui.template : null, animation: buildAnimation() };
+    }
+    const template = ui.dirtyFields.has('template')
+      ? (ui.template.trim().length > 0 ? ui.template : null)
+      : presentation.template;
+    const layout = ui.dirtyFields.has('layout') ? ui.layout : presentation.style.layout;
+    const numberSizePx = ui.dirtyFields.has('numberSizePx')
+      ? (numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX)
+      : presentation.style.numberSizePx;
+    const numberColor = ui.dirtyFields.has('numberColor') ? ui.numberColor : presentation.style.numberColor;
+    const textSizePx = ui.dirtyFields.has('textSizePx')
+      ? (textSizeValue() ?? DEFAULT_TEXT_SIZE_PX)
+      : presentation.style.textSizePx;
+    const textColor = ui.dirtyFields.has('textColor') ? ui.textColor : presentation.style.textColor;
+    const fontFamily = ui.dirtyFields.has('fontFamily') ? ui.fontFamily : presentation.style.fontFamily;
+
+    const liveAnimation = presentation.animation ?? { type: 'none' as const, target: 'number' as const, durationMs: 300 };
+    const animType = ui.dirtyFields.has('animType') ? ui.animType : liveAnimation.type;
+    const animTarget = ui.dirtyFields.has('animTarget') ? ui.animTarget : liveAnimation.target;
+    const animDurationMs = ui.dirtyFields.has('animDurationMs') ? ui.animDurationMs : liveAnimation.durationMs;
+
+    return {
+      style: {
+        fontFamily,
+        fontWeight: 700,
+        numberSizePx,
+        textSizePx,
+        numberColor,
+        textColor,
+        alignH: 'center',
+        alignV: 'middle',
+        outline: null,
+        shadow: null,
+        background: null,
+        paddingPx: 8,
+        layout,
+      },
+      template,
+      animation: { type: animType, target: animTarget, durationMs: animDurationMs },
+    };
+  }
+
+  // Fix wave 5 (ruling 3) — the gate `onUpdateSession` actually uses: `null`
+  // means "nothing to apply, skip `adoptPresentation()` entirely" — true
+  // exactly when NO presentation field is dirty AND the live presentation
+  // is already known (nothing could possibly have changed on this form
+  // relative to it). Otherwise returns `resolvePresentation()`'s full
+  // payload — including the `presentation === null` case, which always has
+  // something to apply (ruling 5: the form's own values, the only source of
+  // truth available).
+  function presentationCommandFor(
+    presentation: ControllerState['presentation'],
+  ): { style: StyleConfig; template: string | null; animation: AnimationConfig } | null {
+    if (presentation !== null && !PRESENTATION_FIELDS.some((f) => ui.dirtyFields.has(f))) return null;
+    return resolvePresentation(presentation);
+  }
+
   // Task 2.18, hardened in fix wave 2 (minor) — an active session to
   // reconfigure, PLUS the resolved payload (per-field dirty-aware, above)
   // actually passing the engine's own validation. Calling `applyCommand`
@@ -688,15 +826,25 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // there's no active session or the payload fails to resolve at all —
   // `canUpdate()` already covers whether Update is actually clickable;
   // this is purely about whether the DISPLAYED form differs from reality.
-  function formDiffersFromSession(session: Session): boolean {
+  //
+  // Fix wave 5 (ruling 4, coordinator re-review — closing the round's
+  // Critical finding) — folds presentation into the same check:
+  // `presentationCommandFor` returning non-`null` means SOME presentation
+  // field is dirty relative to the live presentation (or the live
+  // presentation is entirely unknown — ruling 5 treats that as always
+  // "differs", never silently assumed to already match).
+  function formDiffersFromSession(session: Session, presentation: ControllerState['presentation']): boolean {
     const cmd = reconfigureCommandFor(session);
     if (!cmd) return true; // an unparseable dirty field is definitely "not applied"
-    return (
+    const configDiffers =
       cmd.startValue !== session.startValue ||
       cmd.finishValue !== session.finishValue ||
       cmd.intervalSeconds !== session.intervalSeconds ||
-      !completionEqualForNotice(cmd.completion, session.completion)
-    );
+      !completionEqualForNotice(cmd.completion, session.completion);
+    if (configDiffers) return true;
+
+    if (presentation === null) return true; // ruling 5: nothing to compare against
+    return presentationCommandFor(presentation) !== null;
   }
 
   // Small local completion-equality check for the notice above — mirrors
@@ -893,9 +1041,18 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // reaching a real rejection here should be unreachable through this UI;
   // the `!result.accepted` branch below is defense in depth only, matching
   // `onStartSession()`'s own try/catch above.
+  //
+  // Fix wave 5 (ruling 3, coordinator re-review — closing the round's
+  // Critical finding) — presentation is now resolved the SAME dirty-aware
+  // way session fields are (`presentationCommandFor`), instead of always
+  // building a fresh payload straight from the form's own (possibly stale,
+  // possibly just-defaulted) `ui.*` fields. `null` means nothing to apply —
+  // `adoptPresentation()` is skipped entirely, not even a redundant,
+  // unchanged broadcast.
   function onUpdateSession(): void {
     if (!canUpdate()) return;
-    const activeSession = opts.controller.getState().session;
+    const state = opts.controller.getState();
+    const activeSession = state.session;
     // Defensive: canUpdate() already required a non-null session, but guards
     // against the vanishingly small window where it ends between the click
     // and this handler running (e.g. another dock window's endSession).
@@ -922,13 +1079,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       return;
     }
 
-    const style = buildStyle();
-    // Task 2.17 — same fix as onStartSession()/performSave() above: the
-    // broadcast template must carry the operator's literal spaces, not a
-    // trimmed copy.
-    const template = ui.template.trim().length > 0 ? ui.template : null;
-    const animation = buildAnimation();
-    opts.controller.adoptPresentation(style, template, animation);
+    const presentationCmd = presentationCommandFor(state.presentation);
+    if (presentationCmd) {
+      opts.controller.adoptPresentation(presentationCmd.style, presentationCmd.template, presentationCmd.animation);
+    }
 
     if (result.session.currentValue !== previousValue) {
       ui.reconfigureWarning =
@@ -1348,8 +1502,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     // Fix wave 4 — read once per render, used by the Mode select, the
     // Interval row's visibility gate, the mode-mismatch note (ruling 1),
-    // and the "not applied yet" staleness notice (ruling 4).
-    const activeSession = opts.controller.getState().session;
+    // and the "not applied yet" staleness notice (ruling 4). Fix wave 5
+    // additionally reads `presentation` for that same staleness notice.
+    const renderState = opts.controller.getState();
+    const activeSession = renderState.session;
 
     if (ui.editing) {
       root.appendChild(
@@ -1387,7 +1543,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         ),
       );
     }
-
 
     // PRD §9 item 1 — the WYSIWYG preview is always visible, at the very
     // top: "a preview to show the person setting up what the end result
@@ -1611,7 +1766,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // displayed doesn't match what the session is actually running, say so
     // persistently, right above the action buttons, rather than let the
     // form look authoritative when it isn't.
-    if (activeSession !== null && formDiffersFromSession(activeSession)) {
+    if (activeSession !== null && formDiffersFromSession(activeSession, renderState.presentation)) {
       root.appendChild(
         el(
           'div',
@@ -1709,11 +1864,31 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // is still written above (for the mismatch note, and for a future
       // Start), just not tracked as "dirty" — that concept no longer
       // applies to this field.
-      ui.dirtyFields = new Set([
+      const dirtyFromPreset = new Set([
         'title', 'startValue', 'finishValue', 'intervalSeconds', 'template', 'layout',
         'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
         'animType', 'animTarget', 'animDurationMs', 'completionKind', 'completionSeconds',
       ]);
+      // Fix wave 5 (residual, coordinator re-review — "invisible interval")
+      // — 'intervalSeconds' is EXCLUDED from that set when the LIVE session
+      // is currently `mode: 'manual'`: the Interval row doesn't render at
+      // all in that mode (see the Counter group's own gate), so marking it
+      // dirty from the preset's own value would apply a number the operator
+      // can never see on screen before clicking Update. `ui.intervalSeconds`
+      // is still written above (so it's ready the moment the session DOES
+      // become automatic — either via this preset's own mode, if the
+      // operator starts fresh with it, or a later Live mode-toggle), just
+      // not tracked as dirty, so `prefillFromSession`'s own sync keeps it
+      // honestly following the live (manual) session instead. With NO
+      // active session, this exclusion doesn't apply — `Start` reads
+      // `ui.intervalSeconds` directly regardless of dirty state, and the
+      // operator picking a preset to Start FROM is exactly the case this
+      // field needs to carry the preset's own interval choice forward.
+      const activeSession = opts.controller.getState().session;
+      if (activeSession !== null && activeSession.mode === 'manual') {
+        dirtyFromPreset.delete('intervalSeconds');
+      }
+      ui.dirtyFields = dirtyFromPreset;
       render();
     },
     // Task 2.18 — called by main.ts whenever the Setup tab is (re)activated.
@@ -1737,8 +1912,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     refresh(): void {
       if (destroyed) return;
       if (ui.editing === null) {
-        const session = opts.controller.getState().session;
-        if (session) prefillFromSession(session);
+        const state = opts.controller.getState();
+        if (state.session) prefillFromSession(state.session, state.presentation);
       }
       render();
     },

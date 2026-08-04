@@ -1246,6 +1246,37 @@ describe('SessionController — adoptPresentation()', () => {
   });
 });
 
+// Task 2.18 fix wave 5 (ruling 1) — `getState().presentation` exposes this
+// controller instance's own style/template/animation fields (additive to
+// the locked `ControllerState` interface) so a UI consumer can learn what
+// presentation is ACTUALLY live, not just what its own form shows.
+describe('SessionController — getState().presentation', () => {
+  it('is null before startSession()/adoptPresentation() ever runs', async () => {
+    const { controller } = await setup();
+    expect(controller.getState().presentation).toBeNull();
+  });
+
+  it('reflects the style/template/animation passed to startSession()', async () => {
+    const { controller } = await setup();
+    const style = styleFixture();
+    const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 300 };
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, style, '{count} left', animation);
+
+    expect(controller.getState().presentation).toEqual({ style, template: '{count} left', animation });
+  });
+
+  it('updates after adoptPresentation(), without requiring a new session', async () => {
+    const { controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'old', null);
+
+    const newStyle = { ...styleFixture(), numberColor: '#00ff00' };
+    const newAnimation: AnimationConfig = { type: 'fade', target: 'both', durationMs: 400 };
+    controller.adoptPresentation(newStyle, 'new', newAnimation);
+
+    expect(controller.getState().presentation).toEqual({ style: newStyle, template: 'new', animation: newAnimation });
+  });
+});
+
 // Fix round 1 (Task 2.5 review, Critical 1): dispose() must permanently
 // silence a controller instance — no further heartbeat, no further automatic
 // ticking, no further persist/broadcast on dispatch — so main.ts's

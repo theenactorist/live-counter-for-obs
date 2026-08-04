@@ -23,6 +23,20 @@ export interface ControllerState {
   snapshot: OverlaySnapshot | null;
   lastAction: { label: string; value: number } | null; // feeds the "+1 ✓ 24" flash
   recovered: boolean; // true when restored from storage this boot
+  // Task 2.18 fix wave 5 (ruling 1, additive to this already-locked
+  // interface) — exposes this controller INSTANCE's own style/template/
+  // animation fields (see the class-level comment on them below for their
+  // whole lifecycle story: set by startSession()/adoptPresentation(), never
+  // part of `Session` itself). Lets a UI consumer (Setup's "Update
+  // session") learn what presentation is ACTUALLY on air right now, instead
+  // of only ever knowing what its own form happens to be showing — closing
+  // the gap where an Update could silently strip a preset-backed session's
+  // restored-on-reload look back to a default, because the form itself had
+  // no way to learn what was live. `null` exactly when `style` is: this
+  // controller instance has never run startSession()/adoptPresentation() (a
+  // recovered ad hoc session with no presetId, or one whose preset has
+  // since been deleted).
+  presentation: { style: StyleConfig; template: string | null; animation: AnimationConfig | null } | null;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -116,7 +130,13 @@ export class SessionController {
   }
 
   getState(): ControllerState {
-    return { session: this.session, snapshot: this.snapshot, lastAction: this.lastAction, recovered: this.recovered };
+    return {
+      session: this.session,
+      snapshot: this.snapshot,
+      lastAction: this.lastAction,
+      recovered: this.recovered,
+      presentation: this.style !== null ? { style: this.style, template: this.template, animation: this.animation } : null,
+    };
   }
 
   subscribe(fn: (s: ControllerState) => void): () => void {

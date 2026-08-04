@@ -48,7 +48,15 @@ const cmdArb = fc.oneof(
     // (exercises the direction-preserved-vs-flipped rule).
     startValue: fc.integer({ min: -10, max: 100 }),
     finishValue: fc.integer({ min: -10, max: 100 }),
-    intervalSeconds: fc.constantFrom(...SPEED_LEVELS),
+    // Fix wave 5 (coordinator re-review residual) — `1.3` alongside the
+    // real SPEED_LEVELS entries: an off-menu value that's REJECTED the
+    // first time a run draws it (genuinely new, not in SPEED_LEVELS), but
+    // becomes a valid no-op/unchanged-interval reconfigure on any LATER draw
+    // within the same run where the session's own intervalSeconds already
+    // equals it — fuzzing the rule-5 "unchanged value is always valid, even
+    // off-menu" exemption for real, across many random sequences, not just
+    // the hand-picked cases in reconfigure.test.ts.
+    intervalSeconds: fc.constantFrom(...SPEED_LEVELS, 1.3),
     completion: fc.oneof(
       fc.constant({ kind: 'hold' as const }),
       fc.constant({ kind: 'hide' as const }),

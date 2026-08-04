@@ -2479,6 +2479,14 @@ test.describe('dock Setup + Presets views', () => {
         await dock.getByTestId('setup-finish').fill('30');
         await dock.getByTestId('setup-template').fill('Score: {count}');
         await dock.getByTestId('setup-number-size').fill('150');
+        // Fix wave 5 — the devhook seam always seeds a KNOWN live
+        // presentation (DEFAULT_STYLE, `layout: 'numberOnly'`), and layout
+        // is now resolved the same dirty-aware way every other presentation
+        // field is: untouched, it would inherit that live 'numberOnly' —
+        // which ignores the template entirely, by that layout's own design.
+        // Explicitly choosing a layout is what a real operator would do to
+        // actually show the label they just typed.
+        await dock.getByTestId('setup-layout-textBefore').click();
 
         await dock.getByTestId('setup-update-session').click();
 
@@ -3282,6 +3290,212 @@ test.describe('dock Setup + Presets views', () => {
 
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
         await expect(page.getByTestId('btn-undo')).toBeDisabled(); // cleared — the range moved
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 5 (coordinator re-review, CRITICAL): presentation
+    // (label/style/animation) had escaped the whole per-field dirty-aware
+    // redesign — `onUpdateSession` always pushed `buildStyle()`/`template`/
+    // `buildAnimation()` built straight from the form's OWN fields, with no
+    // way to learn what was actually live. After a dock restart of a
+    // preset-backed session (main.ts's own recovery re-derivation restores
+    // the on-air look via `adoptPresentation()`, but Setup's form — freshly
+    // mounted — never learns it), a pure range-bump Update would silently
+    // strip the overlay to Setup's compiled-in defaults, mid-service. Fixed
+    // by exposing the live presentation via `ControllerState.presentation`
+    // and giving it the exact same prefill/resolve/dirty treatment session
+    // fields already have. ----------------------------------------------
+
+    test("reviewer repro: a preset-backed session survives a dock reload, and a pure range-bump Update keeps the overlay's restored look (must fail without the fix)", async ({
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port, devhook: false });
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        await fillCoreSetupFields(dock, { start: 0, finish: 50, title: 'Red Preset', template: 'Score: {count}' });
+        await dock.getByTestId('setup-number-size').fill('150');
+        await dock.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#ff0000';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await dock.getByTestId('setup-save').click();
+
+        await dock.getByTestId('tab-presets').click();
+        await expect(dock.getByTestId('preset-row')).toContainText('Red Preset');
+        await dock.getByTestId('preset-start').click(); // no active session yet — starts directly
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Score: ');
+
+        // Simulate a dock restart: reload the SAME page/port — recovers the
+        // session, and main.ts's own recovery re-derivation restores the
+        // preset's presentation via adoptPresentation(). THIS Setup form is
+        // freshly mounted and has never seen that presentation directly —
+        // only `ControllerState.presentation` carries it now.
+        await openDock(dock, { port: mock.port, devhook: false });
+        await expect(dock.getByTestId('current-value')).toHaveText('0');
+        await expect
+          .poll(async () => overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).fontSize))
+          .toBe('150px');
+        await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Score: ');
+
+        // A PURE range bump — nothing about label/style touched at all.
+        await dock.getByTestId('tab-setup').click();
+        await dock.getByTestId('setup-finish').fill('80');
+        await dock.getByTestId('setup-update-session').click();
+
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(dock.getByTestId('progress-line')).toContainText('of 80');
+
+        // The overlay must KEEP its restored look — red, 150px, the label.
+        await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Score: ');
+        const fontSizeAfter = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).fontSize);
+        expect(fontSizeAfter).toBe('150px');
+        const colorAfter = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(colorAfter).toBe('rgb(255, 0, 0)');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a deliberate colour change, then Update, applies it to the overlay', async ({ context }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port }); // devhook default true — known live presentation from the start
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        await startSessionViaHook(dock, { startValue: 0, finishValue: 50, mode: 'manual' });
+        await expect(overlay.getByTestId('overlay-number')).toHaveText('0');
+
+        await dock.getByTestId('tab-setup').click();
+        await dock.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#00ff00';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await dock.getByTestId('setup-update-session').click();
+
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        const color = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(color).toBe('rgb(0, 255, 0)');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a preset differing from the running session ONLY in look shows the "not applied yet" notice', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 50, title: 'Blue Look', template: 'Lives: {count}' });
+        await page.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#0000ff';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.getByTestId('setup-save').click();
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Blue Look');
+
+        // An ad hoc session with the EXACT SAME range/mode/interval/
+        // completion as the preset above, but an explicitly DIFFERENT look.
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-template').fill('');
+        await page.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#ffffff';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-row').filter({ hasText: 'Blue Look' }).getByTestId('preset-load').click();
+
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        // Range/mode/interval/completion match exactly — only the LOOK differs.
+        await expect(page.getByTestId('setup-start')).toHaveValue('0');
+        await expect(page.getByTestId('setup-finish')).toHaveValue('50');
+        await expect(page.getByTestId('setup-not-applied-notice')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('no presentation field dirty: Update skips adoptPresentation entirely (style stays unchanged across every broadcast)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true — known live presentation (DEFAULT_STYLE)
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-finish').fill('80'); // ONLY a range field dirty — no presentation field touched
+
+        const beforeCount = stateBroadcasts(mock).length;
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        const since = stateBroadcasts(mock).slice(beforeCount);
+        expect(since.length).toBeGreaterThan(0); // the reconfigure's own broadcast did happen
+        for (const entry of since) {
+          const payload = entry.payload as { style: unknown };
+          expect(payload.style).toEqual(DEFAULT_STYLE); // never reset to Setup's own defaults, never touched at all
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('null-presentation recovery (preset deleted): the form keeps its own defaults, the notice shows, and Update applies exactly what the form shows', async ({
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port, devhook: false });
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        await fillCoreSetupFields(dock, { start: 0, finish: 10, title: 'Doomed Preset', template: 'X {count}' });
+        await dock.getByTestId('setup-save').click();
+        await dock.getByTestId('tab-presets').click();
+        await dock.getByTestId('preset-start').click();
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+
+        // Delete the preset behind the session's back.
+        await dock.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+
+        await openDock(dock, { port: mock.port, devhook: false }); // reload: recovers the session; presentation stays unknown
+        await expect(dock.getByTestId('current-value')).toHaveText('0');
+
+        await dock.getByTestId('tab-setup').click();
+        // Form keeps ITS OWN defaults (ruling 5) — not the deleted preset's.
+        await expect(dock.getByTestId('setup-template')).toHaveValue('');
+        // Ruling 5 — no live value to compare against, so the notice shows
+        // even though the range itself already matches.
+        await expect(dock.getByTestId('setup-not-applied-notice')).toBeVisible();
+
+        await dock.getByTestId('setup-template').fill('Fresh Label {count}');
+        await dock.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#00ff00';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await dock.getByTestId('setup-update-session').click();
+
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Fresh Label ');
+        const color = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
+        expect(color).toBe('rgb(0, 255, 0)');
       } finally {
         await mock.close();
       }

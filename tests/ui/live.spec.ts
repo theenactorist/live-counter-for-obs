@@ -217,6 +217,35 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Task 2.18 fix wave 5 (coordinator re-review residual) — Setup no longer
+  // has any path that changes a running session's mode (ruling 1: Mode's
+  // dedicated control is HERE, on Live); the deleted Setup-side test that
+  // used to cover "switching to manual stops a running automatic timer" is
+  // replaced by this one, driven entirely through `mode-toggle`.
+  test('mode-toggle to manual stops a running automatic timer', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 1 });
+      await page.getByTestId('auto-start').click();
+      await expect(page.getByTestId('auto-pause')).toBeEnabled();
+
+      await page.getByTestId('mode-toggle').click(); // automatic -> manual
+      await expect(page.getByTestId('auto-start')).toHaveCount(0); // automatic cluster gone entirely
+
+      // The timer must have actually stopped, not just the UI hiding the
+      // cluster — capture the value right after the toggle (rather than
+      // asserting a hardcoded literal) and confirm it's unchanged after
+      // waiting long enough for a still-running 1s timer to have ticked.
+      const valueRightAfterToggle = await readValue(page);
+      await page.waitForTimeout(1500);
+      const valueAfterWait = await readValue(page);
+      expect(valueAfterWait).toBe(valueRightAfterToggle);
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('automatic: rate label reflects interval; faster/slower step it', async ({ page }) => {
     const mock = await startMockObs();
     try {
