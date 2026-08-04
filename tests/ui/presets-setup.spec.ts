@@ -2706,11 +2706,18 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
-    // --- Fix wave 2 (minor): canUpdate() previously never checked
-    // `intervalSeconds ∈ SPEED_LEVELS` at all — reachable in practice only
-    // via a session recovered with an off-menu interval (never through this
-    // form's own <select>, which only ever offers SPEED_LEVELS values).
-    test('a recovered session with an off-menu interval disables Update session', async ({ page }) => {
+    // --- Fix wave 2 (minor), REVISED in fix wave 3 (minor 2): fix wave 2
+    // made canUpdate() check `intervalSeconds ∈ SPEED_LEVELS`, which (without
+    // a substitution) left a session recovered with an off-menu interval
+    // PERMANENTLY unable to Update at all — worse for a MANUAL session
+    // specifically, since the Interval <select> only renders in automatic
+    // mode, so the operator has no field to dirty to override it. Fix wave 3
+    // substitutes the nearest SPEED_LEVELS entry on the inherit-from-session
+    // branch instead, so Update stays usable; this test now asserts THAT,
+    // replacing its fix-wave-2 "stays disabled" expectation.
+    test('a recovered MANUAL session with an off-menu interval still allows Update session (substitutes the nearest SPEED_LEVEL)', async ({
+      page,
+    }) => {
       const mock = await startMockObs();
       try {
         await openDock(page, { port: mock.port, devhook: false });
@@ -2724,7 +2731,7 @@ test.describe('dock Setup + Presets views', () => {
             finishValue: 50,
             currentValue: 0,
             direction: 'up',
-            mode: 'automatic',
+            mode: 'manual',
             status: 'idle',
             intervalSeconds: 1.3, // off-menu: not one of SPEED_LEVELS
             overlayVisible: true,
@@ -2739,7 +2746,22 @@ test.describe('dock Setup + Presets views', () => {
 
         await page.getByTestId('tab-setup').click();
         await expect(page.getByTestId('current-value')).toHaveText('0'); // sanity: the session really did recover
-        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+        // Manual mode: the Interval row doesn't render at all, so the
+        // operator has no way to dirty 'intervalSeconds' to fix this
+        // themselves — the substitution is the only thing keeping Update
+        // usable here.
+        await expect(page.getByTestId('setup-interval')).toHaveCount(0);
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        // Live's UI doesn't surface intervalSeconds for a manual session
+        // (no automatic cluster) — read it back from the persisted session.
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { intervalSeconds: number },
+        );
+        expect(stored.intervalSeconds).toBe(1.5); // nearest SPEED_LEVEL to 1.3
       } finally {
         await mock.close();
       }
@@ -2888,6 +2910,173 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('setup-editing-title')).toContainText('Editable Preset');
         await expect(page.getByTestId('setup-start')).toHaveValue('1');
         await expect(page.getByTestId('setup-finish')).toHaveValue('99');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 3 (coordinator re-review, Important): fix wave 1/2
+    // CLEARED `dirtyFields` on both `loadPreset()` and a successful
+    // `performSave()`, on the theory that both make the form "authoritative
+    // again" the same way Start/Update do. That was wrong for both:
+    //   - `loadPreset()` writes AUTHORED values (the preset's own numbers)
+    //     that are awaiting an Update to actually apply — clearing them made
+    //     Update silently resolve every field from the LIVE SESSION instead
+    //     (a literal no-op), with no error, while the operator was looking
+    //     at the preset's numbers on screen.
+    //   - `performSave()` persists a PRESET; it applies nothing to the
+    //     running session, so it must leave dirty markers exactly as they
+    //     were.
+    // ------------------------------------------------------------------
+
+    test('loading a preset into an active session and clicking Update applies the PRESET config (not a silent no-op)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 200, title: 'Big Automatic Preset' });
+        await page.getByTestId('setup-mode').selectOption('automatic');
+        await page.getByTestId('setup-interval').selectOption('2');
+        await page.getByTestId('setup-save').click();
+
+        // Confirm the save landed before reusing overlapping fields below
+        // (avoids racing the known performSave() async-read issue).
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Big Automatic Preset');
+
+        // An UNRELATED manual session (0->50), started directly from Setup.
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-mode').selectOption('manual');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-row').filter({ hasText: 'Big Automatic Preset' }).getByTestId('preset-load').click();
+
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await expect(page.getByTestId('setup-start')).toHaveValue('0');
+        await expect(page.getByTestId('setup-finish')).toHaveValue('200');
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+        await expect(page.getByTestId('setup-interval')).toHaveValue('2');
+
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('progress-line')).toContainText('0 of 200');
+        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('typing a field, then Save preset, then Update: the typed value still applies (Save must not silently discard it)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-finish')).toHaveValue('50');
+        await page.getByTestId('setup-finish').fill('100'); // typed edit — dirty
+        await page.getByTestId('setup-title').fill('Snapshot While Live'); // required for Save to be enabled
+        await page.getByTestId('setup-save').click(); // saves a NEW preset — must NOT clear the dirty marker
+
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('progress-line')).toContainText('0 of 100'); // the TYPED value, not the old 50
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('regression (round 2 intact): with no preset load involved, an untouched Mode still follows a live session change even while an unrelated field is dirty', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('Unrelated edit'); // dirty, but NOT a preset load
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('mode-toggle').click(); // manual -> automatic, from Live
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic'); // still re-syncs
+        await expect(page.getByTestId('setup-template')).toHaveValue('Unrelated edit'); // still preserved
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 3, minor 1: Update's validation gate must agree with
+    // Save/Start's completionValid() (integer hold-seconds), not just the
+    // engine's own, more permissive isCompletionConfig (any positive finite
+    // number).
+    test('a non-integer hold-seconds (2.5) disables Update session too, matching Save/Start', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-completion').selectOption('holdThenHide');
+        await page.getByTestId('setup-completion-seconds').fill('2.5');
+
+        await expect(page.getByTestId('setup-save')).toBeDisabled(); // sanity: existing Save/Start rule
+        await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled(); // must now agree
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Confirming test (coordinator-requested): does a label-only Update
+    // (no range/interval/completion/mode change) hit the engine's `noop`
+    // path and leave undo history intact? RESULT: no — see the comment
+    // inline and the fix report for the full explanation; reported to the
+    // coordinator rather than changed in the engine, per instruction.
+    test('confirming test: a label-only Update clears undo history when the session already has any (does NOT hit the noop path)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click();
+        await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+        await expect(page.getByTestId('btn-undo')).toBeEnabled(); // undo history exists before Update
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('Score: {count}'); // label-only edit — no range/interval/completion/mode change
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('current-value')).toHaveText('2'); // unchanged: no restart
+
+        // CONFIRMED RESULT: the reviewer's expectation was that a label-only
+        // Update — whose resolved reconfigure payload is IDENTICAL to the
+        // session's own range/interval/completion — hits the engine's
+        // `noop` path and leaves undo history intact. It does not.
+        // `reconfigure`'s own noop condition (deliberate, fix wave 1)
+        // requires an EMPTY undo stack IN ADDITION to an identical config —
+        // "an identical reconfigure with existing undo history still clears
+        // it, since clearing IS the change" was an explicit, tested rule
+        // from this task's first fix wave. With undo history already
+        // present (as in any realistic mid-service Update), the ACCEPT path
+        // runs instead and clears it — Undo is now disabled.
+        await expect(page.getByTestId('btn-undo')).toBeDisabled();
       } finally {
         await mock.close();
       }

@@ -612,6 +612,16 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.dirtyFields.add(field);
   }
 
+  // Fix wave 3 (minor 2) — the nearest `SPEED_LEVELS` entry to an arbitrary
+  // number, used only to substitute for an off-menu `intervalSeconds` on a
+  // session this form never dirtied itself (see `reconfigureCommandFor`
+  // below). `SPEED_LEVELS` is short and fixed, so a linear scan is plenty.
+  function nearestSpeedLevel(value: number): number {
+    return (SPEED_LEVELS as readonly number[]).reduce((closest, level) =>
+      Math.abs(level - value) < Math.abs(closest - value) ? level : closest,
+    );
+  }
+
   // Fix wave 2 (Important + minor) — resolves what `reconfigure` should
   // actually be dispatched with: the OPERATOR's own value for each field the
   // operator actually touched (`ui.dirtyFields`), and the LIVE session's
@@ -623,13 +633,34 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // below pre-validates the result through the engine's own `applyCommand`
   // (not a hand-rolled duplicate of its rules) before this is ever actually
   // dispatched, so a rejection is never silently partial.
+  //
+  // Fix wave 3 (minor 2) — a session's `intervalSeconds` is only EVER
+  // written by an operator through this form's own `<select>` (dirty ->
+  // always a genuine `SPEED_LEVELS` member by construction), so the
+  // off-menu case can only arise on the INHERIT-from-session branch (a
+  // recovered/legacy session; `isSession` admits any positive finite
+  // interval, not just `SPEED_LEVELS` members). Under `mode: 'manual'` the
+  // Interval row doesn't even render, so the operator has no way to dirty
+  // this field and override it — the resulting session would otherwise be
+  // permanently un-reconfigurable (Update always rejected on this ONE
+  // field, no message, no fix). Since `reconfigure` itself has no way to
+  // ACCEPT an off-menu value regardless, substituting the nearest
+  // `SPEED_LEVELS` entry here is the only option that keeps Update usable
+  // at all — safe because the substituted value only ever takes effect
+  // once this reconfigure is actually dispatched, at which point the
+  // session's interval was already off-menu and thus not something any
+  // other code path could have been relying on staying exactly that value.
   function reconfigureCommandFor(
     session: Session,
   ): { type: 'reconfigure'; startValue: number; finishValue: number; intervalSeconds: number; completion: CompletionConfig; nonce: string } | null {
     const startValue = ui.dirtyFields.has('startValue') ? parseIntStrict(ui.startValue) : session.startValue;
     const finishValue = ui.dirtyFields.has('finishValue') ? parseIntStrict(ui.finishValue) : session.finishValue;
     if (startValue === null || finishValue === null) return null;
-    const intervalSeconds = ui.dirtyFields.has('intervalSeconds') ? ui.intervalSeconds : session.intervalSeconds;
+    const intervalSeconds = ui.dirtyFields.has('intervalSeconds')
+      ? ui.intervalSeconds
+      : (SPEED_LEVELS as readonly number[]).includes(session.intervalSeconds)
+        ? session.intervalSeconds
+        : nearestSpeedLevel(session.intervalSeconds);
     const completionKind = ui.dirtyFields.has('completionKind') ? ui.completionKind : session.completion.kind;
     const completionSecondsValue = ui.dirtyFields.has('completionSeconds')
       ? ui.completionSeconds
@@ -655,9 +686,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // dispatch that the engine then rejected, after a `setMode` had already
   // been applied (see `onUpdateSession`'s doc comment for why dispatch order
   // alone isn't enough without this).
+  //
+  // Fix wave 3 (minor 1) — ALSO requires `completionValid()`: the engine's
+  // own `isCompletionConfig` only requires `seconds` to be a positive finite
+  // number, so it alone would enable Update for a non-integer hold-seconds
+  // (e.g. `2.5`) that Save/Start both already reject via `completionValid()`
+  // (which additionally requires an integer). Checking both is what makes
+  // Update agree with Save/Start on this rule instead of being MORE
+  // permissive than the rest of this same form.
   function canUpdate(): boolean {
     const session = opts.controller.getState().session;
-    if (session === null || !styleValid()) return false;
+    if (session === null || !styleValid() || !completionValid()) return false;
     const cmd = reconfigureCommandFor(session);
     if (!cmd) return false;
     return applyCommand(session, cmd, Date.now()).accepted;
@@ -759,11 +798,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
     }
     ui.conflict = null;
-    // Fix wave 1 (Important 2) — a successful Save is one of the
-    // dirty-clearing points: the form's current contents are now the
-    // authoritative, persisted preset, not an unsaved edit `refresh()` needs
-    // to protect from a tab-activation prefill.
-    ui.dirtyFields.clear();
+    // Fix wave 3 (Important) correction: fix wave 1 cleared `dirtyFields`
+    // here on the theory that a successful Save makes the form "authoritative
+    // again" the same way Start/Update do. That was wrong for Save
+    // specifically: saving a PRESET applies nothing to the running SESSION —
+    // `reconfigureCommandFor`/`resolvedModeFor` resolve an untouched field
+    // from the LIVE SESSION, so clearing dirty markers here made a
+    // just-typed, just-saved value (e.g. a new finish typed right before
+    // Save) silently invisible to a following Update, which would then
+    // dispatch the SESSION's old value instead — a silent no-op with no
+    // error. Only Start and Update actually make the form equal to the
+    // session (Start by building a brand-new session FROM these exact
+    // fields; Update by applying them) — Save does neither, so it must
+    // leave `dirtyFields` untouched.
     render();
   }
 
@@ -1608,13 +1655,26 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.conflict = null;
       ui.error = null;
       ui.reconfigureWarning = null;
-      // A freshly-loaded preset is a deliberate reset of the form, same
-      // spirit as prefill/Save/Start/Update — not an unsaved edit in
-      // progress. (The separate `ui.editing !== null` check in `refresh()`
-      // below already protects this load from a session-prefill regardless
-      // of dirty state, but clearing it here too avoids stale dirty markers
-      // lingering after a deliberate load.)
-      ui.dirtyFields.clear();
+      // Fix wave 3 (Important) correction: fix wave 1/2 CLEARED
+      // `dirtyFields` here, on the theory that a preset load is a
+      // deliberate, authoritative reset of the form. That was backwards —
+      // every field above is an AUTHORED value the operator is actively
+      // looking at (the preset's own numbers), not something to treat as
+      // "clean" (matching the live session). With them marked clean,
+      // `reconfigureCommandFor`/`resolvedModeFor` would resolve each one
+      // from the LIVE SESSION instead — so clicking Update session right
+      // after loading a preset silently dispatched the session's OWN
+      // existing values (a no-op) while the operator was looking at the
+      // preset's numbers on screen, with no error at all. Marking every
+      // field this method just wrote as dirty instead means Update actually
+      // applies what's displayed; `ui.editing` (set above) already shields
+      // all of them from being overwritten by `refresh()`'s prefill in the
+      // meantime, same as it always has.
+      ui.dirtyFields = new Set([
+        'title', 'startValue', 'finishValue', 'mode', 'intervalSeconds', 'template', 'layout',
+        'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
+        'animType', 'animTarget', 'animDurationMs', 'completionKind', 'completionSeconds',
+      ]);
       render();
     },
     // Task 2.18 — called by main.ts whenever the Setup tab is (re)activated.
