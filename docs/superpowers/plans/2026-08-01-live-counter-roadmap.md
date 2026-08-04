@@ -175,7 +175,7 @@ Tasks (each expands to TDD steps in `2026-08-XX-phase1-engine.md` at phase start
 - [ ] **4.2 Fault injection:** storage quota, websocket kill/restore mid-session, OBS force-kill recovery (AC 10, 17, 20)
 - [ ] **4.3 Performance validation:** heaviest animation at 0.25 s interval, 60 s, 1080p60 project, OBS render-lag stats captured (PRD §10.3)
 - [ ] **4.4 Windows validation:** full manual checklist on the church Windows machine (or VM if unavailable — noted as residual risk); path/URL handling differences
-- [ ] **4.5 Docs:** operator README (setup, recovery, troubleshooting), maintenance notes, version string in dock
+- [ ] **4.5 Docs + distributable:** operator README (setup, recovery, troubleshooting), maintenance notes, version string in dock; a **shareable zip** (dist files + Lua script + README) as the unit that moves the tool to another computer — presets travel via the export/import feature (PRD §8.7)
 
 ## Execution model
 

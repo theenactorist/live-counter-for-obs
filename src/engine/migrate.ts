@@ -1,5 +1,5 @@
-import type { Session, Preset, Command, Mode } from './types.js';
-import { isSession, isPreset, SESSION_SCHEMA_VERSION, PRESET_SCHEMA_VERSION } from './types.js';
+import type { Session, SessionTombstone, Preset, Command, Mode, OverlayLayout } from './types.js';
+import { isSession, isSessionTombstone, isPreset, SESSION_SCHEMA_VERSION, PRESET_SCHEMA_VERSION } from './types.js';
 import { createSession, applyCommand } from './counter.js';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,34 @@ const PRESET_MIGRATIONS: Migrations = {};
 function isPlainObject(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x);
 }
+
+// Task 2.11 (PRD §8.8, schema v1 -> v2): a v1 preset/snapshot's `style` has no
+// `layout` field. Infers one from the record's `template` so an operator's
+// already-saved presets (and end-of-session snapshots) survive the bump
+// instead of failing validation (AC 24), per the controller-clarified rule:
+// template contains `{count}` -> textBefore; template null -> numberOnly;
+// template present without `{count}` -> textAbove. Exported because
+// protocol/persistence.ts's OverlaySnapshot loader needs the exact same
+// inference — snapshots are validated on a separate path (loadSnapshot(), not
+// loadPresets()/PRESET_MIGRATIONS below) but must migrate identically.
+export function inferLayout(template: unknown): OverlayLayout {
+  if (template === null) return 'numberOnly';
+  if (typeof template === 'string' && template.includes('{count}')) return 'textBefore';
+  return 'textAbove';
+}
+
+// v1 -> v2: bump schemaVersion and backfill `style.layout` via inferLayout()
+// above. `style` is expected to be a plain object on any genuinely v1 preset
+// (isPreset would have rejected it otherwise before this schema bump existed)
+// but the migration itself must never throw on a malformed record — a
+// non-object `style` is left untouched and isPreset rejects the result
+// afterward, same as any other structurally-invalid migrated record.
+PRESET_MIGRATIONS[1] = (old: unknown): unknown => {
+  if (!isPlainObject(old)) return old;
+  const { style, template } = old;
+  if (!isPlainObject(style)) return { ...old, schemaVersion: 2 };
+  return { ...old, schemaVersion: 2, style: { ...style, layout: inferLayout(template) } };
+};
 
 function extractVersion(x: unknown): number | undefined {
   if (!isPlainObject(x)) return undefined;
@@ -88,9 +116,29 @@ export function serializeSession(s: Session): string {
   return JSON.stringify(s);
 }
 
-export function loadSession(raw: string | null): LoadResult<Session> {
+/**
+ * What the session slot can legitimately hold: a real `Session`, or the
+ * `SessionTombstone` written by `DockStorage.saveSession(null)` to record
+ * "this session was deliberately ended at revision N" (Phase 2 final-review
+ * fix, live-safety:F5). Callers resolve a tombstone to "no session" AFTER the
+ * localStorage-vs-mirror revision comparison, which is the whole point — a
+ * tombstone has to be COMPARABLE to a stale mirrored session to beat it.
+ */
+export type StoredSession = Session | SessionTombstone;
+
+export function loadSession(raw: string | null): LoadResult<StoredSession> {
   const parseResult = tryParse(raw);
   if ('corrupt' in parseResult) return { ok: false, reason: 'corrupt' };
+
+  // Checked BEFORE the migration chain: a tombstone deliberately carries no
+  // `schemaVersion` (its whole content is `{ended, revision}`), so
+  // migrateItem would reject it as 'invalid' and the caller would quarantine
+  // a perfectly valid, deliberately-written record — turning "session ended"
+  // back into "storage looks corrupt, fall back to the mirror", which is
+  // exactly the resurrection F5 is about.
+  if (isSessionTombstone(parseResult.parsed)) {
+    return { ok: true, value: parseResult.parsed };
+  }
 
   const { migrated, reason } = migrateItem(parseResult.parsed, SESSION_SCHEMA_VERSION, SESSION_MIGRATIONS);
   if (reason) return { ok: false, reason };
@@ -143,7 +191,25 @@ function mulberry32(seed: number): () => number {
 
 // Fixed command menu covering every Command type (same spirit as the
 // property-test arbitrary): 13 bare commands + jump (value in [-5, 60]) +
-// setMode (both modes), chosen uniformly.
+// setMode (both modes), chosen uniformly. `endSession` and `completionHide`
+// are deliberately excluded from this menu: both are dock-internal lifecycle
+// commands (session teardown / dock-owned completion hide) rather than part
+// of the count-changing core loop this replay oracle exercises, so including
+// them would churn the deterministic sequence without adding coverage here.
+// `reconfigure` (Task 2.18) is excluded too — but the honest reason is SCOPE,
+// not determinism (fix wave 1 correction: an earlier version of this comment
+// claimed including it would make two "identical" replays "diverge", which
+// is false — replaySeed is deterministic per seed regardless of which
+// commands are in this menu; the same seed always draws the same sequence,
+// with or without reconfigure in the pool). The real reason: this oracle
+// exists to compare a FIXED baseline (one range, 0->50, held constant for the
+// whole run) across refactors/platforms, and reconfigure changes that range
+// mid-run — which would mean redefining what "the baseline" even means at
+// step N for every future soak comparison, for no coverage gain. The
+// clamp/boundary/direction interaction reconfigure introduces is already
+// fuzzed for real by tests/engine/properties.test.ts's `cmdArb`, which DOES
+// include it — property-based testing, unlike this fixed replay, doesn't
+// need a stable range to stay meaningful.
 const BARE_COMMAND_TYPES = [
   'increment', 'decrement', 'undo', 'reverse', 'reset',
   'start', 'pause', 'resume', 'faster', 'slower',

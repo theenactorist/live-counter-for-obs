@@ -1,0 +1,5 @@
+/* Overlay must show through OBS's Browser Source with no chrome behind it. */
+body {
+  background: transparent;
+  margin: 0;
+}

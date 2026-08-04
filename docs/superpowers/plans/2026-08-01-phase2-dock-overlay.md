@@ -197,9 +197,186 @@ export class SessionController {
 
 - [ ] RED → implement → GREEN → commit `feat(dock): diagnostics + settings + phase gate integration test`
 
+### Task 2.9: Preset export/import (scope addition, user-requested 2026-08-01 — PRD §8.7 + AC 21)
+
+**Files:** Modify `src/dock/views/presets.ts`; append to `tests/ui/presets-setup.spec.ts`.
+
+**Contract:** `presets-export` button → builds `{ app: 'live-counter', kind: 'preset-export', v: 1, exportedAt, presets }` from a FRESH `storage.loadPresets()` → `navigator.clipboard.writeText` → `export-confirm` feedback ("N presets copied"). `presets-import` reveals `import-textarea` + `import-apply` + `import-cancel`; apply: `JSON.parse` (failure → `import-error` naming the problem, nothing written) → envelope check (app/kind/v) → every preset validated through the engine pipeline (serialize the array and run it through `loadPresets`-equivalent validation with migrations) → **all-or-nothing** → each import gets a fresh `crypto.randomUUID()` id → title collision with an existing preset appends " (imported)" → merge against a fresh `loadPresets()` fetch (never clobber concurrent edits) → `savePresets` → list refresh + `import-confirm` ("N presets imported"). Clipboard is the transport (works in OBS CEF docks; no file-picker dependency).
+
+**Mandatory tests:** export puts a valid envelope on the clipboard (clipboard permissions granted in Playwright); round-trip — export, wipe `lc.presets.v1` via page.evaluate, paste + apply → all rows restored with settings (AC 21); malformed JSON → inline error, storage untouched; envelope containing one invalid preset → all-or-nothing rejection; title collision → "(imported)" suffix; imported ids differ from originals.
+
+- [ ] Spec first (RED) → implement → GREEN (all suites) → commit `feat(dock): preset export/import via clipboard`
+
+### Task 2.10: Live-view hierarchy, Reverse scoping, labels, clipboard buttons (operator feedback 2026-08-02 — PRD §9, AC 23)
+
+**Files:** Modify `src/dock/views/live.ts`, `src/dock/views/setup.ts`, `src/dock/diagnostics.ts`, `src/dock/dock.html` (styles); append tests to `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Contract:**
+1. **Animation labels** — the `setup-anim-type` select must render human labels, not raw enum values: `None`, `Scale / Pop`, `Fade`, `Slide up`, `Flip` (values unchanged: none/pop/fade/slideUp/flip). Same treatment for `setup-anim-target`: `Number only` / `Text only` / `Text and number`.
+2. **Reverse hidden in Manual** — `btn-reverse` renders only when `session.mode === 'automatic'`. Engine capability untouched. Test: manual session → `btn-reverse` absent; toggle to automatic → present and functional.
+3. **Live hierarchy** (PRD §9, exact order): readout → `btn-plus` then `btn-minus` (DOM order `+1` first; `.ctl-primary` styling, `+1` visually dominant — larger flex weight or explicit size; both ≥44 px) → secondary row (`btn-undo`, `btn-jump`) → automatic cluster (auto mode only) → `btn-show-hide` → visual divider (`data-testid=live-danger-divider`) → `btn-reset`, `btn-end` small + `.danger` muted styling. Tests: DOM order assertion (`btn-plus` precedes `btn-minus`), `+1` bounding box area strictly greater than `−1`, Reset/End bounding-box height strictly less than `+1`'s, divider present between utility and destructive groups, and the existing 300 px layout test still passes.
+4. **Paste buttons** — `settings-paste` beside the websocket password field and `import-paste` beside the preset-import textarea; each calls `navigator.clipboard.readText()` on click, fills the field, and on rejection shows an inline hint (`…-paste-error`: "Clipboard blocked — type it in manually") instead of failing silently. Tests: with clipboard permissions granted and a seeded clipboard, each button fills its field; with `readText` monkey-patched to reject, the hint appears and the field is untouched.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): live-view hierarchy, manual-mode reverse scoping, readable labels, paste buttons`
+
+### Task 2.11: Overlay layout gallery (operator feedback 2026-08-02 — PRD §8.8, AC 22 + 24)
+
+**Files:** Modify `src/engine/types.ts` (StyleConfig + schema), `src/engine/migrate.ts` (v1→v2 migration), `src/shared/default-style.ts`, `src/overlay/renderer.ts`, `src/dock/views/setup.ts`; tests in `tests/engine/types.test.ts`, `tests/engine/migrate.test.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:**
+1. **Type** — `export type OverlayLayout = 'numberOnly' | 'textBefore' | 'textAfter' | 'textAbove' | 'textBelow' | 'textBehind'`; `StyleConfig` gains required `layout: OverlayLayout`; `isStyleConfig` validates it. `PRESET_SCHEMA_VERSION` → 2 and `OverlaySnapshot.schemaVersion` → 2.
+2. **Migration** (exercises the machinery built in Task 1.9): `PRESET_MIGRATIONS[1]` adds `layout`, inferred as `textBefore` when the preset's `template` contains `{count}`, else `numberOnly` when `template` is null, else `textAbove`. Same inference for a v1 snapshot. Test: a hand-written v1 preset JSON loads as v2 with the inferred layout and every other field intact (AC 24).
+3. **Renderer** (`src/overlay/renderer.ts`) — implement all six shapes using the existing stable-node discipline (mutate in place, never rebuild; animations still target number/text/both correctly per layout). `textAbove`/`textBelow` stack via flex-direction on the content root; `textBehind` renders the label as an absolutely-positioned oversized ghost (`opacity` ~0.18, larger font, centered behind, `z-index` below the number, `pointer-events:none`) — transform/opacity only, no layout animation. Label substitution (**corrected 2026-08-02 by commit `56680a8`, PRD §8.8 + AC 22 — `{count}` is never required**, single-sourced in `src/shared/template-content.ts`): a token-LESS label is placed by the layout itself (`textBefore` = label then number, `textAfter` = number then label — this is what makes the two visibly differ); a label containing `{count}` is split around the first token and the token dictates placement regardless of which inline layout is selected; stacked/behind layouts render the label verbatim with any `{count}` substituted.
+4. **Setup gallery** — `setup-layout-gallery` containing six `setup-layout-<name>` buttons, each a mini thumbnail (pure CSS/DOM miniature of the shape, no images), the selected one marked `aria-pressed="true"` + `.selected`; clicking updates `ui.layout`, the live preview, and the saved StyleConfig. **No layout blocks Save or Start for a missing `{count}`** (corrected 2026-08-02, as above): the `setup-template` field's label is permanently "Label text", there is no template error state, and a label that *does* carry a token gets a neutral `setup-template-token-hint` explaining that the token sets where the number goes.
+5. Tests: overlay renders each of the six layouts with the correct DOM shape/ordering (assert relative geometry: e.g. `textAbove` label's bounding box is above the number's; `textBehind` label overlaps the number and sits behind); gallery click switches preview without broadcasting state; token-less `textBefore` vs `textAfter` are visibly different and neither blocks Save/Start; AC 24 migration test.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(overlay): six-layout gallery with schema v2 migration`
+
+### Task 2.12: One-card Connect + "Add overlay to my scene" (operator feedback 2026-08-02 — setup friction)
+
+**Driver:** the operator's setup was 6 steps ("that's a lot of steps to copy password, paste, connect websocket server, going to diagnostics"). Two of them are pure waste: once connected, the dock can create the overlay Browser Source itself.
+
+**Files:** Modify `src/dock/views/live.ts` (Connect card), `src/dock/diagnostics.ts` (Add-overlay button + shared helpers), `src/protocol/obsws-client.ts` (nothing expected — verify), `tests/helpers/mock-obsws.ts` (extend), `src/dock/dock.html` (styles); tests in `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Mock server extension (test-only):** add request handlers `GetVideoSettings` (returns `baseWidth`/`baseHeight`, default 1920×1080, settable), `GetCurrentProgramScene`, `GetInputList`, `GetInputSettings`, `SetInputSettings`, `CreateInput` — each recording into the existing `requestLog` so tests assert exact payloads. `CreateInput` stores the input so a following `GetInputList` returns it.
+
+**Contract:**
+1. **Connect card** — rendered on the Live tab whenever the client is not `identified` and no session UI can be useful: `[data-testid=connect-card]` containing `connect-port` (pre-filled from settings, default 4455), `connect-password` (focused on mount, `type=password`), `connect-paste` (reuses the Task 2.10 paste mechanism), `connect-submit`, and a state line `connect-state` whose text names the actual fix: unreachable → "OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry"; auth-failed → "That password wasn't accepted — copy it from Show Connect Info"; connecting → "Connecting…". A `connect-retry` button appears in the unreachable state. On success the card unmounts and normal Live content renders. Saving through the card persists via `DockStorage.saveSettings` and re-boots the client exactly as the Diagnostics settings form does (reuse that path — do not duplicate boot logic).
+2. **Add overlay** — `[data-testid=add-overlay]` in Diagnostics (and mirrored on the Connect card's success state): enabled only when identified.
+
+   **Amended by the Phase 2 gate fix wave (controller Ruling A, 2026-08-03) — scan-then-decide.** The original click-driven "create or blindly update" flow is superseded: `GetInputList` is scene-collection-GLOBAL, so an overlay living in a different scene was updated in place while the program scene stayed empty and the UI still reported success, and the button read "Add overlay to my scene" right up to the moment it reconfigured an existing source. The contract is now:
+   - **Seed scan** — at mount, on every identify, and on Diagnostics tab activation (not on click), the dock runs `GetVideoSettings` → `GetCurrentProgramScene` → `GetInputList` → `GetInputSettings` per `browser_source` (matching `overlay.html` in the URL) → `GetSceneItemList` on the program scene to establish MEMBERSHIP, so the button's verb is truthful before the first click. While the scan is in flight the button is disabled with a neutral label. **A failing `GetInputSettings` makes the whole scan inconclusive** (never "none found"): the button stays disabled and an explicit re-scan control is offered, because acting on a half-read scene is how a duplicate gets created.
+   - **none anywhere** → "Add overlay to my scene" → `CreateInput` in the current program scene, `inputName` `Live Counter Overlay` (suffix ` 2`, ` 3`… if taken), `inputKind` `browser_source`, settings `{ is_local_file:false, url:<generated overlay URL>, width:<baseWidth>, height:<baseHeight>, shutdown:false, restart_when_active:false }`; confirm "Overlay added to <scene>".
+   - **exists in the current program scene** → "Fix overlay settings" → clicking shows an inline confirmation naming exactly what changes ("This will set '<name>' to <W>×<H> and reload it on air") with Apply/Cancel; only Apply issues `SetInputSettings`; confirm "Overlay settings updated".
+   - **exists only in OTHER scenes** → "Add overlay to this scene", with a note naming where it already is → `CreateSceneItem` adds that EXISTING source to the current program scene. No second input is created and the other scene's copy is never touched.
+   - Every action re-scans first and refuses (rather than silently doing something else) if the world no longer matches the intent the operator clicked.
+   - failure of any request → `add-overlay-error` with the request's message; nothing partially created is left behind (no retry loop).
+   - **The written URL carries no credentials** (Ruling B): `?pw=` is never persisted into a scene collection; `?port=` only when non-default. Task 2.13's direct transport makes the websocket unnecessary for the overlay to count and render.
+3. Diagnostics' existing "Copy overlay URL" stays (manual path remains available) and is the one place that still offers the password-bearing URL — labelled distinctly from what the button writes.
+
+**Mandatory tests:** card visible when not identified and gone once identified; wrong password → auth-failed text; server absent → unreachable text + Retry present; successful connect through the card persists settings and reaches identified; add-overlay disabled while not identified; add-overlay creates exactly one `CreateInput` with the asserted settings payload (url contains `overlay.html` and NO `pw=`, width/height match the mock's `GetVideoSettings`, `shutdown:false`); second click with the overlay already present reads "Fix overlay settings", requires the inline Apply, then issues `SetInputSettings` and **no** second `CreateInput`; name collision produces ` 2`; a failing `CreateInput` surfaces `add-overlay-error`. **Gate fix wave additions:** a pre-seeded overlay makes the button read "Fix overlay settings" BEFORE any click; an overlay seeded in a non-program scene reads "Add overlay to this scene", names that scene, and adds the existing source via `CreateSceneItem` without a second `CreateInput` and without touching the other scene's settings; a failing `GetInputSettings` during the scan disables the button and offers a re-scan instead of creating anything. **Ruling C:** with no server the Connect card is dismissible and the normal Live UI (plus a reopening chip) renders behind it, and counting + overlay still work.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): one-card connect flow + add-overlay-to-scene button`
+
+### Task 2.13: Direct panel↔overlay transport, websocket optional (spike-confirmed 2026-08-02)
+
+**Driver + evidence:** a spike proved two `file://` pages share `localStorage`, receive cross-page `storage` events, and can talk over `BroadcastChannel`. So the bus does not need obs-websocket, which makes the password optional for counting. Verified in Chromium; **CEF 127 confirmation happens in the next real-OBS smoke test**, which is why the websocket transport stays as a fallback rather than being replaced.
+
+**Files:** Create `src/protocol/local-bus.ts`; modify `src/protocol/bus.ts` (composite), `src/overlay/main.ts` (mount without requiring ws), `src/dock/main.ts` (wire composite), `src/dock/diagnostics.ts` (transport row); tests in `tests/protocol/bus.test.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/integration.spec.ts`.
+
+**Contract:**
+1. `LocalBusTransport` — `BroadcastChannel('live-counter')` when constructible, plus a `localStorage` write/`storage`-event path as a second channel (write key `lc.bus.v1` with the envelope + a monotonic counter, so identical payloads still fire an event). Both are best-effort: any constructor/quota failure degrades to "transport unavailable" without throwing.
+2. `Bus` becomes a composite over `[LocalBusTransport, ObsWsTransport]`: `send` fans out to every available transport (failures on one never block another); `onMessage` **deduplicates by envelope nonce** across transports so a message arriving twice fires once; the own-source filter stays. Expose `activeTransports(): { local: boolean; obsws: boolean }`.
+3. **Overlay boots without credentials** — `overlay.html` with no `?port`/`?pw` mounts the renderer and joins the local transport; the ws client is attempted only when params are present (or defaults are reachable) and its absence is not an error state. The existing `overlay-status` heartbeat goes over whichever transports are live.
+4. **Diagnostics transport row** — `diag-row-transport`: "Panel ↔ overlay: direct + OBS" / "direct only" / "OBS only" / "not connected", with `data-state` ok/warn/fail. The overlay row's meaning is unchanged (it still reflects heartbeats seen).
+5. Session persistence, LIVE status, and the add-overlay button continue to require the websocket — document that in the row's help text.
+
+**Mandatory tests:** unit — composite fans out and dedupes by nonce (two transports delivering the same envelope → one `onMessage`); a throwing transport doesn't prevent the other from sending; `activeTransports` reflects availability. Playwright — **dock + overlay with NO mock server at all: start a session, +1 ×3, overlay shows 3** (the headline: counting with zero OBS setup); overlay loaded with no query params renders and heartbeats; with both transports live a value change produces exactly one render (no double-apply); killing the ws mock mid-session leaves counting working over the direct transport and flips `diag-row-transport` to "direct only".
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(protocol): direct BroadcastChannel transport, obs-websocket optional`
+
+### Task 2.14: Setup redesign — WYSIWYG preview, counter-perspective layout names, grouped controls (operator feedback 2026-08-02 — PRD §8.8, §9, AC 25 + 26)
+
+**Driver (verbatim):** "Text after, text below etc are a bit confusing — let's use counter as the keyword, so counter above will put the number on top" · "No use for description" · "Start value and finish value can be in a single row, 2 columns" · "A preview of the actual render should be visible when I edit label text" · "The different setup parameters for the label and counter can be grouped together" · "I need the setup to be very simple and to have a preview to show the person setting up what the end result looks like before they get started."
+
+**Files:** Create `src/shared/overlay-presentation.ts`; modify `src/overlay/renderer.ts` (consume it), `src/dock/views/setup.ts` (rebuild), `src/dock/views/presets.ts` (drop description), `src/dock/diagnostics.ts` (reset action), `src/dock/dock.html` (styles); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/overlay.spec.ts`, `tests/ui/diagnostics.spec.ts`, `tests/protocol/*`.
+
+**Contract:**
+1. **Shared presentation module** — extract the node creation + layout/content/style application currently inside `renderer.ts` into `src/shared/overlay-presentation.ts`, exporting something like `createPresentationNodes(): PresentationNodes` and `applyPresentation(nodes, { style, template, value })`. The overlay renderer keeps ownership of everything else (bus, cache, coalescing, watchdog, fonts gate, animations, stable-node discipline) and must behave identically — its existing tests are the regression fence. Setup's preview uses the SAME two functions, so preview and stream cannot drift (this retires the gap/font-size drift findings).
+2. **Counter-perspective names** in the gallery, per PRD §8.8's table: Counter only / Counter right / Counter left / Counter below / Counter above / Counter in front. Stored enum values unchanged — display-only. Thumbnails must match their new names.
+3. **Description removed** from the Setup form and the Presets rows. `Preset.description` stays in the type/schema (no migration); new presets store `null`. Export/import keeps carrying whatever an older preset had.
+4. **Setup layout** rebuilt in the PRD §9 order: always-visible preview at the top; Counter (Start | Finish on one row as two columns, then mode, then interval when Automatic); Layout gallery; **Label group** (text, size, colour); **Counter style group** (size, colour, typeface); Animation; Completion; Save/Start. Use `<fieldset>`/legend or equivalent grouping with visible headings.
+5. **Preview liveness** — updates on every keystroke in the label field (an `input` listener, not blur) and on every other control change, without broadcasting state or touching the live session.
+6. **`diag-reset-all`** — guarded by an inline confirm (`reset-all-confirm` / `reset-all-cancel`) naming exactly what is destroyed; on confirm, remove every `lc.*` key from localStorage, clear the persistent-data mirror slots when identified, and re-boot the dock to first-run state. Confirm text: "Everything cleared — the dock is back to first-run."
+
+**Mandatory tests:** preview parity — for each of the six layouts, the Setup preview's structural shape matches the overlay's for the same inputs (assert via the shared module's output: same node order/classes, and geometry relationships mirroring the overlay tests); typing in the label updates the preview within the same test tick and issues no `state` broadcast; the gallery shows the six counter-perspective names; start/finish render as one row with two columns (bounding boxes share a row); Label and Counter groups exist as distinct labelled sections; no description input exists in Setup and no description text renders in Presets rows; Setup remains usable at 300 px (all controls reachable, no horizontal scroll); reset-all clears storage and returns the first-run state, cancel changes nothing; every existing overlay test still passes against the refactored renderer.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): setup redesign — shared WYSIWYG preview, counter-perspective layouts, grouped controls, reset`
+
+### Task 2.15: Sticky tabs + labelled sticky preview + inline vertical centring (operator feedback 2026-08-02 — PRD §8.8, §9)
+
+**Driver (verbatim, with a screenshot of the redesigned Setup):** "PLEASE FIX the top tab and add a label to the preview to show preview. Also fix the preview so no matter how the personnel scrolls, they always see it." · "The caption should label be at the vertical center for counter left and right."
+
+**Files:** Modify `src/dock/dock.html` (styles + shell markup), `src/dock/views/setup.ts` (preview caption), `src/shared/overlay-presentation.ts` (inline alignment); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/live.spec.ts`, `tests/ui/overlay.spec.ts`.
+
+**Contract:**
+1. **Tab bar pinned** — the four tabs stay visible at the top of the dock no matter how far any view is scrolled (`position: sticky; top: 0` on the tabs row with an appropriate `z-index` and an opaque background so content cannot show through). Verify no view's own scrolling container defeats it. Test: in Setup at 300×600, scroll to the bottom of the pane and assert all four tab buttons are still in the viewport and clickable.
+2. **Preview pinned and captioned** — the preview block gains a visible caption reading **Preview** (`[data-testid=setup-preview-caption]`) and sticks directly below the tab bar while the rest of Setup scrolls (`position: sticky` at an offset equal to the tab bar's height; it must not overlap the tabs, and the scaled preview node inside must keep working — the existing `transform: scale()` wrapper stays INSIDE the sticky container so it does not become the sticky element itself). Test: scroll Setup to the Completion group and assert the preview's bounding box is still within the viewport and below the tabs, with the caption visible.
+3. **Inline vertical centring** — in `src/shared/overlay-presentation.ts`, the inline layouts (`textBefore` / `textAfter`) align the label to the counter's vertical centre instead of its baseline; stacked and behind layouts keep their current alignment. This changes the OVERLAY as well as the preview, which is intended. Tests: in `overlay.spec.ts`, for both inline layouts with a large counter and a small label, assert the label's vertical centre is within a few px of the counter's vertical centre (and that it is NOT baseline-aligned — i.e. the old behaviour would fail); the preview-parity test already compares both surfaces, so extend it to cover the alignment.
+
+**Note on the regression fence:** `tests/ui/overlay.spec.ts` may be EXTENDED with the new alignment tests, but no existing assertion in it may be weakened or removed; if an existing overlay test fails because of the alignment change, report it rather than editing it — that would mean the change reached further than intended.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): sticky tabs and captioned sticky preview; centre inline labels`
+
+### Task 2.16: Test animation must honour the animation target (operator feedback 2026-08-02 — PRD §8.10)
+
+**Driver:** with target **Number only**, clicking Test animation pops the label too. The overlay is correct; the Setup preview is not — it animates the whole preview element, a shortcut taken in Task 2.6 and explicitly deferred with "per-part targeting deferred to Task 2.7's overlay renderer". The renderer is now shared (Task 2.14), so the deferral is due.
+
+**Files:** Modify `src/shared/overlay-presentation.ts` (export the target-selection), `src/overlay/renderer.ts` (consume it), `src/dock/views/setup.ts` (Test animation uses it); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/overlay.spec.ts`.
+
+**Contract:**
+1. Extract the renderer's existing target-selection into the shared module — e.g. `animationTargets(nodes, layout, target): HTMLElement[]` returning: `number` → the counter node; `text` → the before/after label spans, or the ghost node when layout is `textBehind`; `both` → the content root. The overlay renderer must consume it and behave **identically** (its existing tests are the fence: extend only, never weaken).
+2. Setup's Test animation animates exactly those elements with the configured type and duration, cancelling any in-flight test animation first (at most one in flight, mirroring the overlay's interrupt rule). It still must not broadcast state or touch the controller.
+3. `numberOnly` layout with target `text` or `both`: there is no label, so animate the counter (or the content root for `both`) — never a zero-size node that would appear to do nothing.
+
+**Mandatory tests:** for each target (`number`, `text`, `both`) at a layout with a visible label, clicking Test animation produces a running animation on exactly the expected node(s) and **none on the others** (assert via `getAnimations()` per element — the current bug would fail the "none on the others" half); with layout `textBehind` and target `text`, the ghost animates and the empty inline spans do not; repeated rapid clicks leave at most one animation in flight per node; the isolation assertion (no `state` broadcast during a test animation) still holds; the overlay's own targeting tests still pass unchanged.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `fix(dock): test animation honours the animation target`
+
+### Task 2.17: Literal whitespace in the label (operator feedback 2026-08-02 — PRD §8.8, AC 28)
+
+**Driver:** "I want to be able to add space bar in the label input which will reflect in the preview as actual space." Typing `Hello x ` renders as `Hello x0` — the trailing space is lost to HTML whitespace collapsing (and possibly to trimming on save).
+
+**Files:** Modify `src/shared/overlay-presentation.ts` (label nodes), `src/dock/views/setup.ts` (no trim on read/save) and `src/shared/template-content.ts` if it trims; tests in `tests/ui/overlay.spec.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:** label text renders literally — leading, trailing and repeated spaces preserved — in BOTH the overlay and the preview, via the shared module (`white-space: pre` on the inline label spans so spaces survive without introducing wrapping; stacked/ghost label nodes use `pre-wrap` so a long label can still wrap but keeps its spaces). Nothing in the save/load/export path trims the label. Verify the Task 2.15 `nowrap` on the preview's content root doesn't fight the new rule.
+
+**Mandatory tests:** overlay renders `Hello x ` before the counter with the gap intact (measure the label's rendered width against `Hello x` without the space — must be wider, and assert the textContent retains the trailing space); same in the preview; a label of `A  B` (two spaces) keeps both; save → reload → the label still has its spaces; export → import round-trip preserves them.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `fix(overlay): render label whitespace literally`
+
+### Task 2.18: Update session — reconfigure a running session (operator feedback 2026-08-02 — PRD §8.7, AC 27)
+
+**Driver:** "When I start a session, I'd like to go to setup and 'update session' which updates say the size or maximum count etc of the ongoing session." Today Setup can only Start a fresh session, which resets the count.
+
+**Files:** Modify `src/engine/types.ts` (Command union), `src/engine/counter.ts` (handler), `src/dock/controller.ts` (dispatch path + presentation), `src/dock/views/setup.ts` (button + prefill); tests in `tests/engine/*.test.ts`, `tests/protocol/controller.test.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:**
+1. **Engine command** `{ type: 'reconfigure'; startValue: number; finishValue: number; intervalSeconds: number; completion: CompletionConfig; nonce: string }`:
+   - Validation: integers in `[0, MAX_VALUE]`, `startValue !== finishValue`, `intervalSeconds` in `SPEED_LEVELS`, valid completion → else `invalid-value` (same reference, no change).
+   - Applies the new bounds/interval/completion; **clamps `currentValue`** into the new inclusive range; keeps `direction` as-is; **clears `undoStack`** (earlier entries may point outside the new range — document why).
+   - **Never enters `complete`**: a clamped/unchanged value landing on the new active boundary holds without firing completion or its effects. If the session WAS `complete` and the value is no longer at the new active boundary, exit to `idle` (manual) / `paused` (automatic).
+   - Effects: `[{kind:'animate'}]` only when the value actually changed; no `completed`, no overlay effects.
+   - Excluded from the property-suite/replay command menus with a comment, like `endSession`/`completionHide`.
+2. **Controller**: dispatching `reconfigure` follows the normal accepted-command path (persist → broadcast → notify); when the interval changed and the timer is running, re-arm it at the new interval preserving the running state. Presentation changes ride the existing `adoptPresentation`.
+3. **Setup UI**: when a session is active, Setup pre-fills from it and shows **Update session** next to Start session (Start keeps its existing replace-confirmation semantics). Update applies presentation + `reconfigure` in one action, then switches to the Live tab. If the value was clamped, show a visible warning naming the old and new value. Update is disabled when no session is active.
+
+**Mandatory tests:** engine — accept/clamp/reject cases, undo cleared, no completion on landing at the boundary, exit-from-complete when the boundary moves, same-reference rejection on invalid input; controller — running automatic session keeps running at the new interval, persist-then-broadcast ordering holds; Playwright — session at 23 of 50, edit finish to 30 + label + number size, Update session → Live still shows 23, progress reads against 30, overlay repaints with the new presentation, no restart; clamping case (range → 0–10 at 23) clamps to 10 with the warning; Update disabled with no session; Start session still replaces (existing confirmation intact).
+
+
+**FINAL CONTRACT SUPERSESSION (2026-08-04, after five review rounds — this block governs where it conflicts with the contract above):** Setup never dispatches `setMode` (mode is Live-view-only; disabled read-out in Setup with a mismatch note for presets). The engine accepts an UNCHANGED `intervalSeconds` even off the speed ladder (validation applies to changed values only). `undoStack` is cleared only when the range changed; an identical payload is a `noop` regardless of undo history. Presentation is per-field dirty-aware end-to-end: `ControllerState.presentation` exposes the live look, `prefillFromSession` fills untouched fields from it, Update applies operator-edited fields and carries clean ones from live, and skips `adoptPresentation` when nothing presentation-related is dirty. A persistent staleness notice covers config AND presentation divergence. See the task 2.18 fix report (five waves) and the ledger for the round-by-round rationale.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat: update a running session from Setup without restarting it`
+
+
+### Task 2.19: Keyboard clipboard everywhere, always-enabled Save with error states, save confirmation (operator feedback 2026-08-04 — PRD §9)
+
+**Driver (verbatim):** "i still can't copy and paste within the label text, title input fields. Check other input fields as well please" · "Save preset is disabled by default, i want it to be enabled but show the title in error state so the user knows what's wrong/needed to save preset" · "When I save preset, there is no confirmation dialogue or any message to notify me."
+
+**Files:** Create `src/dock/clipboard-keys.ts`; modify `src/dock/main.ts` (install once at shell level), `src/dock/views/setup.ts` (save flow), `src/dock/dock.html` (error/confirm styles); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Contract:**
+1. **Keyboard clipboard** — one document-level keydown handler (installed once, surviving boot() re-mounts) that, when the event target is an editable field (`input[type=text|number|password]`, `textarea`) and the modifier is Cmd (mac) or Ctrl: **C** copies the field's selection via `navigator.clipboard.writeText` (whole value when nothing selected); **X** copies then deletes the selection through the field's value + an `input` event (so state bindings update); **V** reads via `readText` and inserts at the caret replacing any selection, dispatching `input`; **A** selects the field's whole value and never bubbles to the page. `preventDefault()` in all handled cases (consistent behaviour even if a CEF version natively delivers some of them — no double-paste). A rejected `readText` shows the existing "Clipboard blocked — type it in manually" hint adjacent to the focused field (reuse the paste-hint pattern; a shared transient-hint helper is acceptable). Non-editable targets are untouched (the Live view's `+`/`-` guard keeps working).
+2. **Save always enabled** — `setup-save` never renders disabled. On click with invalid state: no save; the invalid fields (empty title first and foremost) gain a visible error treatment + message ("Title is required to save"); the first invalid field receives focus; errors clear as the operator edits the field. Start session / Update session keep their existing enablement semantics (they act on a LIVE session — different stakes).
+3. **Save confirmation** — successful save renders `setup-save-confirm` ("Preset '<title>' saved ✓", or "updated ✓" when editing), clearing on the next form edit or view switch. The stale-edit conflict flow is unchanged.
+
+**Mandatory tests:** with a seeded clipboard, Cmd/Ctrl+V pastes into the LABEL field at the caret (assert mid-string insertion) and into TITLE; Cmd/Ctrl+C on a selection in label puts exactly the selection on the clipboard; Cmd/Ctrl+X removes it and updates the preview (binding fired); Cmd/Ctrl+A selects only the field (page selection untouched); rejected readText → hint near the field; `+` typed in the label still doesn't count (guard intact); Save click with empty title → no preset stored, title error visible + focused, typing clears it; Save with valid title → preset stored + confirm text visible with the title; editing again clears the confirm; existing-preset save shows "updated"; password field paste keyboard path works in Diagnostics.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): keyboard clipboard in all fields; always-enabled save with error states + confirmation`
+
 ---
 
-## Phase gate checklist (after Task 2.8)
+## Phase gate checklist (after Task 2.18)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)

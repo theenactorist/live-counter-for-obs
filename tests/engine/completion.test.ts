@@ -54,7 +54,10 @@ describe('completion — exiting', () => {
     let s = createSession({ startValue: 0, finishValue: 1, mode: 'automatic', completion: { kind: 'hide' } }, T0);
     s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
     s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;      // complete at 1
-    s = { ...s, overlayVisible: false };                                    // dock applied the hide
+    // Already hidden by the engine's own kind:'hide' entry above (Task 2.0
+    // change 3); this spread is now a no-op, kept to make the pre-exit state
+    // explicit at the point of the assertion below.
+    s = { ...s, overlayVisible: false };
     const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0);
     expect(r.session.status).toBe('paused');
     expect(r.effects).toContainEqual({ kind: 'overlay', visible: true });
@@ -108,7 +111,9 @@ describe('completion — exiting', () => {
     s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
     s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
     s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session; // complete at 2
-    s = { ...s, overlayVisible: false };                                // dock applied the hide
+    // Already hidden by the engine's own kind:'hide' entry above; no-op spread,
+    // kept to make the pre-exit state explicit.
+    s = { ...s, overlayVisible: false };
     const r = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0);
     expect(r.session.status).toBe('paused');
     expect(r.session.overlayVisible).toBe(true);
@@ -142,7 +147,9 @@ describe('completion — regressions from Task 1.6 review', () => {
     let s = createSession({ startValue: 0, finishValue: 50, mode: 'manual', completion: { kind: 'hide' } }, T0);
     s = applyCommand(s, { type: 'jump', value: 50, nonce: nonce() }, T0).session; // complete at 50
     expect(s.status).toBe('complete');
-    s = { ...s, overlayVisible: false };                                          // dock applied the hide
+    // Already hidden by the engine's own kind:'hide' entry above; no-op spread,
+    // kept to make the pre-exit state explicit.
+    s = { ...s, overlayVisible: false };
     const r = applyCommand(s, { type: 'undo', nonce: nonce() }, T0);              // undoes the jump -> back to 0
     expect(r.session.currentValue).toBe(0);
     expect(r.session.status).toBe('idle');
@@ -217,5 +224,348 @@ describe('completion — regressions from Task 1.6 review', () => {
     expect(r.accepted).toBe(true);
     expect(r.session.mode).toBe('automatic');
     expect(r.session.status).toBe('complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2.0 additions — appended only, per the controller's binding
+// clarifications for dock wiring:
+//   Change 1: createSession defaults hiddenByCompletion to false.
+//   Change 2: the `completionHide` command.
+//   Change 3: engine-owned hide on completion ENTRY for kind:'hide'.
+//   Change 4: exitComplete's re-show gate keys off hiddenByCompletion, not
+//             completion.kind — closing the Phase-2 residual noted in the
+//             0d20c85 doc comment (operator-hidden overlay pre-completion
+//             under hide/holdThenHide no longer gets force-shown on exit).
+// ---------------------------------------------------------------------------
+
+describe('createSession — hiddenByCompletion default (Task 2.0 change 1)', () => {
+  it('defaults hiddenByCompletion to false', () => {
+    expect(mk().hiddenByCompletion).toBe(false);
+  });
+});
+
+describe('completion entry with kind "hide" hides the overlay in the same transition (Task 2.0 change 3)', () => {
+  it('tick landing on the boundary sets overlayVisible false, hiddenByCompletion true, and emits [animate, completed, overlay]', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'automatic', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
+    const r = applyCommand(s, { type: 'tick', nonce: nonce() }, T0); // lands on the boundary at 2
+    expect(r.session.status).toBe('complete');
+    expect(r.session.overlayVisible).toBe(false);
+    expect(r.session.hiddenByCompletion).toBe(true);
+    expect(r.effects).toEqual([
+      { kind: 'animate' },
+      { kind: 'completed', completion: { kind: 'hide' } },
+      { kind: 'overlay', visible: false },
+    ]);
+  });
+
+  it('manual increment landing on the boundary also hides in the same transition', () => {
+    const s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    const r = applyCommand(s, { type: 'increment', nonce: nonce() }, T0); // 0 -> 1, boundary
+    expect(r.session.status).toBe('complete');
+    expect(r.session.overlayVisible).toBe(false);
+    expect(r.session.hiddenByCompletion).toBe(true);
+    expect(r.effects).toEqual([
+      { kind: 'animate' },
+      { kind: 'completed', completion: { kind: 'hide' } },
+      { kind: 'overlay', visible: false },
+    ]);
+  });
+
+  it('completion entry under kind "hold" never sets hiddenByCompletion', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'automatic' }, T0); // default: hold
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
+    const r = applyCommand(s, { type: 'tick', nonce: nonce() }, T0);
+    expect(r.session.status).toBe('complete');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toEqual([{ kind: 'animate' }, { kind: 'completed', completion: { kind: 'hold' } }]);
+  });
+
+  it('completion entry under kind "holdThenHide" does not hide immediately — only an explicit completionHide does', () => {
+    const s = createSession(
+      { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    const r = applyCommand(s, { type: 'increment', nonce: nonce() }, T0);
+    expect(r.session.status).toBe('complete');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toEqual([
+      { kind: 'animate' },
+      { kind: 'completed', completion: { kind: 'holdThenHide', seconds: 3 } },
+    ]);
+  });
+});
+
+describe('completionHide command (Task 2.0 change 2)', () => {
+  it('is rejected invalid-state when status is not complete', () => {
+    const s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    const r = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-state');
+    expect(r.session).toBe(s);
+    expect(r.effects).toEqual([]);
+  });
+
+  it('is rejected invalid-state when complete but completion.kind is not holdThenHide', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual' }, T0); // kind: hold
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete
+    expect(s.status).toBe('complete');
+    const r = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-state');
+  });
+
+  it('is rejected invalid-state when complete under kind "hide" (that kind hides on entry, not via this command)', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete, already hidden by entry
+    expect(s.status).toBe('complete');
+    const r = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(false);
+    expect(r.rejection).toBe('invalid-state');
+  });
+
+  it('accepted when complete under holdThenHide: hides overlay, sets the flag, emits the overlay effect, bumps revision, pushes no undo entry', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete at 2
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(true);
+    const undoLenBefore = s.undoStack.length;
+    const revBefore = s.revision;
+
+    const r = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.status).toBe('complete');
+    expect(r.session.overlayVisible).toBe(false);
+    expect(r.session.hiddenByCompletion).toBe(true);
+    expect(r.session.revision).toBe(revBefore + 1);
+    expect(r.session.undoStack.length).toBe(undoLenBefore);
+    expect(r.effects).toEqual([{ kind: 'overlay', visible: false }]);
+  });
+});
+
+describe('exitComplete re-show gate keys off hiddenByCompletion (Task 2.0 change 4)', () => {
+  it('decrement off a hide-kind boundary re-shows the overlay and clears hiddenByCompletion', () => {
+    let s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete; engine hid it
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toContainEqual({ kind: 'overlay', visible: true });
+  });
+
+  it('an operator hide BEFORE completion under holdThenHide is respected on exit — no force re-show (Phase 2 residual fix)', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0).session; // operator hides BEFORE completion
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(false);
+
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // completes at the boundary
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(false); // unchanged: holdThenHide's entry does not touch it
+    expect(s.hiddenByCompletion).toBe(false); // the operator hid it, not the engine
+
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0); // exits complete
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(false); // NOT force-shown
+    expect(r.effects).not.toContainEqual({ kind: 'overlay', visible: true });
+  });
+});
+
+describe('operator showOverlay/hideOverlay always clear hiddenByCompletion (Task 2.0 change 4)', () => {
+  it('hideOverlay while hidden-by-completion clears the flag (accepted, even though overlayVisible does not change)', () => {
+    let s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete; engine hid it
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.overlayVisible).toBe(false);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toEqual([{ kind: 'overlay', visible: false }]);
+  });
+
+  it('showOverlay re-shows and clears hiddenByCompletion', () => {
+    let s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete; engine hid it
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'showOverlay', nonce: nonce() }, T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toEqual([{ kind: 'overlay', visible: true }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2.0 review fix wave — controller ruling: completion-hide claims
+// ownership (`hiddenByCompletion: true`) ONLY on a genuine visible -> hidden
+// transition (`s.hiddenByCompletion || s.overlayVisible`), never overriding a
+// prior operator hide; `completionHide` is an accepted no-op when the overlay
+// is already hidden-and-owned (idempotent dock retries); `endSession` clears
+// the flag on teardown. Appended only.
+// ---------------------------------------------------------------------------
+
+describe('completionHide is an accepted no-op when already hidden-and-owned (Task 2.0 fix, item 3)', () => {
+  it('a second completionHide after the first (which claimed ownership) is a true no-op: same reference, no effects, no revision bump', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete at 2
+    s = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0).session; // first hide: claims ownership
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0); // dock retry
+    expect(r.accepted).toBe(true);
+    expect(r.session).toBe(s); // same reference: true no-op
+    expect(r.effects).toEqual([]);
+    expect(r.session.revision).toBe(s.revision);
+  });
+});
+
+describe('holdThenHide end-to-end (Task 2.0 fix, missing test 5)', () => {
+  it('complete (flag false, visible) -> completionHide (hidden, flag true) -> exit re-shows and clears the flag', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete at 2
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(true);
+    expect(s.hiddenByCompletion).toBe(false);
+
+    s = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0).session;
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0); // exits complete (manual -> idle)
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+    expect(r.effects).toContainEqual({ kind: 'overlay', visible: true });
+  });
+
+  it('same flow in automatic mode exits to paused', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'automatic', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'start', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'tick', nonce: nonce() }, T0).session; // complete at 2
+    s = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0).session;
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0); // exits complete (automatic -> paused)
+    expect(r.session.status).toBe('paused');
+    expect(r.session.overlayVisible).toBe(true);
+    expect(r.session.hiddenByCompletion).toBe(false);
+  });
+});
+
+describe('operator hideOverlay while hidden-by-completion, then exit does not re-show (Task 2.0 fix, missing test 6)', () => {
+  it('hideOverlay clears the flag; a later count-change exit leaves the overlay hidden with no overlay effect', () => {
+    let s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete; engine hid it, flag true
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(true);
+
+    s = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0).session; // operator claims the hide
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(false);
+
+    const r = applyCommand(s, { type: 'decrement', nonce: nonce() }, T0); // exits complete
+    expect(r.session.status).toBe('idle');
+    expect(r.session.overlayVisible).toBe(false); // stays hidden
+    expect(r.effects).not.toContainEqual({ kind: 'overlay', visible: true });
+  });
+});
+
+describe('ownership-transition regressions (Task 2.0 fix, missing test 7)', () => {
+  it('7a: kind "hide" — operator hideOverlay BEFORE the boundary is not overridden by completion entry; flag stays false; exit does not re-show', () => {
+    let s = createSession({ startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0).session; // operator hides BEFORE completion
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(false);
+
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // 0 -> 1
+    const enter = applyCommand(s, { type: 'increment', nonce: nonce() }, T0); // 1 -> 2: completes at the boundary
+    expect(enter.session.status).toBe('complete');
+    expect(enter.session.overlayVisible).toBe(false); // still hidden
+    expect(enter.session.hiddenByCompletion).toBe(false); // NOT claimed: already hidden by the operator
+    expect(enter.effects).toEqual([
+      { kind: 'animate' },
+      { kind: 'completed', completion: { kind: 'hide' } },
+      { kind: 'overlay', visible: false }, // redundant but still emitted, per the ruling
+    ]);
+
+    const exit = applyCommand(enter.session, { type: 'decrement', nonce: nonce() }, T0); // exits complete
+    expect(exit.session.status).toBe('idle');
+    expect(exit.session.overlayVisible).toBe(false); // NOT force-shown
+    expect(exit.effects).not.toContainEqual({ kind: 'overlay', visible: true });
+  });
+
+  it('7b: holdThenHide — operator hideOverlay BEFORE the boundary, then completionHide arrives as a non-owning accepted transition; flag stays false; exit does not re-show', () => {
+    let s = createSession(
+      { startValue: 0, finishValue: 2, mode: 'manual', completion: { kind: 'holdThenHide', seconds: 3 } },
+      T0,
+    );
+    s = applyCommand(s, { type: 'hideOverlay', nonce: nonce() }, T0).session; // operator hides BEFORE completion
+    expect(s.overlayVisible).toBe(false);
+    expect(s.hiddenByCompletion).toBe(false);
+
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session;
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // completes at 2
+    expect(s.status).toBe('complete');
+    expect(s.overlayVisible).toBe(false); // unaffected: holdThenHide's entry never touches the overlay
+    expect(s.hiddenByCompletion).toBe(false);
+
+    const hideResult = applyCommand(s, { type: 'completionHide', nonce: nonce() }, T0); // dock's hold-timer hide
+    expect(hideResult.accepted).toBe(true);
+    expect(hideResult.session.overlayVisible).toBe(false);
+    expect(hideResult.session.hiddenByCompletion).toBe(false); // NOT claimed: the operator already owned the hide
+
+    const exit = applyCommand(hideResult.session, { type: 'decrement', nonce: nonce() }, T0); // exits complete
+    expect(exit.session.status).toBe('idle');
+    expect(exit.session.overlayVisible).toBe(false); // NOT force-shown
+    expect(exit.effects).not.toContainEqual({ kind: 'overlay', visible: true });
+  });
+});
+
+describe('endSession clears hiddenByCompletion (Task 2.0 fix, item 4)', () => {
+  it('endSession while hidden-by-completion returns a session with the flag cleared', () => {
+    let s = createSession({ startValue: 0, finishValue: 1, mode: 'manual', completion: { kind: 'hide' } }, T0);
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // complete; engine hid it, flag true
+    expect(s.hiddenByCompletion).toBe(true);
+
+    const r = applyCommand(s, { type: 'endSession', keepOverlay: true, nonce: nonce() }, T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.status).toBe('idle');
+    expect(r.session.hiddenByCompletion).toBe(false);
   });
 });

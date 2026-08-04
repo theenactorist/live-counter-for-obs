@@ -1,9 +1,17 @@
 export type Mode = 'manual' | 'automatic';
 export type Status = 'idle' | 'running' | 'paused' | 'complete';
 export type Direction = 'up' | 'down';
+// Task 2.11 (operator feedback, PRD §8.8) — six overlay presentation shapes.
+// See the module doc on `StyleConfig.layout` below for what each one means.
+export type OverlayLayout = 'numberOnly' | 'textBefore' | 'textAfter' | 'textAbove' | 'textBelow' | 'textBehind';
 
 export const SESSION_SCHEMA_VERSION = 1;
-export const PRESET_SCHEMA_VERSION = 1;
+// Task 2.11: bumped 1 -> 2 for StyleConfig's new required `layout` field. A v1
+// preset/snapshot on disk (e.g. from operator testing the night before this
+// landed) lacks `layout` entirely — see engine/migrate.ts's PRESET_MIGRATIONS[1]
+// and protocol/persistence.ts's snapshot-loading migration, both of which infer
+// it from the record's `template` so nothing already saved is lost (AC 24).
+export const PRESET_SCHEMA_VERSION = 2;
 export const MAX_VALUE = 999_999;
 export const UNDO_DEPTH = 20;
 export const SPEED_LEVELS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10] as const;
@@ -16,16 +24,56 @@ export interface Session {
   startValue: number; finishValue: number; currentValue: number;
   direction: Direction; mode: Mode; status: Status;
   intervalSeconds: number; overlayVisible: boolean;
+  // True only when the ENGINE (not the operator) is the reason the overlay is
+  // currently invisible: either a kind:'hide' completion entry, or an accepted
+  // `completionHide` command under kind:'holdThenHide'. Operator `showOverlay`/
+  // `hideOverlay` always clear it back to false, even when overlayVisible does
+  // not otherwise change (§8.5/§8.11 — see counter.ts's exitComplete doc
+  // comment for why this replaces the old completion-kind-based re-show gate).
+  hiddenByCompletion: boolean;
   undoStack: UndoEntry[]; completion: CompletionConfig; updatedAt: string;
+}
+
+// Phase 2 final-review fix (live-safety:F5) — the "this session was
+// deliberately ended" marker written to the session slot INSTEAD of removing
+// it. `Session` has no identity field, so the persistent-data mirror's
+// conflict rule ("higher `revision` wins") is only meaningful within one
+// session's lifetime: a ws-down "end session A (revision 200) -> start
+// session B (revision 3)" window used to leave the mirror holding A@200,
+// which then beat B on the next boot and resurrected an already-ended
+// session onto the operator's live screen. A tombstone participates in the
+// SAME revision comparison — it is written at `lastKnownRevision + 1`, so it
+// beats every stale copy of the session it ended, while a genuinely newer
+// session recorded elsewhere (higher revision) still wins.
+export interface SessionTombstone { ended: true; revision: number }
+
+export function isSessionTombstone(x: unknown): x is SessionTombstone {
+  if (!isPlainObject(x)) return false;
+  const { ended, revision } = x;
+  return ended === true && isNonNegativeInteger(revision);
 }
 
 export type Command =
   | { type: 'increment' | 'decrement' | 'undo' | 'reverse' | 'reset'
       | 'start' | 'pause' | 'resume' | 'faster' | 'slower'
-      | 'showOverlay' | 'hideOverlay' | 'tick'; nonce: string }
+      | 'showOverlay' | 'hideOverlay' | 'tick' | 'completionHide'; nonce: string }
   | { type: 'jump'; value: number; nonce: string }
   | { type: 'setMode'; mode: Mode; nonce: string }
-  | { type: 'endSession'; keepOverlay: boolean; nonce: string };
+  | { type: 'endSession'; keepOverlay: boolean; nonce: string }
+  // Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — updates a
+  // RUNNING session's range/interval/completion in place, without resetting
+  // `currentValue` to `startValue` the way starting a fresh session does
+  // (that's the whole point: "update session" vs. "start session"). See
+  // counter.ts's `reconfigure` handler doc comment for the full clamp/
+  // never-auto-complete/undo-clear contract this command follows.
+  | {
+      type: 'reconfigure';
+      startValue: number;
+      finishValue: number;
+      intervalSeconds: number;
+      completion: CompletionConfig;
+      nonce: string;
+    };
 
 export type RejectReason = 'out-of-range' | 'invalid-state' | 'invalid-value' | 'duplicate-nonce';
 
@@ -45,6 +93,22 @@ export interface StyleConfig {
   outline: { color: string; widthPx: number } | null;
   shadow: { color: string; blurPx: number; offsetX: number; offsetY: number } | null;
   background: { color: string; opacity: number } | null; paddingPx: number;
+  // Task 2.11 (operator feedback, PRD §8.8) — which of the six overlay
+  // presentation shapes to render. `{count}` is NEVER required by any layout
+  // (corrected 2026-08-02: the earlier "inline requires the token" rule made
+  // textBefore and textAfter render identically, defeating the gallery). The
+  // authoritative substitution rules live in src/shared/template-content.ts,
+  // which the overlay renderer and Setup's preview both call:
+  //  - numberOnly:  the counter alone, template/label ignored entirely.
+  //  - textBefore/textAfter: a token-LESS label is placed by the LAYOUT
+  //    (textBefore = label then number, textAfter = number then label). A
+  //    label that DOES contain `{count}` is split around the first token and
+  //    the token dictates placement, whichever of the two is selected.
+  //  - textAbove/textBelow: the label stacked above/below the number; a plain
+  //    label renders verbatim, `{count}` is substituted in if present.
+  //  - textBehind: the label rendered as a large, low-opacity ghost centered
+  //    behind the number; same substitution rule as above/below.
+  layout: OverlayLayout;
 }
 export interface Preset {
   schemaVersion: number; id: string; title: string; description: string | null;
@@ -93,6 +157,7 @@ const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
 const ALIGN_H = ['left', 'center', 'right'] as const;
 const ALIGN_V = ['top', 'middle', 'bottom'] as const;
+const LAYOUTS = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'] as const;
 
 function isUndoEntry(x: unknown): x is UndoEntry {
   if (!isPlainObject(x)) return false;
@@ -127,11 +192,16 @@ function isBackground(x: unknown): x is { color: string; opacity: number } {
   return typeof color === 'string' && isFiniteNumber(opacity);
 }
 
-function isStyleConfig(x: unknown): x is StyleConfig {
+// Exported for the final gate wave's `lc.presentation.v1` record (ruling C):
+// DockStorage.loadPresentation() validates a stored presentation with the
+// EXACT same rules `isPreset` already applies to a preset's own style —
+// re-deriving a second, hand-rolled structural check there is precisely how
+// the two would drift.
+export function isStyleConfig(x: unknown): x is StyleConfig {
   if (!isPlainObject(x)) return false;
   const {
     fontFamily, fontWeight, numberSizePx, textSizePx, numberColor, textColor,
-    alignH, alignV, outline, shadow, background, paddingPx,
+    alignH, alignV, outline, shadow, background, paddingPx, layout,
   } = x;
   return (
     typeof fontFamily === 'string' &&
@@ -145,11 +215,13 @@ function isStyleConfig(x: unknown): x is StyleConfig {
     isNullOr(outline, isOutline) &&
     isNullOr(shadow, isShadow) &&
     isNullOr(background, isBackground) &&
-    isFiniteNumber(paddingPx)
+    isFiniteNumber(paddingPx) &&
+    isOneOf(layout, LAYOUTS)
   );
 }
 
-function isAnimationConfig(x: unknown): x is AnimationConfig {
+// Exported alongside isStyleConfig above, for the same reason.
+export function isAnimationConfig(x: unknown): x is AnimationConfig {
   if (!isPlainObject(x)) return false;
   const { type, target, durationMs } = x;
   return (
@@ -189,7 +261,8 @@ export function isSession(x: unknown): x is Session {
 
   const {
     schemaVersion, revision, presetId, startValue, finishValue, currentValue,
-    direction, mode, status, intervalSeconds, overlayVisible, undoStack, completion, updatedAt,
+    direction, mode, status, intervalSeconds, overlayVisible, hiddenByCompletion,
+    undoStack, completion, updatedAt,
   } = x;
 
   if (!isNonNegativeInteger(schemaVersion)) return false;
@@ -203,6 +276,7 @@ export function isSession(x: unknown): x is Session {
   if (!isOneOf(status, STATUSES)) return false;
   if (!isPositiveFiniteNumber(intervalSeconds)) return false;
   if (typeof overlayVisible !== 'boolean') return false;
+  if (typeof hiddenByCompletion !== 'boolean') return false;
   if (!Array.isArray(undoStack) || !undoStack.every(isUndoEntry)) return false;
   if (!isCompletionConfig(completion)) return false;
   if (typeof updatedAt !== 'string') return false;

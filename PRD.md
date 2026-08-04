@@ -167,11 +167,37 @@ The dock continuously shows: current value (dominant), `X of Y` (Y = configured 
 - The active session persists after every count-changing action and material config change.
 - **End session** opens one confirmation with two explicit actions: **End & keep overlay visible** / **End & hide overlay**. "Keep visible" stores a frozen final-render snapshot (template + value + style) outside the session; the overlay serves it across reloads until hidden or a new session starts. Ending clears active progress; it never deletes presets.
 - Loading a preset mid-session prompts: **Restart at new start value** or **Keep current value** (clamped into the new range with a visible warning if outside).
+- **Update session (2026-08-02, operator feedback: "when I start a session, I'd like to go to setup and 'update session' which updates say the size or maximum count etc of the ongoing session").** While a session is active, Setup offers **Update session** alongside Start session. It applies the edited configuration to the running session **without restarting it and without losing the current count**: range (start/finish), automatic interval, completion behaviour, and all presentation (layout, label, styles, animation). Rules (final, as shipped after the 2026-08-04 design rounds):
+  - The current value is clamped into the new inclusive range; when clamping occurred the operator is warned **where they land** (on the Live view they are navigated to), not only on the Setup pane they just left.
+  - The counter never auto-completes as a result of a reconfiguration — a value landing on the new active boundary holds there; completion is only ever reached by counting into it. A session already `complete` whose boundary moved away returns to its pre-complete status. A pending hold-then-hide window is re-evaluated against the new completion config.
+  - **Undo history is cleared only when the range changed** (older entries could reference values outside it); label-, interval-, completion- or presentation-only updates keep it.
+  - **Setup never changes the session's mode.** Manual↔Automatic is switched from the Live view only; with a session active, Setup's Mode field is a disabled read-out, and a loaded preset with a different mode shows a note pointing at the Live toggle.
+  - **An unchanged value is always valid.** In particular, a session's existing interval passes validation even if it is not on the speed ladder — validation applies to values the operator changes, never to state carried over unchanged.
+  - Update is **field-aware**: it applies the fields the operator actually edited and carries everything else over from what is live — a stale form value can never silently overwrite a live one. Setup pre-fills untouched fields from the running session (including its live presentation), and a persistent notice appears whenever the form differs from what is running.
+  - Presentation applied to a running session **persists across dock reloads** (stored alongside the session, taking precedence over re-derivation from the originating preset).
 - Presets: create, save, load, update, duplicate, delete (with confirmation). Stale-edit conflicts (preset changed since loaded) require explicit overwrite confirmation.
+- **Export/import (added to scope 2026-08-01):** Export copies all presets as a JSON text block to the clipboard; import accepts a pasted block. Imports validate every preset through the schema/migration pipeline and are all-or-nothing on any failure; imported presets get fresh ids and never overwrite existing ones (title collisions gain an "(imported)" suffix). This is the supported way to move preset setups between computers.
 
-### 8.8 Display text
+### 8.8 Display text and layout
 
-- Number-only, or a template where `{count}` is the sole token (validated: a template missing `{count}` shows an inline error). Live example renders with the current value.
+**Layout gallery (added to scope 2026-08-02, operator feedback).** The overlay's shape is chosen from a visual gallery of six layouts, each shown as a clickable thumbnail in Setup with the live preview updating on selection:
+
+Layouts are **named from the counter's point of view** (operator feedback 2026-08-02: "text after / text below are a bit confusing — let's use counter as the keyword, so counter above puts the number on top"). Stored enum values are unchanged so no migration is needed; only the operator-facing names differ.
+
+| Stored value | Operator-facing name | Shape | Label text |
+|---|---|---|---|
+| `numberOnly` | **Counter only** | `23` | ignored |
+| `textBefore` | **Counter right** | `HALLELUJAH × 23` — label, then counter | plain label |
+| `textAfter` | **Counter left** | `23 TIMES` — counter, then label | plain label |
+| `textAbove` | **Counter below** | label on top, counter beneath | plain label |
+| `textBelow` | **Counter above** | counter on top, label beneath | plain label |
+| `textBehind` | **Counter in front** | counter in front, oversized ghost label behind | plain label |
+
+- **Inline vertical alignment (2026-08-02, operator feedback):** in the two inline layouts (**Counter right** / **Counter left**) the label is vertically **centred** against the counter, not sat on its baseline — a large counter beside a small label otherwise reads as bottom-aligned. Stacked and behind layouts are unaffected.
+- **The label is always plain text and `{count}` is never required** (corrected 2026-08-02 — the earlier rule made `textBefore` and `textAfter` render identically, defeating the gallery). The layout alone decides where the number sits relative to the label, so the Setup field reads "Label text" and no layout blocks Save or Start for a missing token.
+- **Token as a power/compatibility path:** if the label does contain `{count}`, it is honoured — inline layouts split on it (the token then dictates placement) and stacked/behind layouts substitute it. Setup shows a neutral note when a token is present, explaining that it sets where the number goes. This keeps pre-gallery presets (whose templates carry the token) rendering exactly as before.
+- **Whitespace in the label is literal** (2026-08-02, operator feedback): spaces the operator types — leading, trailing, or repeated — render exactly as typed in both the preview and the overlay. The label is never trimmed on save and never collapsed on render, so `HALLELUJAH × ` keeps its gap before the counter.
+- Live example renders with the current value in the chosen layout.
 - Templates are plain text, HTML-escaped before rendering. A hostile template (e.g. containing `<img onerror=…>`) renders inert as literal text — covered by an acceptance test.
 - MVP glyph coverage is the bundled fonts' Latin repertoire; the editor warns when template characters fall outside it.
 
@@ -184,7 +210,7 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 - Types: None, Scale/Pop, Fade, Slide Up, Flip — applied to number, text, or both; duration 100–2000 ms.
 - **Interrupt semantics:** an accepted count change cancels any in-flight transition and starts one new transition from the current visual state toward the latest authoritative value. At most one transition is ever in flight; the final rendered value always equals the authoritative value. When the automatic interval is shorter than the configured duration, the dock shows a one-line hint and behaviour follows the interrupt rule.
 - Animations are restricted to compositor-friendly properties (`transform`, `opacity`) — no animated layout, shadows, or filters — so the overlay cannot degrade OBS rendering.
-- **Test animation** exists only in the Setup view's embedded preview and never touches the live overlay.
+- **Test animation** exists only in the Setup view's embedded preview and never touches the live overlay. It must animate **exactly what a real count change would animate** for the chosen target and layout — number only, label only (the ghost when the layout is Counter in front), or both — using the same target-selection logic as the overlay renderer, so the rehearsal cannot mislead the operator about what the stream will do.
 
 ### 8.11 Overlay visibility and live safety
 
@@ -209,7 +235,35 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 
 ## 9. Interface structure
 
-Three dock views — **Presets** (search, create, load, duplicate, edit, delete; shows title, description, range, mode, updated date), **Setup** (counter, text, style, animation config; embedded preview + Test animation; save/update preset; start session), **Live** (giant current value; progress line; status chip; large +1/−1 — minimum 44 px touch targets; Undo, Jump to, Reverse; automatic controls when mode is automatic; Show/Hide; Reset and End session as guarded secondary actions; connection banners).
+Four dock views — **Presets** (search, create, load, duplicate, edit, delete, export/import; shows title, range, mode, updated date), **Setup** (below), **Live** (below), **Diagnostics** (connection checklist, settings, overlay/dock URLs, event log, reset).
+
+**Setup view structure (specified 2026-08-02, operator feedback: "I need the setup to be very simple and to have a preview to show the person setting up what the end result looks like before they get started").** Top to bottom:
+
+1. **Live preview, always visible** — a true WYSIWYG rendering of the overlay at the current settings, updating on every keystroke and every control change. It must be produced by the **same rendering code as the overlay itself** (a shared presentation module), not a lookalike, so the two can never drift. It carries a visible **"Preview"** caption so it is never mistaken for the live output, and it **stays pinned below the tab bar while the operator scrolls** the rest of Setup — the point of the preview is to watch it while changing settings further down.
+
+**Tab bar** — pinned to the top of the dock at all times; scrolling a long view (Setup in particular) must never scroll the tabs out of reach.
+2. **Counter** — Start and Finish on one row, two columns; mode; interval when Automatic.
+3. **Layout** — the six-thumbnail gallery, named from the counter's point of view (§8.8).
+4. **Label** — its own group: label text, size, colour.
+5. **Counter style** — its own group: size, colour. Typeface applies to both and sits with the counter group.
+6. **Animation** — type, target, duration, Test animation.
+7. **Completion** — behaviour and seconds.
+8. Save preset (title only) / Start session. **Save preset is always enabled (2026-08-04, operator feedback):** clicking it with a missing title (or any invalid field) does not save — it puts the offending fields into a visible error state naming what is needed ("Title is required to save"), focusing the first one. **A successful save confirms visibly** ("Preset '<title>' saved ✓") near the button, clearing on the next edit; an update to an existing preset confirms as "updated".
+
+**Preset descriptions are not exposed** (operator: "no use for description"). The field remains in the stored schema for compatibility and is always null for presets created after this change; the Presets list shows title, range, mode and updated date.
+
+**Live view control hierarchy (specified 2026-08-02, operator feedback).** Ordered by frequency of use under pressure, with slip-resistance for destructive actions:
+
+1. **Readout** — giant current value, progress line, status chip. Dominant, top.
+2. **Primary** — **+1** then **−1**, side by side, the largest targets on screen with `+1` visually dominant (most-used action gets the biggest target). `+1` precedes `−1` in both DOM and visual order.
+3. **Secondary** — Undo, Jump to. Medium, one row.
+4. **Automatic cluster** — Start/Pause, Faster, Slower, rate readout. Rendered only in Automatic mode.
+5. **Utility** — Show/Hide overlay toggle.
+6. **Destructive** — Reset and End session: small, muted, danger-styled, below a visual divider, each behind its existing confirmation.
+
+**Reverse** is an Automatic-mode control only. In Manual mode it is hidden: `+1`/`−1` already move both ways, so its only effect there is changing which boundary completes — confusing for the operator, and the engine retains the capability for Automatic.
+
+**Clipboard (extended 2026-08-04, operator feedback: "i still can't copy and paste within the label text, title input fields").** OBS browser docks do not receive the OS clipboard shortcuts, so the dock implements keyboard clipboard itself: a document-level handler makes **Cmd/Ctrl+C, X, V and A** work in **every** editable field (inputs and textareas) — copy/cut of the selection, paste at the caret replacing any selection, select-all scoped to the field. A clipboard denial on paste surfaces the same "Clipboard blocked — type it in manually" hint as the Paste buttons, near the focused field. The explicit **Copy**/**Paste** buttons (password, preset import/export, URLs) remain as the discoverable path. Keyboard clipboard handling must never trigger the Live view's global count shortcuts and must survive the dock's focus-preserving re-renders.
 
 The Live view remains fully usable at 300 px dock width; primary controls never rely on hover or scroll off-screen.
 
@@ -244,6 +298,14 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 18. Hotkey +1 fires while OBS focus is on the main window (dock unfocused) → count increments exactly once (nonce dedup verified under repeat).
 19. Dock closed during automatic run → overlay shows "control panel closed" hint within 6 s and holds the last value; dock reopened → session Paused at that value.
 20. Storage quota exhausted (fault injection) → session continues in memory with a visible warning; no crash; event log records it.
+21. Export copies a JSON block containing all presets; on a fresh profile, importing that block restores every preset with all settings intact (per AC 15); importing malformed JSON or a block containing any invalid preset changes nothing and shows an inline error.
+22. Each of the six layouts (§8.8) renders its documented shape on the overlay with the same value and style; switching layout in Setup updates the preview without touching the live session or broadcasting state. With a token-less label, `textBefore` places the number after the label and `textAfter` places it before — the two are visibly different. No layout blocks Save or Start for a missing `{count}`; a label containing one still renders per the compatibility path.
+23. With the OS clipboard shortcuts unavailable (OBS dock), the Paste buttons populate the websocket-password and preset-import fields, and the Copy buttons place the overlay URL and the preset export on the clipboard; a clipboard denial surfaces the select-to-copy fallback rather than a false success.
+24. A preset saved before the layout gallery existed (schema v1) loads after upgrade with a sensible layout inferred (inline when its template carries `{count}`, number-only when it has no template) and all other settings intact.
+25. The Setup preview is generated by the same presentation code as the overlay: for every layout, and for label text, sizes, colours and typeface, what Setup shows matches what the overlay renders. Typing in the label updates the preview on each keystroke.
+26. Diagnostics offers a guarded **Reset everything** action that clears all stored counter data (settings, presets, session, snapshot, log, and the persistent-data mirror when connected) and returns the dock to its first-run state, so a first-time setup can be rehearsed from scratch.
+27. With a session running at 23 of 50, editing Setup's finish value to 30 plus the label and styles and choosing **Update session** leaves the count at 23, shows progress against 30, and repaints the overlay with the new presentation — no restart, no lost count. Changing the range to one that excludes the current value clamps it and warns; a value landing on the new active boundary does not fire completion.
+28. A label typed with leading, trailing or repeated spaces renders those spaces exactly in both the Setup preview and the overlay.
 
 ## 12. Test plan
 

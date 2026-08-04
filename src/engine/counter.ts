@@ -53,6 +53,7 @@ export function createSession(cfg: SessionConfig, nowMs: number): Session {
     status: 'idle',
     intervalSeconds,
     overlayVisible: true,
+    hiddenByCompletion: false,
     undoStack: [],
     completion,
     updatedAt: new Date(nowMs).toISOString(),
@@ -104,36 +105,55 @@ function noop(s: Session): ApplyResult {
 interface CompletionResolution {
   status: Status;
   overlayVisible: boolean;
+  hiddenByCompletion: boolean;
   effects: Effect[];
 }
 
 // Applies the "exit complete" transition (PRD §8.5: "Any valid count-changing
 // action away from the boundary exits complete"): manual -> idle, automatic
-// -> paused, and — if completion had hidden the overlay — re-shows it,
-// appending an `overlay` effect after whatever effects the caller already
-// collected. No-op (status/overlay unchanged) when the session wasn't
-// `complete`.
+// -> paused, and — if the ENGINE was the one that hid the overlay on
+// completion — re-shows it and clears the flag, appending an `overlay`
+// effect after whatever effects the caller already collected. No-op
+// (status/overlay/flag unchanged) when the session wasn't `complete`.
 //
-// The engine does not record WHY the overlay is hidden, so `overlayVisible ===
-// false` is only a proxy for "the dock's completed handler hid it". The proxy
-// is exact under `hold`, which never hides (PRD AC 1): a hidden overlay there
-// is always operator-initiated (§8.11 Hide overlay), so `hold` must never
-// force it back on air. Hence the `kind !== 'hold'` guard below.
+// `hiddenByCompletion` (Task 2.0 change 4) replaces the old completion-kind
+// gate (`completion.kind !== 'hold'`) that stood here through commit 0d20c85.
+// That gate used `overlayVisible === false` as a proxy for "the completion
+// handler hid it", which is exact only for `hold` (which never hides, so any
+// hidden overlay there is operator-initiated, PRD AC 1 / §8.11). Under
+// `hide`/`holdThenHide` the proxy mis-fired when the operator hid the overlay
+// BEFORE completion: exiting would force it back on over the operator's
+// wishes.
 //
-// PHASE 2 RESIDUAL: under `hide`/`holdThenHide` the proxy still mis-fires when
-// the operator hid the overlay BEFORE completion. Closing that needs a
-// `hiddenByCompletion` flag set by the dock when it applies the hide — a
-// Session schema change (Session + SESSION_SCHEMA_VERSION + isSession +
-// migrate.ts), deferred to Phase 2 when the dock's hide mechanics land.
+// The flag is written ONLY by the two engine-owned hide sites — the
+// kind:'hide' entry transition (resolveCompletion below) and the
+// `completionHide` command (applyCommand) — and cleared back to false by
+// operator `showOverlay`/`hideOverlay` (setOverlay below) and by
+// `endSession`. But "engine-owned hide site" does not by itself mean
+// ownership: per the controller's ownership-transition ruling, both sites
+// only CLAIM ownership (write `true`) on a genuine visible -> hidden
+// transition — `hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible`.
+// If the overlay was already hidden (by the operator, before this hide site
+// ran), that hide is a no-op on the visuals and must not steal ownership out
+// from under the operator's prior `hideOverlay`; the flag simply carries
+// forward whatever it already was (false, in that case). So the flag exactly
+// answers "is completion the reason this is currently hidden?", tracking WHO
+// most recently caused a real hidden transition, not merely which code path
+// last ran.
 function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
   if (s.status !== 'complete') {
-    return { status: s.status, overlayVisible: s.overlayVisible, effects };
+    return { status: s.status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects };
   }
   const status: Status = s.mode === 'automatic' ? 'paused' : 'idle';
-  if (!s.overlayVisible && s.completion.kind !== 'hold') {
-    return { status, overlayVisible: true, effects: [...effects, { kind: 'overlay', visible: true }] };
+  if (s.hiddenByCompletion) {
+    return {
+      status,
+      overlayVisible: true,
+      hiddenByCompletion: false,
+      effects: [...effects, { kind: 'overlay', visible: true }],
+    };
   }
-  return { status, overlayVisible: s.overlayVisible, effects };
+  return { status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects };
 }
 
 // Full completion resolution for commands that can both enter and exit
@@ -141,15 +161,39 @@ function exitComplete(s: Session, effects: Effect[]): CompletionResolution {
 // `newDirection`, enters `complete` and appends a `completed` effect after
 // the caller's base effects; otherwise defers to `exitComplete` (a no-op if
 // the session wasn't already `complete`).
+//
+// Task 2.0 change 3: under completion kind 'hide', ENTRY itself hides the
+// overlay. `overlayVisible` is unconditionally set to false and the `overlay`
+// effect is unconditionally appended AFTER `completed` (effect order
+// [animate, completed, overlay]) — even when the overlay was already hidden,
+// a redundant `overlay:false` is harmless. Ownership of the hide
+// (`hiddenByCompletion`) is NOT unconditional, though: it's claimed only on a
+// genuine visible -> hidden transition, `s.hiddenByCompletion ||
+// s.overlayVisible` (see the doc comment above `exitComplete`). If the
+// operator had already hidden the overlay before this entry ran, ownership
+// stays with the operator (flag stays false) so a later exit does not
+// force-show over their prior `hideOverlay`. `hold` and `holdThenHide` do not
+// hide on entry — `holdThenHide` hides only via the dock-issued
+// `completionHide` command once its hold timer elapses.
 function resolveCompletion(
   s: Session, newValue: number, newDirection: Direction, effects: Effect[],
 ): CompletionResolution {
   const boundary = activeBoundary({ startValue: s.startValue, finishValue: s.finishValue, direction: newDirection });
   if (newValue === boundary) {
+    const completedEffects = [...effects, { kind: 'completed' as const, completion: s.completion }];
+    if (s.completion.kind === 'hide') {
+      return {
+        status: 'complete',
+        overlayVisible: false,
+        hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible,
+        effects: [...completedEffects, { kind: 'overlay', visible: false }],
+      };
+    }
     return {
       status: 'complete',
       overlayVisible: s.overlayVisible,
-      effects: [...effects, { kind: 'completed', completion: s.completion }],
+      hiddenByCompletion: s.hiddenByCompletion,
+      effects: completedEffects,
     };
   }
   return exitComplete(s, effects);
@@ -163,8 +207,8 @@ function move(s: Session, delta: 1 | -1, nowMs: number): ApplyResult {
   const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
   const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
 
-  const { status, overlayVisible, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
-  return accept(s, { currentValue: next, undoStack, status, overlayVisible }, nowMs, effects);
+  const { status, overlayVisible, hiddenByCompletion, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: next, undoStack, status, overlayVisible, hiddenByCompletion }, nowMs, effects);
 }
 
 function jump(s: Session, value: number, nowMs: number): ApplyResult {
@@ -175,8 +219,8 @@ function jump(s: Session, value: number, nowMs: number): ApplyResult {
   const entry: UndoEntry = { value: s.currentValue, direction: s.direction };
   const undoStack = [...s.undoStack, entry].slice(-UNDO_DEPTH);
 
-  const { status, overlayVisible, effects } = resolveCompletion(s, value, s.direction, [{ kind: 'animate' }]);
-  return accept(s, { currentValue: value, undoStack, status, overlayVisible }, nowMs, effects);
+  const { status, overlayVisible, hiddenByCompletion, effects } = resolveCompletion(s, value, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: value, undoStack, status, overlayVisible, hiddenByCompletion }, nowMs, effects);
 }
 
 function reverse(s: Session, nowMs: number): ApplyResult {
@@ -187,8 +231,8 @@ function reverse(s: Session, nowMs: number): ApplyResult {
   // Value is unchanged, so no animate effect; a direction flip can only ever
   // *exit* complete (see the doc comment above `resolveCompletion`), never
   // enter it.
-  const { status, overlayVisible, effects } = exitComplete(s, []);
-  return accept(s, { direction: nextDirection, undoStack, status, overlayVisible }, nowMs, effects);
+  const { status, overlayVisible, hiddenByCompletion, effects } = exitComplete(s, []);
+  return accept(s, { direction: nextDirection, undoStack, status, overlayVisible, hiddenByCompletion }, nowMs, effects);
 }
 
 function undo(s: Session, nowMs: number): ApplyResult {
@@ -205,12 +249,12 @@ function undo(s: Session, nowMs: number): ApplyResult {
   // air, so it must not enter `complete` or fire the completion behaviour.
   // Like `reverse`, it can only ever *exit*.
   const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
-  const { status, overlayVisible, effects } = valueChanged
+  const { status, overlayVisible, hiddenByCompletion, effects } = valueChanged
     ? resolveCompletion(s, entry.value, entry.direction, baseEffects)
     : exitComplete(s, baseEffects);
   return accept(
     s,
-    { currentValue: entry.value, direction: entry.direction, undoStack, status, overlayVisible },
+    { currentValue: entry.value, direction: entry.direction, undoStack, status, overlayVisible, hiddenByCompletion },
     nowMs,
     effects,
   );
@@ -230,8 +274,13 @@ function reset(s: Session, nowMs: number): ApplyResult {
   }
 
   const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
-  const { status, overlayVisible, effects } = exitComplete(s, baseEffects);
-  return accept(s, { currentValue: s.startValue, direction, undoStack: [], status, overlayVisible }, nowMs, effects);
+  const { status, overlayVisible, hiddenByCompletion, effects } = exitComplete(s, baseEffects);
+  return accept(
+    s,
+    { currentValue: s.startValue, direction, undoStack: [], status, overlayVisible, hiddenByCompletion },
+    nowMs,
+    effects,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,17 +334,223 @@ function tick(s: Session, nowMs: number): ApplyResult {
   // Ticks never push undo (PRD §8.3: automatic ticks are never undo targets
   // and never displace undo entries) — undoStack is intentionally omitted
   // from the accepted changes below.
-  const { status, overlayVisible, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
-  return accept(s, { currentValue: next, status, overlayVisible }, nowMs, effects);
+  const { status, overlayVisible, hiddenByCompletion, effects } = resolveCompletion(s, next, s.direction, [{ kind: 'animate' }]);
+  return accept(s, { currentValue: next, status, overlayVisible, hiddenByCompletion }, nowMs, effects);
 }
 
+// Operator-driven overlay visibility (§8.11) always clears `hiddenByCompletion`
+// — an operator show/hide, even one that lands on the value the overlay is
+// already at, means any completion-owned hide is no longer in effect; a later
+// exit-complete must not force it back on top of the operator's own command.
+// Only genuinely nothing-changed (same visibility AND already
+// operator-owned) is a no-op; otherwise the flag flip alone makes this an
+// accepted, effect-emitting transition.
 function setOverlay(s: Session, visible: boolean, nowMs: number): ApplyResult {
-  if (s.overlayVisible === visible) return noop(s);
-  return accept(s, { overlayVisible: visible }, nowMs, [{ kind: 'overlay', visible }]);
+  if (s.overlayVisible === visible && !s.hiddenByCompletion) return noop(s);
+  return accept(s, { overlayVisible: visible, hiddenByCompletion: false }, nowMs, [{ kind: 'overlay', visible }]);
 }
 
+// completionHide (Task 2.0 change 2) — the dock-issued command that hides the
+// overlay once a `holdThenHide` completion's hold timer elapses. Valid ONLY
+// while `complete` under `holdThenHide`: `hold` never hides, and `hide`
+// already hid on entry (resolveCompletion above), so neither has anything for
+// this command to do. Not a count-changing command: no undo entry, no
+// animate effect — just the overlay hide plus the flag, like any other
+// engine-owned hide.
+//
+// Ownership follows the same visible -> hidden transition rule as the
+// kind:'hide' entry: `s.hiddenByCompletion || s.overlayVisible`. If the
+// overlay is ALREADY hidden-and-owned by a prior completionHide (or a
+// kind:'hide' entry), this is a true accepted no-op — same session
+// reference, no effects, no revision bump — so a dock that retries the
+// command (e.g. after a dropped ack) doesn't churn revisions. If it's hidden
+// but NOT owned (the operator hid it first), the command still accepts —
+// nothing visible changes, so a redundant `overlay:false` is harmless — but
+// it does not steal ownership: the flag stays false, same as the entry rule.
+function completionHide(s: Session, nowMs: number): ApplyResult {
+  if (s.status !== 'complete' || s.completion.kind !== 'holdThenHide') return reject(s, 'invalid-state');
+  if (!s.overlayVisible && s.hiddenByCompletion) return noop(s);
+  return accept(
+    s,
+    { overlayVisible: false, hiddenByCompletion: s.hiddenByCompletion || s.overlayVisible },
+    nowMs,
+    [{ kind: 'overlay', visible: false }],
+  );
+}
+
+// endSession clears `hiddenByCompletion` on teardown (§8.x lifecycle
+// hygiene): the session is about to be discarded or reset by the caller, and
+// leaving a stale "completion owns this hide" flag set would misinform
+// whatever reads the session next (e.g. a fresh start reusing session shape).
 function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResult {
-  return accept(s, { status: 'idle' }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
+  return accept(s, { status: 'idle', hiddenByCompletion: false }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
+}
+
+// Compares two completion configs by value (kind + optional seconds) — used
+// only to detect a genuinely no-op reconfigure below; NOT a general-purpose
+// export, since every other engine comparison so far has had no need for one.
+function completionEqual(a: CompletionConfig, b: CompletionConfig): boolean {
+  return a.kind === b.kind && a.seconds === b.seconds;
+}
+
+// Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — "update
+// session": reconfigures a RUNNING session's range/interval/completion
+// without resetting `currentValue` to the new `startValue` (unlike starting
+// a fresh session via createSession/`start`Session). Validation mirrors
+// createSession's rules for startValue/finishValue/completion (integers in
+// [0, MAX_VALUE], startValue !== finishValue, a structurally valid
+// completion) — any failure rejects `invalid-value` with the SAME session
+// reference and no change at all, same contract as `jump`'s out-of-range
+// rejection. `intervalSeconds` validation is NOT identical to
+// createSession's — see rule 5 (fix wave 4).
+//
+// Binding semantics (controller clarification, fix wave 1; corrected fix
+// wave 4 — see rules 3 and 5, and the fix-wave-4 report for why):
+//  1. NEVER auto-completes: a clamped/unchanged value that lands exactly on
+//     the new active boundary just HOLDS there — status stays whatever it
+//     already was, no `completed` effect, no completion-hide side effect.
+//     Completion is only ever reached by counting INTO it (increment/
+//     decrement/jump/tick/undo) — an operator lowering the target to the
+//     value the session is already sitting at must not blow away the
+//     overlay mid-service. One consequence worth being explicit about: an
+//     AUTOMATIC session left `running` and pinned onto the new boundary by
+//     this clamp does NOT pause here — it keeps ticking (still `running`)
+//     until the controller's next self-dispatched `tick` tries to move past
+//     the (new) boundary, gets rejected `out-of-range` by `tick()` below,
+//     and the controller's own onTick handler responds to that rejection by
+//     dispatching `pause` (see SessionController.timerHooks). So the visible
+//     effect is a one-tick-later pause, never a completion.
+//  2. Exits complete when the boundary moves away: if the session WAS
+//     `complete` and the (possibly clamped) value no longer sits on the new
+//     active boundary, this defers to the EXACT SAME `exitComplete` every
+//     other exit-only transition already uses — not a parallel rule — so
+//     manual -> idle / automatic -> paused and the hiddenByCompletion
+//     re-show gate behave identically here. `exitComplete` is itself a
+//     no-op when `s.status !== 'complete'`, so combined with rule 1 the net
+//     effect is: status changes ONLY in the "was complete, no longer at the
+//     boundary" case; every other combination leaves it untouched.
+//  3. Fix wave 4 correction — undo is cleared ONLY when the RANGE
+//     (startValue/finishValue) actually changes, not on every accepted
+//     reconfigure. Every `UndoEntry.value` is guaranteed to fall within
+//     [lo, hi] (see move()/jump()/undo()'s own invariant) — only a RANGE
+//     change can possibly push an existing entry outside that guarantee.
+//     An interval-only or completion-only change leaves every existing
+//     entry exactly as valid as it already was, so undo history survives
+//     it untouched. (Fix wave 1's original rule — clear unconditionally —
+//     was proven wrong by a fix-wave-3 confirming test: a label-only Update,
+//     which resolves to an interval/completion-identical, range-identical
+//     reconfigure, was wiping undo history it had no reason to touch.)
+//  4. Direction: reconfiguring is a range change, not a direction change, so
+//     the operator's own `direction` is preserved WHEN the new range is the
+//     same orientation as the old one (e.g. widening/narrowing 0->50 into
+//     0->80 keeps 'up', including a prior explicit Reverse to 'down' within
+//     that same orientation). But if the new range's own natural orientation
+//     FLIPS relative to the old one (0->50 reconfigured into 50->0), keeping
+//     the stale `direction` would be actively wrong: `activeBoundary` would
+//     point at the new session's START, not its finish, silently completing
+//     there next count and (under a `hide`-style completion) blanking the
+//     overlay on the wrong end. So direction is only ever carried over
+//     within the SAME orientation; a flipped orientation snaps `direction`
+//     to match the NEW range's own natural direction instead.
+//  5. Fix wave 4 (Important 2) — an `intervalSeconds` that exactly matches
+//     the session's OWN current value is ALWAYS valid, whether or not it is
+//     itself a `SPEED_LEVELS` member. An unchanged value can never be LESS
+//     valid than the state it already came from: if the session is already
+//     running (or was recovered) at some interval, leaving it untouched
+//     must never turn into a rejection just because that exact value isn't
+//     (or is no longer) a menu entry. Only a GENUINELY new interval value —
+//     one that actually differs from `s.intervalSeconds` — is held to the
+//     `SPEED_LEVELS` menu. (Fix wave 2 introduced the `SPEED_LEVELS` check
+//     here at all; fix wave 3 then "fixed" an off-menu-interval session's
+//     resulting unusable Update by substituting the nearest menu entry in
+//     the DOCK layer, which silently changed a RUNNING automatic session's
+//     tick rate as a side effect of an unrelated field's Update. This rule
+//     is the actual fix: the engine itself accepts the unchanged value, so
+//     the dock never needs to substitute anything.)
+function reconfigure(
+  s: Session,
+  startValue: number,
+  finishValue: number,
+  intervalSeconds: number,
+  completion: CompletionConfig,
+  nowMs: number,
+): ApplyResult {
+  if (!isValidCountValue(startValue) || !isValidCountValue(finishValue) || startValue === finishValue) {
+    return reject(s, 'invalid-value');
+  }
+  // Rule 5 above.
+  if (intervalSeconds !== s.intervalSeconds && !(SPEED_LEVELS as readonly number[]).includes(intervalSeconds)) {
+    return reject(s, 'invalid-value');
+  }
+  if (!isCompletionConfig(completion)) return reject(s, 'invalid-value');
+
+  // True no-op: every wire-level input is byte-identical to what's already
+  // stored — nothing downstream (range, clamp, direction, boundary, status,
+  // undo) can possibly differ either, since all of those are pure functions
+  // of these same inputs plus the session's own (untouched) currentValue/
+  // status/undoStack. Fix wave 4 correction (rule 3): this is now
+  // unconditional on undo-stack size — undo history is not itself part of
+  // "the configuration", so an identical reconfigure is a true no-op
+  // regardless of how much undo history happens to exist, matching every
+  // other command's own no-op contract (same reference, no revision bump)
+  // instead of manufacturing a revision bump — and a stray undo-stack
+  // clear — for a click that changed nothing at all.
+  if (
+    startValue === s.startValue &&
+    finishValue === s.finishValue &&
+    intervalSeconds === s.intervalSeconds &&
+    completionEqual(completion, s.completion)
+  ) {
+    return noop(s);
+  }
+
+  // Rule 4 above.
+  const oldOrientation = initialDirection(s.startValue, s.finishValue);
+  const newOrientation = initialDirection(startValue, finishValue);
+  const direction = oldOrientation === newOrientation ? s.direction : newOrientation;
+
+  const { lo, hi } = rangeOf({ startValue, finishValue });
+  const currentValue = Math.min(Math.max(s.currentValue, lo), hi);
+  const valueChanged = currentValue !== s.currentValue;
+  const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
+
+  const boundary = activeBoundary({ startValue, finishValue, direction });
+  const atBoundary = currentValue === boundary;
+
+  // Rule 2 above: only ever EXITS complete, and only in the one combination
+  // that requires it. Every other combination (including rule 1's "lands on
+  // the boundary but wasn't already complete") passes the pre-reconfigure
+  // status/overlay/flag straight through, unchanged.
+  const { status, overlayVisible, hiddenByCompletion, effects } =
+    s.status === 'complete' && !atBoundary
+      ? exitComplete(s, baseEffects)
+      : { status: s.status, overlayVisible: s.overlayVisible, hiddenByCompletion: s.hiddenByCompletion, effects: baseEffects };
+
+  // Rule 3 above: only a genuine RANGE change clears undo history.
+  const rangeChanged = startValue !== s.startValue || finishValue !== s.finishValue;
+  const undoStack = rangeChanged ? [] : s.undoStack;
+
+  return accept(
+    s,
+    {
+      startValue,
+      finishValue,
+      intervalSeconds,
+      // Shallow-copied, not the caller's object by reference — same
+      // copy-on-write discipline createSession's own completion handling
+      // documents (a mutation of the CALLER's completion object after this
+      // call must never alias into the stored session).
+      completion: { ...completion },
+      currentValue,
+      direction,
+      undoStack,
+      status,
+      overlayVisible,
+      hiddenByCompletion,
+    },
+    nowMs,
+    effects,
+  );
 }
 
 export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResult {
@@ -332,6 +587,10 @@ export function applyCommand(s: Session, cmd: Command, nowMs: number): ApplyResu
       return setOverlay(s, false, nowMs);
     case 'endSession':
       return endSession(s, cmd.keepOverlay, nowMs);
+    case 'completionHide':
+      return completionHide(s, nowMs);
+    case 'reconfigure':
+      return reconfigure(s, cmd.startValue, cmd.finishValue, cmd.intervalSeconds, cmd.completion, nowMs);
 
     default: {
       // Exhaustiveness guard: if Command ever grows a new variant without a case

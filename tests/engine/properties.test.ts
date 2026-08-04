@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
-import { rangeOf, activeBoundary } from '../../src/engine/types.js';
+import { rangeOf, activeBoundary, SPEED_LEVELS } from '../../src/engine/types.js';
 import { replaySeed } from '../../src/engine/migrate.js';
 
 // Object.freeze is SHALLOW: it leaves `undoStack` (an array), its entries and
@@ -16,12 +16,53 @@ function deepFreeze<T>(x: T): T {
   return x;
 }
 
+// `endSession` and `completionHide` are deliberately excluded from this
+// arbitrary — both are dock-internal lifecycle commands, not part of the
+// count-changing core loop these invariants exercise (mirrors the exclusion
+// in migrate.ts's replaySeed command menu).
+//
+// `reconfigure` (Task 2.18) IS included below (fix wave 1 correction: an
+// earlier version of this comment excluded it, reasoning that changing
+// startValue/finishValue would "invalidate" the range invariant — that was
+// wrong. `reconfigure` CLAMPS `currentValue` into whatever range it sets, so
+// `rangeOf(r.session)` below is always checked against the session's own,
+// self-consistent, just-updated range; there is nothing to invalidate. Fuzzing
+// it here is exactly what a property suite is for: real, wide, per-run
+// coverage of the clamp/boundary/direction interaction across ranges neither
+// the base sessions below nor tests/engine/reconfigure.test.ts's hand-picked
+// cases happen to try. `replaySeed` in migrate.ts still excludes it, for the
+// different (and different-in-kind) reason documented there — that oracle
+// compares a FIXED baseline range across refactors, which reconfigure would
+// redefine mid-run; a property arbitrary has no such fixed-baseline need.
 const cmdArb = fc.oneof(
   ...(['increment', 'decrement', 'undo', 'reverse', 'reset', 'start', 'pause', 'resume',
       'faster', 'slower', 'showOverlay', 'hideOverlay', 'tick'] as const)
     .map(type => fc.constant({ type })),
   fc.record({ type: fc.constant('jump' as const), value: fc.integer({ min: -5, max: 60 }) }),
   fc.record({ type: fc.constant('setMode' as const), mode: fc.constantFrom('manual' as const, 'automatic' as const) }),
+  fc.record({
+    type: fc.constant('reconfigure' as const),
+    // Deliberately wider than, and sometimes overlapping/inverted relative
+    // to, any base session's own 0-50/50-0/10-50 range below — including
+    // negatives (invalid, exercises the reject path) and both orientations
+    // (exercises the direction-preserved-vs-flipped rule).
+    startValue: fc.integer({ min: -10, max: 100 }),
+    finishValue: fc.integer({ min: -10, max: 100 }),
+    // Fix wave 5 (coordinator re-review residual) — `1.3` alongside the
+    // real SPEED_LEVELS entries: an off-menu value that's REJECTED the
+    // first time a run draws it (genuinely new, not in SPEED_LEVELS), but
+    // becomes a valid no-op/unchanged-interval reconfigure on any LATER draw
+    // within the same run where the session's own intervalSeconds already
+    // equals it — fuzzing the rule-5 "unchanged value is always valid, even
+    // off-menu" exemption for real, across many random sequences, not just
+    // the hand-picked cases in reconfigure.test.ts.
+    intervalSeconds: fc.constantFrom(...SPEED_LEVELS, 1.3),
+    completion: fc.oneof(
+      fc.constant({ kind: 'hold' as const }),
+      fc.constant({ kind: 'hide' as const }),
+      fc.record({ kind: fc.constant('holdThenHide' as const), seconds: fc.integer({ min: 1, max: 30 }) }),
+    ),
+  }),
 );
 
 it('value never leaves the range; revision never decreases; complete ⇔ at active boundary', () => {

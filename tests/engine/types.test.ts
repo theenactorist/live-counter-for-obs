@@ -8,7 +8,10 @@ import type { Session, Preset } from '../../src/engine/types.js';
 describe('constants', () => {
   it('match the locked schema versions and limits', () => {
     expect(SESSION_SCHEMA_VERSION).toBe(1);
-    expect(PRESET_SCHEMA_VERSION).toBe(1);
+    // Task 2.11: bumped 1 -> 2 for StyleConfig's new required `layout` field
+    // (six-layout overlay gallery, PRD §8.8). SESSION_SCHEMA_VERSION does NOT
+    // change — Session never embeds StyleConfig.
+    expect(PRESET_SCHEMA_VERSION).toBe(2);
     expect(MAX_VALUE).toBe(999_999);
     expect(UNDO_DEPTH).toBe(20);
     expect(SPEED_LEVELS).toEqual([0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10]);
@@ -63,6 +66,7 @@ describe('isSession', () => {
     schemaVersion: 1, revision: 0, presetId: null, startValue: 0, finishValue: 50,
     currentValue: 0, direction: 'up', mode: 'manual', status: 'idle', intervalSeconds: 1,
     overlayVisible: false, undoStack: [], completion: { kind: 'hold' }, updatedAt: '2026-08-01T00:00:00.000Z',
+    hiddenByCompletion: false,
   };
   it('accepts a valid session', () => { expect(isSession(good)).toBe(true); });
   it('rejects wrong enums, missing fields, out-of-range values', () => {
@@ -151,6 +155,23 @@ describe('isSession', () => {
     expect(isSession({ ...good, completion: null })).toBe(false);
     expect(isSession({ ...good, completion: 'hold' })).toBe(false);
   });
+
+  // --- Task 2.0 change 1: hiddenByCompletion (dock hide-ownership flag) ---
+
+  it('accepts hiddenByCompletion true', () => {
+    expect(isSession({ ...good, hiddenByCompletion: true })).toBe(true);
+  });
+
+  it('rejects a non-boolean hiddenByCompletion', () => {
+    expect(isSession({ ...good, hiddenByCompletion: 'no' })).toBe(false);
+    expect(isSession({ ...good, hiddenByCompletion: 1 })).toBe(false);
+    expect(isSession({ ...good, hiddenByCompletion: null })).toBe(false);
+  });
+
+  it('rejects a session missing hiddenByCompletion', () => {
+    const { hiddenByCompletion, ...missing } = good;
+    expect(isSession(missing)).toBe(false);
+  });
 });
 
 describe('isPreset', () => {
@@ -177,6 +198,7 @@ describe('isPreset', () => {
       shadow: null,
       background: null,
       paddingPx: 8,
+      layout: 'textBefore',
     },
     animation: { type: 'none', target: 'number', durationMs: 200 },
     completion: { kind: 'hold' },
@@ -221,6 +243,24 @@ describe('isPreset', () => {
     expect(isPreset({ ...goodPreset, style: { ...goodPreset.style, alignV: 'center' } })).toBe(false);
     expect(isPreset({ ...goodPreset, animation: { ...goodPreset.animation, type: 'zoom' } })).toBe(false);
     expect(isPreset({ ...goodPreset, animation: { ...goodPreset.animation, target: 'everything' } })).toBe(false);
+  });
+
+  // --- Task 2.11: StyleConfig.layout (six-layout overlay gallery) ---
+
+  it('accepts every one of the six OverlayLayout values', () => {
+    const layouts = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'] as const;
+    for (const layout of layouts) {
+      expect(isPreset({ ...goodPreset, style: { ...goodPreset.style, layout } })).toBe(true);
+    }
+  });
+
+  it('rejects an unknown layout value', () => {
+    expect(isPreset({ ...goodPreset, style: { ...goodPreset.style, layout: 'sideways' } })).toBe(false);
+  });
+
+  it('rejects a preset whose style is missing layout entirely', () => {
+    const { layout, ...styleWithoutLayout } = goodPreset.style;
+    expect(isPreset({ ...goodPreset, style: styleWithoutLayout })).toBe(false);
   });
 
   it('rejects durationMs outside [100, 2000] and accepts the boundary values', () => {

@@ -72,6 +72,7 @@ describe('progressLabel', () => {
       overlayVisible: true,
       undoStack: [],
       completion: { kind: 'hold' },
+      hiddenByCompletion: false,
       updatedAt: new Date().toISOString(),
     });
     expect(label).toBe('40 of 0 · 20% · Counting down · Manual');
@@ -92,6 +93,7 @@ describe('progressLabel', () => {
       overlayVisible: true,
       undoStack: [],
       completion: { kind: 'hold' },
+      hiddenByCompletion: false,
       updatedAt: new Date().toISOString(),
     });
     expect(label).toBe('23 of 50 · 46% · Counting up · Automatic');
@@ -112,6 +114,7 @@ describe('progressLabel', () => {
       overlayVisible: true,
       undoStack: [],
       completion: { kind: 'hold' },
+      hiddenByCompletion: false,
       updatedAt: new Date().toISOString(),
     };
     const label = progressLabel(s);
@@ -133,6 +136,7 @@ describe('progressLabel', () => {
       overlayVisible: true,
       undoStack: [],
       completion: { kind: 'hold' },
+      hiddenByCompletion: false,
       updatedAt: new Date().toISOString(),
     };
     const label = progressLabel(s);
