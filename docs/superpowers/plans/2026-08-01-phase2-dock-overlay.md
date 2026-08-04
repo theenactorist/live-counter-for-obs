@@ -358,6 +358,22 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat: update a running session from Setup without restarting it`
 
+
+### Task 2.19: Keyboard clipboard everywhere, always-enabled Save with error states, save confirmation (operator feedback 2026-08-04 — PRD §9)
+
+**Driver (verbatim):** "i still can't copy and paste within the label text, title input fields. Check other input fields as well please" · "Save preset is disabled by default, i want it to be enabled but show the title in error state so the user knows what's wrong/needed to save preset" · "When I save preset, there is no confirmation dialogue or any message to notify me."
+
+**Files:** Create `src/dock/clipboard-keys.ts`; modify `src/dock/main.ts` (install once at shell level), `src/dock/views/setup.ts` (save flow), `src/dock/dock.html` (error/confirm styles); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/live.spec.ts`, `tests/ui/diagnostics.spec.ts`.
+
+**Contract:**
+1. **Keyboard clipboard** — one document-level keydown handler (installed once, surviving boot() re-mounts) that, when the event target is an editable field (`input[type=text|number|password]`, `textarea`) and the modifier is Cmd (mac) or Ctrl: **C** copies the field's selection via `navigator.clipboard.writeText` (whole value when nothing selected); **X** copies then deletes the selection through the field's value + an `input` event (so state bindings update); **V** reads via `readText` and inserts at the caret replacing any selection, dispatching `input`; **A** selects the field's whole value and never bubbles to the page. `preventDefault()` in all handled cases (consistent behaviour even if a CEF version natively delivers some of them — no double-paste). A rejected `readText` shows the existing "Clipboard blocked — type it in manually" hint adjacent to the focused field (reuse the paste-hint pattern; a shared transient-hint helper is acceptable). Non-editable targets are untouched (the Live view's `+`/`-` guard keeps working).
+2. **Save always enabled** — `setup-save` never renders disabled. On click with invalid state: no save; the invalid fields (empty title first and foremost) gain a visible error treatment + message ("Title is required to save"); the first invalid field receives focus; errors clear as the operator edits the field. Start session / Update session keep their existing enablement semantics (they act on a LIVE session — different stakes).
+3. **Save confirmation** — successful save renders `setup-save-confirm` ("Preset '<title>' saved ✓", or "updated ✓" when editing), clearing on the next form edit or view switch. The stale-edit conflict flow is unchanged.
+
+**Mandatory tests:** with a seeded clipboard, Cmd/Ctrl+V pastes into the LABEL field at the caret (assert mid-string insertion) and into TITLE; Cmd/Ctrl+C on a selection in label puts exactly the selection on the clipboard; Cmd/Ctrl+X removes it and updates the preview (binding fired); Cmd/Ctrl+A selects only the field (page selection untouched); rejected readText → hint near the field; `+` typed in the label still doesn't count (guard intact); Save click with empty title → no preset stored, title error visible + focused, typing clears it; Save with valid title → preset stored + confirm text visible with the title; editing again clears the confirm; existing-preset save shows "updated"; password field paste keyboard path works in Diagnostics.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): keyboard clipboard in all fields; always-enabled save with error states + confirmation`
+
 ---
 
 ## Phase gate checklist (after Task 2.18)

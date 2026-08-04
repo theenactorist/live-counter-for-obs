@@ -248,7 +248,7 @@ Four dock views — **Presets** (search, create, load, duplicate, edit, delete, 
 5. **Counter style** — its own group: size, colour. Typeface applies to both and sits with the counter group.
 6. **Animation** — type, target, duration, Test animation.
 7. **Completion** — behaviour and seconds.
-8. Save preset (title only) / Start session.
+8. Save preset (title only) / Start session. **Save preset is always enabled (2026-08-04, operator feedback):** clicking it with a missing title (or any invalid field) does not save — it puts the offending fields into a visible error state naming what is needed ("Title is required to save"), focusing the first one. **A successful save confirms visibly** ("Preset '<title>' saved ✓") near the button, clearing on the next edit; an update to an existing preset confirms as "updated".
 
 **Preset descriptions are not exposed** (operator: "no use for description"). The field remains in the stored schema for compatibility and is always null for presets created after this change; the Presets list shows title, range, mode and updated date.
 
@@ -263,7 +263,7 @@ Four dock views — **Presets** (search, create, load, duplicate, edit, delete, 
 
 **Reverse** is an Automatic-mode control only. In Manual mode it is hidden: `+1`/`−1` already move both ways, so its only effect there is changing which boundary completes — confusing for the operator, and the engine retains the capability for Automatic.
 
-**Clipboard.** OBS browser docks do not receive the OS clipboard shortcuts (Cmd/Ctrl+C/V), so every field that needs text moved in or out provides an explicit button: **Copy** (websocket-free clipboard API, with a select-to-copy fallback already specified in §8.7) and **Paste** (clipboard read on click) beside the websocket password field and the preset-import box.
+**Clipboard (extended 2026-08-04, operator feedback: "i still can't copy and paste within the label text, title input fields").** OBS browser docks do not receive the OS clipboard shortcuts, so the dock implements keyboard clipboard itself: a document-level handler makes **Cmd/Ctrl+C, X, V and A** work in **every** editable field (inputs and textareas) — copy/cut of the selection, paste at the caret replacing any selection, select-all scoped to the field. A clipboard denial on paste surfaces the same "Clipboard blocked — type it in manually" hint as the Paste buttons, near the focused field. The explicit **Copy**/**Paste** buttons (password, preset import/export, URLs) remain as the discoverable path. Keyboard clipboard handling must never trigger the Live view's global count shortcuts and must survive the dock's focus-preserving re-renders.
 
 The Live view remains fully usable at 300 px dock width; primary controls never rely on hover or scroll off-screen.
 
