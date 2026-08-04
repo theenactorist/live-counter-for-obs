@@ -125,6 +125,30 @@ function wireTabs(shell: Shell, onActivate?: (tab: TabName) => void): TabControl
   return { activate };
 }
 
+// Task 2.15 — keeps `--tab-bar-height` (consumed by dock.html's
+// `.setup-preview-section` sticky offset, so the preview sticks directly
+// below the tabs without overlapping them) in sync with the tab bar's ACTUAL
+// rendered height. A hardcoded guess isn't safe here: at the dock's narrow
+// widths a tab's label can wrap onto two lines (Diagnostics is the long
+// one), growing the bar past any single fixed value. ResizeObserver catches
+// that (and any other layout change — font swap, viewport resize) rather
+// than measuring once at boot and going stale.
+function syncTabBarHeightVar(tabsEl: HTMLElement): void {
+  const update = (): void => {
+    document.documentElement.style.setProperty('--tab-bar-height', `${tabsEl.getBoundingClientRect().height}px`);
+  };
+  update();
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(update).observe(tabsEl);
+  } else {
+    // Extremely old/headless environments without ResizeObserver — a resize
+    // listener is a strictly-worse-but-still-correct fallback (misses a
+    // pure text-wrap change with no viewport resize), and the CSS var's own
+    // fallback value covers the gap until the next resize regardless.
+    window.addEventListener('resize', update);
+  }
+}
+
 function main(): void {
   const root = document.getElementById('app');
   if (!root) return;
@@ -144,6 +168,10 @@ function main(): void {
     if (name === 'presets') presetsHandle?.refresh();
     else if (name === 'diagnostics') diagnosticsHandle?.refresh();
   });
+  // Every tab button shares the same `.tabs` parent (see dock.html) — any of
+  // them reaches it.
+  const tabsEl = shell.tabButtons.presets.parentElement;
+  if (tabsEl instanceof HTMLElement) syncTabBarHeightVar(tabsEl);
 
   // Task 2.8: banner-ws deep-links to the Diagnostics tab — a connectivity
   // problem's actionable fix (port/password, the checklist) lives there now

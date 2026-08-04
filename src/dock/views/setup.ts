@@ -352,6 +352,30 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
   }
 
+  // Task 2.15 review-driven fix — `fitPreviewToScale()` above only ever ran
+  // synchronously inside `render()`. That was fine while Setup was the
+  // active tab, but `mountSetupView()` is called for EVERY tab at boot()
+  // regardless of which one starts active (Live does), so Setup's first
+  // `render()` — and thus its first `fitPreviewToScale()` — runs while
+  // `container` (this view's pane) is still `[hidden]` (`display: none`).
+  // Every size read used above (`scrollWidth`/`scrollHeight`/`clientWidth`)
+  // returns 0 for a `display: none` subtree, so that first call permanently
+  // locked `previewScaleBox`'s `height` at `0px` — genuinely invisible
+  // (clipped by `.setup-preview-scale-box`'s own `overflow: hidden`) even
+  // once the operator switched TO Setup, since nothing else in this view
+  // re-renders on tab activation (unlike Presets/Diagnostics' own
+  // `refresh()`, called from main.ts's `onActivate`). A ResizeObserver on
+  // `container` itself (stable across every render() — never replaced,
+  // unlike its children) catches exactly the "went from no box at all to a
+  // real size" transition the same way it would catch a genuine viewport
+  // resize, so the preview always ends up correctly sized the moment it's
+  // actually visible — no new public API/onActivate wiring needed.
+  let previewResizeObserver: ResizeObserver | null = null;
+  if (typeof ResizeObserver !== 'undefined') {
+    previewResizeObserver = new ResizeObserver(() => fitPreviewToScale());
+    previewResizeObserver.observe(container);
+  }
+
   // Assigns 'setup-preview-label'/'setup-preview-label-after' to whichever
   // node is actually carrying the label for the CURRENT layout — mirrors the
   // pre-refactor Setup preview's own testid contract exactly (before/after
@@ -893,6 +917,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // (the animation's actual target) lives here regardless of where its own
   // trigger button is mounted.
   function renderPreviewBlock(): HTMLElement {
+    // Task 2.15 (operator feedback: "add a label to the preview to show
+    // preview... fix the preview so no matter how the personnel scrolls,
+    // they always see it") — `section` (sticky, per dock.html's
+    // `.setup-preview-section` rule) is an ANCESTOR of the scaled node
+    // (`scaleBox`, below), never the scaled node itself: the existing
+    // `transform: scale()` `fitPreviewToScale()` applies to `scaleBox`
+    // stays exactly where it was, an ordinary descendant inside this new
+    // wrapper.
+    const section = el('div', { 'data-testid': 'setup-preview-section', class: 'setup-preview-section' });
+    section.appendChild(el('div', { 'data-testid': 'setup-preview-caption', class: 'setup-preview-caption' }, 'Preview'));
+
     const wrap = el('div', { class: 'setup-preview-wrap' });
     const scaleBox = el('div', { class: 'setup-preview-scale-box' });
     previewScaleBox = scaleBox;
@@ -903,7 +938,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     scaleBox.appendChild(previewNodes.contentRoot);
     wrap.appendChild(scaleBox);
-    return wrap;
+    section.appendChild(wrap);
+    return section;
   }
 
   // PRD §9 item 6 ("Animation — type, target, duration, Test animation").
@@ -1166,6 +1202,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // on demand) — but an in-flight performSave() must not repaint this
       // torn-down mount over its replacement (code-quality:P2-Q-03).
       destroyed = true;
+      previewResizeObserver?.disconnect();
     },
     loadPreset(preset: Preset): void {
       ui.title = preset.title;

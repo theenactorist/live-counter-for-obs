@@ -97,9 +97,21 @@ function applyLayoutStyle(nodes: PresentationNodes, layout: OverlayLayout): void
   const { contentRoot, beforeEl, numberEl, behindWrapEl } = nodes;
   const stacked = layout === 'textAbove' || layout === 'textBelow';
   const behind = layout === 'textBehind';
+  // Task 2.15 (operator feedback, PRD §9): "The caption should label be at
+  // the vertical center for counter left and right." The operator's
+  // screenshot showed a large counter with a small label sitting on its
+  // baseline (reading as bottom-aligned) — textBefore/textAfter now centre
+  // the label on the counter's own cross-axis instead. numberOnly has no
+  // label to align, stacked layouts (textAbove/textBelow) already centre
+  // horizontally on THEIR OWN axis via the `stacked` branch above, and
+  // textBehind's ghost is absolutely positioned (behindWrapEl) — none of
+  // those three change here, only the two true inline layouts do. Shared by
+  // both the overlay renderer and Setup's embedded preview (this module),
+  // so the fix reaches the stream and the preview identically.
+  const inline = layout === 'textBefore' || layout === 'textAfter';
 
   contentRoot.style.flexDirection = stacked ? 'column' : 'row';
-  contentRoot.style.alignItems = stacked ? 'center' : 'baseline';
+  contentRoot.style.alignItems = stacked || inline ? 'center' : 'baseline';
   contentRoot.style.position = behind ? 'relative' : '';
 
   // textBelow's label (beforeEl) must appear AFTER the number visually

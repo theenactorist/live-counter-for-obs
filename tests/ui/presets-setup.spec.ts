@@ -1786,6 +1786,17 @@ test.describe('dock Setup + Presets views', () => {
               expect(setupLabel).not.toBeNull();
               expect(setupNumber).not.toBeNull();
               expect(setupNumber!.x).toBeGreaterThanOrEqual(setupLabel!.x + setupLabel!.width - 1);
+
+              // Task 2.15 (operator feedback, PRD §9): the label is
+              // vertically centred on the counter, not baseline-aligned —
+              // and identically so on BOTH surfaces, since the alignment
+              // lives in the one shared overlay-presentation.js module.
+              const overlayLabelCenterY = overlayBefore!.y + overlayBefore!.height / 2;
+              const overlayNumberCenterY = overlayNumber!.y + overlayNumber!.height / 2;
+              expect(Math.abs(overlayLabelCenterY - overlayNumberCenterY)).toBeLessThan(4);
+              const setupLabelCenterY = setupLabel!.y + setupLabel!.height / 2;
+              const setupNumberCenterY = setupNumber!.y + setupNumber!.height / 2;
+              expect(Math.abs(setupLabelCenterY - setupNumberCenterY)).toBeLessThan(4);
             } else {
               // Label sits AFTER the number in both — the opposite side.
               expect(overlayAfter!.x).toBeGreaterThanOrEqual(overlayNumber!.x + overlayNumber!.width - 1);
@@ -1794,6 +1805,14 @@ test.describe('dock Setup + Presets views', () => {
               expect(setupLabel).not.toBeNull();
               expect(setupNumber).not.toBeNull();
               expect(setupLabel!.x).toBeGreaterThanOrEqual(setupNumber!.x + setupNumber!.width - 1);
+
+              // Same vertical-centring check, opposite side (Task 2.15).
+              const overlayLabelCenterY = overlayAfter!.y + overlayAfter!.height / 2;
+              const overlayNumberCenterY = overlayNumber!.y + overlayNumber!.height / 2;
+              expect(Math.abs(overlayLabelCenterY - overlayNumberCenterY)).toBeLessThan(4);
+              const setupLabelCenterY = setupLabel!.y + setupLabel!.height / 2;
+              const setupNumberCenterY = setupNumber!.y + setupNumber!.height / 2;
+              expect(Math.abs(setupLabelCenterY - setupNumberCenterY)).toBeLessThan(4);
             }
           }
 
@@ -2086,6 +2105,69 @@ test.describe('dock Setup + Presets views', () => {
       );
       expect(stored).toHaveLength(1);
       expect(stored[0]!.description).toBe('Carried through export/import untouched');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 2.15: sticky tabs + captioned sticky preview (operator
+  // feedback: "PLEASE FIX the top tab and add a label to the preview to
+  // show preview. Also fix the preview so no matter how the personnel
+  // scrolls, they always see it.") -------------------------------------
+
+  test('sticky tab bar: at 300x600, scrolling Setup to the bottom keeps all four tabs in the viewport and clickable', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.setViewportSize({ width: 300, height: 600 });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      // The dock has no independently-scrolling pane — the document itself
+      // is the scrolling container (see dock.html) — so this is the same
+      // scroll a real operator's trackpad/wheel produces.
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+
+      for (const testid of ['tab-presets', 'tab-setup', 'tab-live', 'tab-diagnostics']) {
+        await expect(page.getByTestId(testid), testid).toBeInViewport();
+      }
+
+      // Still clickable — a real click reaches the button itself, not
+      // something unstuck sitting on top of it.
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('sticky captioned preview: caption reads "Preview" and the preview stays pinned below the tabs while Setup scrolls to Completion', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.setViewportSize({ width: 300, height: 600 });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+
+      await expect(page.getByTestId('setup-preview-caption')).toBeVisible();
+      await expect(page.getByTestId('setup-preview-caption')).toHaveText('Preview');
+
+      await page.getByTestId('setup-group-completion').scrollIntoViewIfNeeded();
+
+      // Preview (and its caption) are still on screen, below the tab bar —
+      // not scrolled away with the rest of the form.
+      await expect(page.getByTestId('setup-preview-caption')).toBeInViewport();
+      await expect(page.getByTestId('setup-preview')).toBeInViewport();
+
+      const tabsBox = await page.getByTestId('tab-setup').boundingBox();
+      const previewSectionBox = await page.getByTestId('setup-preview-section').boundingBox();
+      expect(tabsBox).not.toBeNull();
+      expect(previewSectionBox).not.toBeNull();
+      // Below the tab bar, not overlapping it — the two stay stacked, never
+      // overlaid on top of each other.
+      expect(previewSectionBox!.y).toBeGreaterThanOrEqual(tabsBox!.y + tabsBox!.height - 1);
     } finally {
       await mock.close();
     }

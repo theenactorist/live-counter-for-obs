@@ -1019,6 +1019,66 @@ test.describe('overlay renderer', () => {
       }
     });
 
+    // Task 2.15 (operator feedback, PRD §8.8/§9): "The caption should label
+    // be at the vertical center for counter left and right." The operator's
+    // screenshot showed a large counter with a small label sitting on its
+    // baseline (reading as bottom-aligned) — this asserts the fix with real
+    // bounding-box maths, not a class/style-string check, so the OLD
+    // `alignItems: 'baseline'` behaviour genuinely fails it: a big counter
+    // (120px) and a tiny label (14px) sharing a text baseline puts the
+    // label's box (and its centre) well below the counter's own centre.
+    test('textBefore/textAfter: the label is vertically centred on the counter, not baseline-aligned', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        // Wait for the overlay's OWN client to have identified with the
+        // mock server (its 'hello' broadcast is proof) before sending any
+        // 'state' message from this test's separate client — otherwise a
+        // message sent before the overlay finishes connecting can be missed
+        // entirely, an unrelated flake this assertion has no business
+        // catching.
+        await expect
+          .poll(() =>
+            mock.broadcasts.some((b) => {
+              const d = b.eventData as { kind?: string; source?: string } | undefined;
+              return d?.kind === 'hello' && d?.source === 'overlay';
+            }),
+          )
+          .toBe(true);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          for (const layout of ['textBefore', 'textAfter'] as const) {
+            await bus.send('state', {
+              session: sessionFixture({ currentValue: 0 }),
+              snapshot: null,
+              style: styleFixture({ layout, numberSizePx: 120, textSizePx: 14 }),
+              template: 'HALLELUYAH',
+              animation: null,
+              heartbeat: layout === 'textBefore' ? 1 : 2,
+            } satisfies StatePayload);
+
+            const labelTestId = layout === 'textBefore' ? 'overlay-text-before' : 'overlay-text-after';
+            await expect(page.getByTestId(labelTestId)).toHaveText('HALLELUYAH');
+
+            const labelBox = await page.getByTestId(labelTestId).boundingBox();
+            const numberBox = await page.getByTestId('overlay-number').boundingBox();
+            expect(labelBox, layout).not.toBeNull();
+            expect(numberBox, layout).not.toBeNull();
+
+            const labelCenterY = labelBox!.y + labelBox!.height / 2;
+            const numberCenterY = numberBox!.y + numberBox!.height / 2;
+            // A few px tolerance, deliberately tight enough that baseline
+            // alignment (a ~27px gap at these sizes) fails it.
+            expect(Math.abs(labelCenterY - numberCenterY), layout).toBeLessThan(4);
+          }
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
     test('a label containing {count} still honours the token\'s position, regardless of textBefore vs textAfter', async ({
       page,
     }) => {
