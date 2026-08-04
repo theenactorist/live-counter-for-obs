@@ -29,6 +29,7 @@ import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { loadPresets as engineLoadPresets, serializePresets } from '../../engine/migrate.js';
+import { CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
 
 export interface PresetsViewHandle {
   destroy(): void;
@@ -70,13 +71,6 @@ interface PresetsUiState {
   // failed paste doesn't read as "your JSON was invalid."
   importPasteError: string | null;
 }
-
-// Task 2.10, item 4 — shown by import-paste (and diagnostics.ts's
-// settings-paste) on a rejected or empty clipboard read. Real-world driver:
-// OBS's embedded Browser Dock does NOT deliver Cmd/Ctrl+V to page content at
-// all, so pasting an exported preset envelope is otherwise impossible for an
-// operator testing this in real OBS.
-const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
 
 // Task 2.9 — export/import via clipboard. The envelope shape is deliberately
 // tiny (app/kind/v tag + timestamp + the presets array itself) so a future

@@ -462,7 +462,15 @@ test.describe('dock Setup + Presets views', () => {
 
   // --- Fix round 1 (coordinator review): Critical 1, Critical 2, Important 3 ---
 
-  test('garbage start value, or equal start/finish, disables Save (Critical 1 regression)', async ({ page }) => {
+  // Task 2.19 (operator feedback: "Save preset is disabled by default, i
+  // want it to be enabled") inverts this test's own former title/premise:
+  // `setup-save` is never disabled anymore, regardless of range validity —
+  // clicking it with an invalid range now saves nothing and surfaces the
+  // existing inline range error instead, which is what this test asserts on
+  // below in place of the old toBeDisabled() checks.
+  test('garbage start value, or equal start/finish, never disables Save — clicking surfaces the range error and saves nothing', async ({
+    page,
+  }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
@@ -479,20 +487,32 @@ test.describe('dock Setup + Presets views', () => {
       await startInput.fill('');
       await startInput.pressSequentially('abc');
       await expect(startInput).toHaveValue('');
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await page.getByTestId('setup-save').click();
+      await expect(page.getByTestId('setup-range-error')).toBeVisible();
 
       await page.getByTestId('setup-start').fill('5');
       await page.getByTestId('setup-finish').fill('5'); // equal to start: invalid range
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await page.getByTestId('setup-save').click();
+      await expect(page.getByTestId('setup-range-error')).toBeVisible();
 
       await page.getByTestId('setup-finish').fill('15');
+      await expect(page.getByTestId('setup-range-error')).toHaveCount(0);
       await expect(page.getByTestId('setup-save')).toBeEnabled();
+
+      // Nothing was ever actually saved by the two blocked clicks above.
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
     } finally {
       await mock.close();
     }
   });
 
-  test('holdThenHide with empty/zero seconds disables both Save and Start; a valid value enables both (Critical 1 + 2 regression)', async ({
+  // Task 2.19 — `setup-save` no longer disables for an invalid completion
+  // config either; Start session's disabled state is UNCHANGED (it acts on
+  // what would become a live session), so those assertions stay as they were.
+  test('holdThenHide with empty/zero seconds never disables Save (clicking saves nothing) and disables Start; a valid value enables both (Critical 1 + 2 regression)', async ({
     page,
   }) => {
     const mock = await startMockObs();
@@ -505,16 +525,22 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('setup-completion').selectOption('holdThenHide');
 
       await page.getByTestId('setup-completion-seconds').fill('0');
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+      await page.getByTestId('setup-save').click();
+      await expect(page.getByTestId('setup-completion-seconds-error')).toBeVisible();
 
       await page.getByTestId('setup-completion-seconds').fill('');
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeDisabled();
 
       await page.getByTestId('setup-completion-seconds').fill('5');
       await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+
+      // Neither blocked click above actually saved anything.
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
     } finally {
       await mock.close();
     }
@@ -529,16 +555,19 @@ test.describe('dock Setup + Presets views', () => {
       await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Good Preset' });
       await page.getByTestId('setup-save').click();
 
-      // Attempt the previously-broken flow (holdThenHide, 0 seconds) as far
-      // as the now-fixed UI allows: Save stays disabled, so nothing new is
-      // ever written — this is the regression check for Critical 1.
+      // Attempt the previously-broken flow (holdThenHide, 0 seconds): Save is
+      // now always clickable (Task 2.19), but performSave() itself still
+      // refuses to write anything for an invalid completion config — this is
+      // the regression check for Critical 1.
       await page.getByTestId('tab-setup').click();
       await page.getByTestId('setup-title').fill('Bad Preset Attempt');
       await page.getByTestId('setup-start').fill('0');
       await page.getByTestId('setup-finish').fill('10');
       await page.getByTestId('setup-completion').selectOption('holdThenHide');
       await page.getByTestId('setup-completion-seconds').fill('0');
-      await expect(page.getByTestId('setup-save')).toBeDisabled();
+      await expect(page.getByTestId('setup-save')).toBeEnabled();
+      await page.getByTestId('setup-save').click(); // clicking an invalid form must still save nothing
+      await expect(page.getByTestId('setup-completion-seconds-error')).toBeVisible();
 
       // Reload: engine/migrate.ts's loadPresets() quarantines the ENTIRE
       // array on the first isPreset failure — if the (blocked) bad preset
@@ -1409,7 +1438,9 @@ test.describe('dock Setup + Presets views', () => {
   // -> `font-size: 0px` on the stream, with no error anywhere in the dock; a
   // negative produced a declaration the browser drops, silently inheriting an
   // unrelated size. Neither canSave() nor canStart() looked at style at all.
-  test('number size: cleared / 0 / negative blocks Save and Start with an inline error', async ({ page }) => {
+  // Task 2.19 — Save no longer disables for an invalid number size either;
+  // Start session's disabled state is unchanged.
+  test('number size: cleared / 0 / negative blocks Start (and a Save click) with an inline error', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
@@ -1423,14 +1454,20 @@ test.describe('dock Setup + Presets views', () => {
       for (const bad of ['', '0', '-5', '7', '513']) {
         await sizeField.fill(bad);
         await expect(page.getByTestId('setup-number-size-error')).toBeVisible();
-        await expect(page.getByTestId('setup-save')).toBeDisabled();
+        await expect(page.getByTestId('setup-save')).toBeEnabled();
         await expect(page.getByTestId('setup-start-session')).toBeDisabled();
       }
+      // Clicking Save while the last (513) bad value is still showing must
+      // save nothing.
+      await page.getByTestId('setup-save').click();
 
       await sizeField.fill('120');
       await expect(page.getByTestId('setup-number-size-error')).toHaveCount(0);
       await expect(page.getByTestId('setup-save')).toBeEnabled();
       await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+
+      await page.getByTestId('tab-presets').click();
+      await expect(page.getByTestId('presets-empty')).toBeVisible();
     } finally {
       await mock.close();
     }
@@ -3439,7 +3476,9 @@ test.describe('dock Setup + Presets views', () => {
         await page.getByTestId('setup-completion').selectOption('holdThenHide');
         await page.getByTestId('setup-completion-seconds').fill('2.5');
 
-        await expect(page.getByTestId('setup-save')).toBeDisabled(); // sanity: existing Save/Start rule
+        // Task 2.19: `setup-save` no longer disables for an invalid
+        // completion config (it never disables at all) — Start/Update are
+        // untouched by this task and still carry the sanity check.
         await expect(page.getByTestId('setup-start-session')).toBeDisabled();
         await expect(page.getByTestId('setup-update-session')).toBeDisabled(); // must now agree
       } finally {
@@ -4013,6 +4052,288 @@ test.describe('dock Setup + Presets views', () => {
         // two, resolved in favour of what the audience is actually seeing.
         await expect(page.getByTestId('setup-start')).toHaveValue('7');
         await expect(page.getByTestId('setup-preview-number')).toHaveText('12');
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+
+  // --- Task 2.19: keyboard clipboard everywhere; always-enabled Save with
+  // error states + confirmation -------------------------------------------
+  // Driver (verbatim, PRD §9): "i still can't copy and paste within the
+  // label text, title input fields. Check other input fields as well
+  // please" · "Save preset is disabled by default, i want it to be enabled
+  // but show the title in error state..." · "When I save preset, there is
+  // no confirmation dialogue or any message to notify me."
+  test.describe('Task 2.19: keyboard clipboard + Save UX', () => {
+    // Playwright drives a REAL Chromium instance on this same host machine,
+    // so navigator.platform inside the page always agrees with
+    // process.platform here — the same host-OS signal clipboard-keys.ts's
+    // own isMacPlatform() relies on.
+    const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    test('Cmd/Ctrl+V pastes into the Label field at the caret (mid-string insertion)', async ({ page, context }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('AZ');
+        // Caret between 'A' and 'Z'.
+        await label.evaluate((el) => (el as HTMLInputElement).setSelectionRange(1, 1));
+        await page.evaluate(() => navigator.clipboard.writeText('-middle-'));
+        await page.keyboard.press(`${MOD}+v`);
+
+        await expect(label).toHaveValue('A-middle-Z');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cmd/Ctrl+V pastes into the Title field', async ({ page, context }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const title = page.getByTestId('setup-title');
+        await title.click();
+        await page.evaluate(() => navigator.clipboard.writeText('Pasted Title'));
+        await page.keyboard.press(`${MOD}+v`);
+
+        await expect(title).toHaveValue('Pasted Title');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cmd/Ctrl+C on a selection in the Label field puts exactly the selection on the clipboard', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('Hello World');
+        await label.evaluate((el) => (el as HTMLInputElement).setSelectionRange(0, 5)); // "Hello"
+        await page.keyboard.press(`${MOD}+c`);
+
+        const clip = await page.evaluate(() => navigator.clipboard.readText());
+        expect(clip).toBe('Hello');
+        await expect(label).toHaveValue('Hello World'); // copy never mutates the field
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cmd/Ctrl+X removes the selection in the Label field and updates the WYSIWYG preview (binding fired)', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('Hello World');
+        await label.evaluate((el) => (el as HTMLInputElement).setSelectionRange(0, 6)); // "Hello "
+        await page.keyboard.press(`${MOD}+x`);
+
+        await expect(label).toHaveValue('World');
+        const clip = await page.evaluate(() => navigator.clipboard.readText());
+        expect(clip).toBe('Hello ');
+        // Binding fired: the shared WYSIWYG preview (same `ui.template`
+        // state every other input path drives) reflects the cut, not the
+        // pre-cut text.
+        await expect(page.getByTestId('setup-preview-label')).toHaveText('World');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cmd/Ctrl+A selects only the field, leaving the page selection untouched', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('Select Me');
+        await page.keyboard.press(`${MOD}+a`);
+
+        const selection = await label.evaluate((el) => {
+          const input = el as HTMLInputElement;
+          return { start: input.selectionStart, end: input.selectionEnd };
+        });
+        expect(selection).toEqual({ start: 0, end: 'Select Me'.length });
+
+        // "Page selection untouched": a form field's own internal selection
+        // (set via setSelectionRange, above) is a SEPARATE thing from the
+        // document's own Selection object, which Chromium leaves COLLAPSED
+        // even for a genuine native select-all while focus sits in a field
+        // (confirmed independently of this handler: `toString()` alone is
+        // NOT a reliable signal here — Chromium surfaces the focused
+        // field's own selected text through it as a quirk regardless of
+        // whether any real page-wide selection occurred). `isCollapsed`
+        // is what actually distinguishes "the whole page (tab labels,
+        // buttons, etc.) got selected" from "nothing outside the field did".
+        const pageSelection = await page.evaluate(() => {
+          const sel = document.getSelection();
+          return { isCollapsed: sel ? sel.isCollapsed : true };
+        });
+        expect(pageSelection.isCollapsed).toBe(true);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a rejected clipboard read on Cmd/Ctrl+V shows the blocked hint near the focused field and leaves it untouched', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await page.addInitScript(() => {
+          navigator.clipboard.readText = () => Promise.reject(new Error('denied (test)'));
+        });
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('');
+        await label.click();
+        await page.keyboard.press(`${MOD}+v`);
+
+        await expect(page.getByTestId('clipboard-key-hint')).toBeVisible();
+        await expect(page.getByTestId('clipboard-key-hint')).toContainText('Clipboard blocked — type it in manually');
+        await expect(label).toHaveValue('');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('typing a literal "+" in the Label field never triggers the Live +/- shortcut (guard intact)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Guard Check' });
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('current-value')).toHaveText('0');
+
+        await page.getByTestId('tab-setup').click();
+        const label = page.getByTestId('setup-template');
+        await label.fill('');
+        await label.pressSequentially('+1 bonus');
+        await expect(label).toHaveValue('+1 bonus');
+
+        await page.getByTestId('tab-live').click();
+        await expect(page.getByTestId('current-value')).toHaveText('0'); // untouched by the '+' typed above
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Save click with an empty title shows the title error, focuses it, and typing clears it — nothing is saved', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('10');
+        // Title left empty.
+
+        await expect(page.getByTestId('setup-save')).toBeEnabled();
+        await page.getByTestId('setup-save').click();
+
+        await expect(page.getByTestId('setup-title-error')).toBeVisible();
+        await expect(page.getByTestId('setup-title-error')).toContainText('Title is required to save');
+        await expect(page.getByTestId('setup-title')).toBeFocused();
+        await expect(page.getByTestId('setup-title')).toHaveClass(/input-error/);
+
+        await page.getByTestId('setup-title').fill('A');
+        await expect(page.getByTestId('setup-title-error')).toHaveCount(0);
+
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('presets-empty')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Save with a valid title shows the confirmation naming the preset', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Confirm Me' });
+
+        await expect(page.getByTestId('setup-save-confirm')).toHaveCount(0);
+        await page.getByTestId('setup-save').click();
+
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+        await expect(page.getByTestId('setup-save-confirm')).toContainText("Preset 'Confirm Me' saved");
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('editing the form after a successful Save clears the confirmation', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Clear Me' });
+        await page.getByTestId('setup-save').click();
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+
+        await page.getByTestId('setup-finish').fill('20');
+        await expect(page.getByTestId('setup-save-confirm')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('switching tabs away from Setup and back clears a stale save confirmation', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Tab Switch Confirm' });
+        await page.getByTestId('setup-save').click();
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-save-confirm')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('saving an already-loaded (editing) preset shows "updated" instead of "saved"', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Editable Confirm' });
+        await page.getByTestId('setup-save').click();
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-load').click();
+        await page.getByTestId('setup-finish').fill('30');
+        await page.getByTestId('setup-save').click();
+
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+        await expect(page.getByTestId('setup-save-confirm')).toContainText("Preset 'Editable Confirm' updated");
       } finally {
         await mock.close();
       }

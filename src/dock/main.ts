@@ -25,6 +25,7 @@ import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
 import { CONNECTION_GRACE_MS } from './connection-grace.js';
+import { installClipboardKeyboardHandler } from './clipboard-keys.js';
 
 const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
@@ -154,6 +155,13 @@ function syncTabBarHeightVar(tabsEl: HTMLElement): void {
 function main(): void {
   const root = document.getElementById('app');
   if (!root) return;
+
+  // Task 2.19 — installed ONCE for the whole page lifetime, same discipline
+  // as syncTabBarHeightVar's ResizeObserver below: boot() can re-run many
+  // times per page load (every settings-save reconnect), and this listener
+  // must never be re-installed on each of those or duplicate handlers would
+  // stack up, each independently reacting to the same keystroke.
+  installClipboardKeyboardHandler();
 
   const shell = queryShell();
   // presetsHandle is assigned inside boot() (below) but referenced here via

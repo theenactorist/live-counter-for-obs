@@ -196,6 +196,23 @@ interface SetupUiState {
   editing: EditingState | null;
   conflict: ConflictKind;
   error: string | null;
+  // Task 2.19 (operator feedback: "Save preset is disabled by default, i
+  // want it to be enabled but show the title in error state") — `setup-save`
+  // is now ALWAYS enabled; this flags the empty/whitespace-title case a
+  // click just rejected, so render() can show the input's error treatment +
+  // inline message. Cleared the instant the operator edits the title field
+  // again (see the `setup-title` inputField's onChange, below), on a
+  // successful save, and on loadPreset()/refresh() — never persisted, it
+  // only describes the most recent Save attempt.
+  titleError: boolean;
+  // Task 2.19 (operator feedback: "there is no confirmation dialogue or any
+  // message to notify me") — the text `setup-save-confirm` renders, or null
+  // for none. Set on a successful Save/Update-preset; cleared by ANY
+  // subsequent form edit (see markDirty(), the one choke point nearly every
+  // field's onChange already runs through) or by leaving and returning to
+  // this tab (see refresh()) — never persisted, page-session only, same as
+  // every other transient confirm/hint in this codebase.
+  saveConfirmText: string | null;
   // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
   // tracking, replacing fix wave 1's single whole-form boolean. Each control
   // adds its own canonical field name (matching the `SetupUiState` property
@@ -318,6 +335,8 @@ function defaultUiState(): SetupUiState {
     editing: null,
     conflict: null,
     error: null,
+    titleError: false,
+    saveConfirmText: null,
     dirtyFields: new Set(),
   };
 }
@@ -668,6 +687,23 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return rangeValid() && completionValid() && styleValid();
   }
 
+  // Task 2.19 — the `data-testid` of whichever field a click on the now-
+  // always-enabled `setup-save` should focus, given canSave() just failed:
+  // "empty title first and foremost" per the controller clarification, then
+  // whichever OTHER check canSave() itself fails, in the same order canSave()
+  // evaluates them. Every one of these fields already renders its own inline
+  // error reactively (rangeErrorText()/completionValid()/numberSizeValue()/
+  // textSizeValue() are all recomputed fresh on every render(), Save click or
+  // not) — this only decides where focus goes, never what error text to show.
+  function firstInvalidFieldTestid(): string | null {
+    if (ui.title.trim().length === 0) return 'setup-title';
+    if (!rangeValid()) return 'setup-start';
+    if (!completionValid()) return 'setup-completion-seconds';
+    if (numberSizeValue() === null) return 'setup-number-size';
+    if (textSizeValue() === null) return 'setup-text-size';
+    return null;
+  }
+
   // Task 2.18 — copies the reconfigure-relevant fields of an ACTIVE session
   // into the form: startValue/finishValue/intervalSeconds/completion.
   //
@@ -743,6 +779,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // `render()` directly, marking that one field dirty before repainting.
   function markDirty(field: string): void {
     ui.dirtyFields.add(field);
+    // Task 2.19 — nearly every field's onChange already runs through this
+    // one choke point, so it doubles as "clear the stale save confirmation
+    // the instant the operator edits anything" without sprinkling the same
+    // line through nine different handlers. renderModeSelect's onChange is
+    // the one outlier that doesn't call markDirty (mode is deliberately
+    // untracked as dirty — see its own doc comment) and clears this itself.
+    ui.saveConfirmText = null;
   }
 
   // Fix wave 2 (Important + minor), corrected in fix wave 4 (ruling 1: mode
@@ -953,7 +996,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   async function performSave(force: boolean): Promise<void> {
-    if (!canSave()) return;
+    // Task 2.19 (operator feedback: "Save preset is disabled by default, i
+    // want it to be enabled but show the title in error state so the user
+    // knows what's wrong/needed to save preset") — `setup-save` is now
+    // ALWAYS clickable; an invalid click saves nothing but paints exactly
+    // what's wrong instead of the old silent no-op a disabled button gave.
+    // An empty/whitespace title is called out explicitly (title-specific
+    // `.field-error` treatment + a dedicated message) since it has no OTHER
+    // inline error of its own; every other invalid field (range, completion
+    // seconds, either size) already renders its own inline error reactively
+    // regardless of this click — this only decides where FOCUS lands.
+    if (!canSave()) {
+      ui.titleError = ui.title.trim().length === 0;
+      ui.saveConfirmText = null;
+      render();
+      const testid = firstInvalidFieldTestid();
+      if (testid) container.querySelector<HTMLElement>(`[data-testid="${testid}"]`)?.focus();
+      return;
+    }
     ui.error = null;
 
     // Final gate wave (SAVE-READS-FORM-AFTER-AWAIT) — every operator-authored
@@ -1005,6 +1065,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
 
     const now = new Date().toISOString();
+    // Task 2.19 — captured before the editing-state reassignment below (which
+    // keeps `ui.editing` truthy either way): decides whether the confirmation
+    // reads "saved" (a brand-new preset) or "updated" (an existing one).
+    const wasEditing = ui.editing !== null;
 
     const preset: Preset = {
       schemaVersion: PRESET_SCHEMA_VERSION,
@@ -1059,6 +1123,12 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
     }
     ui.conflict = null;
+    ui.titleError = false;
+    // Task 2.19 (operator feedback: "there is no confirmation dialogue or any
+    // message to notify me") — cleared by markDirty() (any subsequent form
+    // edit) or refresh() (leaving and returning to this tab); see
+    // `saveConfirmText`'s own doc comment on SetupUiState.
+    ui.saveConfirmText = `Preset '${preset.title}' ${wasEditing ? 'updated' : 'saved'} ✓`;
     // Fix wave 3 (Important) correction: fix wave 1 cleared `dirtyFields`
     // here on the theory that a successful Save makes the form "authoritative
     // again" the same way Start/Update do. That was wrong for Save
@@ -1307,6 +1377,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     select.disabled = activeSession !== null;
     select.addEventListener('change', () => {
       ui.mode = select.value as Mode;
+      // Task 2.19 — the one field whose onChange doesn't already run through
+      // markDirty() (mode is deliberately untracked as dirty — see this
+      // function's own doc comment), so it clears the stale save
+      // confirmation itself instead of relying on that shared choke point.
+      ui.saveConfirmText = null;
       render();
     });
     return select;
@@ -1926,19 +2001,23 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // description has been removed entirely (operator: "no use for
     // description"); `Preset.description` stays in the schema for
     // compatibility, always written null by performSave() above.
-    root.appendChild(
-      formRow(
-        'Title',
-        inputField(
-          'setup-title',
-          ui.title,
-          (v) => {
-            ui.title = v;
-          },
-          'title',
-        ),
-      ),
+    const titleInput = inputField(
+      'setup-title',
+      ui.title,
+      (v) => {
+        ui.title = v;
+        // Task 2.19 — the operator editing this field IS them acting on the
+        // error a previous invalid Save click just showed; it must clear
+        // immediately, not linger until another Save attempt.
+        ui.titleError = false;
+      },
+      'title',
     );
+    if (ui.titleError) titleInput.classList.add('input-error');
+    root.appendChild(formRow('Title', titleInput));
+    if (ui.titleError) {
+      root.appendChild(el('div', { 'data-testid': 'setup-title-error', class: 'field-error' }, 'Title is required to save'));
+    }
 
     // Fix wave 4 (ruling 4) — the honest answer to a loaded preset (or an
     // unfinished edit) sitting in front of a running session: if what's
@@ -1958,7 +2037,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
 
     const actions = el('div', { class: 'btn-row' });
-    const save = button('setup-save', ui.editing ? 'Update preset' : 'Save preset', { disabled: !canSave() });
+    // Task 2.19 (operator feedback: "Save preset is disabled by default, i
+    // want it to be enabled") — never disabled now; performSave() itself
+    // validates on click and paints the specific problem instead.
+    const save = button('setup-save', ui.editing ? 'Update preset' : 'Save preset');
     save.addEventListener('click', () => {
       void performSave(false);
     });
@@ -1979,6 +2061,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     actions.appendChild(update);
 
     root.appendChild(actions);
+
+    // Task 2.19 (operator feedback: "there is no confirmation dialogue or
+    // any message to notify me") — right below the actions row, matching the
+    // "confirm sits next to the button that produced it" pattern already
+    // used everywhere else in this codebase (import-confirm, export-confirm,
+    // add-overlay-confirm).
+    if (ui.saveConfirmText !== null) {
+      root.appendChild(el('div', { 'data-testid': 'setup-save-confirm', class: 'copy-confirm' }, ui.saveConfirmText));
+    }
 
     container.appendChild(root);
     // Measuring the preview's natural (unwrapped) size requires it to
@@ -2021,6 +2112,12 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
       ui.conflict = null;
       ui.error = null;
+      // Task 2.19 — loading a different preset is a fresh start for both:
+      // any stale title error from a previous invalid Save attempt no longer
+      // describes this (non-empty, preset-supplied) title, and any leftover
+      // "saved ✓" no longer describes what's now on screen.
+      ui.titleError = false;
+      ui.saveConfirmText = null;
       // Final gate wave, ruling B — no clamp-warning clear here anymore:
       // loading a preset doesn't end or reconfigure the session the notice
       // describes, so the controller (which now owns it) correctly keeps
@@ -2095,6 +2192,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // refresh, including Mode, the instant anything else was dirty.
     refresh(): void {
       if (destroyed) return;
+      // Task 2.19 (operator feedback: no confirmation was clearing on tab
+      // switch) — leaving Setup and coming back must not still show a
+      // "saved ✓" from a visit that's now over.
+      ui.saveConfirmText = null;
       if (ui.editing === null) {
         const state = opts.controller.getState();
         if (state.session) prefillFromSession(state.session, state.presentation);

@@ -1284,4 +1284,75 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.19: keyboard clipboard everywhere ---------------------------
+  // Real-world driver: OBS's Custom Browser Dock never delivers Cmd/Ctrl+V
+  // (or C/X/A) to page content on macOS at all — the settings-paste BUTTON
+  // above was a stopgap for just this one field; this task makes the
+  // keyboard itself work here too, the same as every other text/number/
+  // password field in the dock.
+  const CLIPBOARD_MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+  test('Cmd/Ctrl+V pastes into settings-password (the keyboard path, not just the Paste button)', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.evaluate(() => navigator.clipboard.writeText('keyboard-pasted-secret'));
+      await page.getByTestId('settings-password').click();
+      await page.keyboard.press(`${CLIPBOARD_MOD}+v`);
+
+      await expect(page.getByTestId('settings-password')).toHaveValue('keyboard-pasted-secret');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Controller clarification: "Cut/copy on input[type=password]: allow paste
+  // and select-all, but REFUSE copy/cut ... never put the password on the
+  // clipboard from a keyboard shortcut". The explicit Copy buttons next to a
+  // URL remain the only sanctioned copy path.
+  test('Cmd/Ctrl+C and Cmd/Ctrl+X on settings-password never put the password on the clipboard, and Cmd/Ctrl+A still selects it', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      // A known sentinel already on the clipboard — if copy/cut were not
+      // refused, it would be overwritten by the password below.
+      await page.evaluate(() => navigator.clipboard.writeText('sentinel-untouched'));
+
+      const password = page.getByTestId('settings-password');
+      await password.fill('super-secret');
+      await password.evaluate((el) => (el as HTMLInputElement).setSelectionRange(0, (el as HTMLInputElement).value.length));
+
+      await page.keyboard.press(`${CLIPBOARD_MOD}+c`);
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel-untouched');
+      await expect(password).toHaveValue('super-secret');
+
+      await page.keyboard.press(`${CLIPBOARD_MOD}+x`);
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel-untouched');
+      // Cut is refused entirely on a password field — the value must survive too.
+      await expect(password).toHaveValue('super-secret');
+
+      // Select-all is still allowed on a password field (only copy/cut are refused).
+      await page.keyboard.press(`${CLIPBOARD_MOD}+a`);
+      const selection = await password.evaluate((el) => {
+        const input = el as HTMLInputElement;
+        return { start: input.selectionStart, end: input.selectionEnd };
+      });
+      expect(selection).toEqual({ start: 0, end: 'super-secret'.length });
+    } finally {
+      await mock.close();
+    }
+  });
 });

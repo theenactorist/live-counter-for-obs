@@ -22,6 +22,15 @@ import type { ObsWsClient } from '../protocol/obsws-client.js';
 import type { Bus, BusMessage } from '../protocol/bus.js';
 import type { DockStorage, DockSettings } from '../protocol/persistence.js';
 import { VERSION } from '../shared/version.js';
+// Task 2.19 — CLIPBOARD_BLOCKED_TEXT and pasteIntoField now live in
+// clipboard-keys.ts (the single home shared with the new keyboard-clipboard
+// handler and presets.ts's import-paste, replacing what used to be two
+// independent copies of the same string). Re-exported below so every
+// existing import site (live.ts, this file's own settings-paste, and
+// tests/ui/diagnostics.spec.ts if it ever reaches for either by name)
+// keeps working unchanged.
+import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
+export { CLIPBOARD_BLOCKED_TEXT, pasteIntoField };
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
@@ -92,14 +101,6 @@ const HOTKEYS_COPY_TEXT = 'Hotkeys: not built yet (Phase 3)';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
   'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
-// Task 2.10, item 4 — shown by settings-paste (and presets.ts's import-paste)
-// on a rejected or empty clipboard read. Real-world driver: OBS's embedded
-// Browser Dock does NOT deliver Cmd/Ctrl+V to page content at all, so pasting
-// the websocket password is otherwise impossible for an operator testing this
-// in real OBS — hence a dedicated Paste button instead of just relying on the
-// (absent) native paste gesture.
-export const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
-
 // --- Task 2.14: Reset everything (PRD §9, AC 26) --------------------------
 // Operator feedback drove the Setup redesign this task otherwise belongs to,
 // but the guarded reset lives here (Diagnostics already owns "connection
@@ -596,34 +597,6 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
   } catch (err) {
     return { ok: false, message: errorText(err) };
   }
-}
-
-/**
- * Task 2.10's clipboard-paste mechanism, extracted so the Diagnostics
- * settings form AND the Live tab's Connect card (Task 2.12) share one
- * implementation instead of two copies of the same rejection/empty-read
- * handling. On success, dispatches a real 'input' event on `input` so
- * whatever listener is already wired to it (validation, live preview, error
- * clearing) reacts exactly as if the operator had typed the value in.
- */
-export async function pasteIntoField(
-  input: HTMLInputElement,
-  hooks: { onBlocked: () => void; onFilled: () => void },
-): Promise<void> {
-  let text: string;
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    hooks.onBlocked();
-    return;
-  }
-  if (text.length === 0) {
-    hooks.onBlocked();
-    return;
-  }
-  input.value = text;
-  hooks.onFilled();
-  input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(

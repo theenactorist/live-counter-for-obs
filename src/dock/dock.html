@@ -407,6 +407,26 @@
         color: #ff9a9a;
         font-size: 0.85rem;
       }
+      /* Task 2.19 — the visible "something's wrong here" treatment on an
+         invalid field itself (currently just Title on an empty/whitespace
+         Save attempt), paired with a `.field-error` message below it. */
+      .input-error {
+        border-color: #6b1f1f !important;
+        outline: 1px solid #6b1f1f;
+      }
+      /* Task 2.19 — the shared keyboard-paste-rejection hint
+         (clipboard-keys.ts's showClipboardBlockedHint). Fixed-positioned by
+         that module (left/top set inline from the field's own bounding
+         rect), appended to `document.body` rather than any one view's own
+         subtree — see that function's doc comment for why. */
+      .clipboard-key-hint {
+        position: fixed;
+        background: #3a1212;
+        border: 1px solid #6b1f1f;
+        border-radius: 4px;
+        padding: 0.3rem 0.55rem;
+        z-index: 1000;
+      }
       .field-hint {
         color: #a0a0a0;
         font-size: 0.85rem;
