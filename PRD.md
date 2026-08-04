@@ -185,6 +185,7 @@ Layouts are **named from the counter's point of view** (operator feedback 2026-0
 | `textBelow` | **Counter above** | counter on top, label beneath | plain label |
 | `textBehind` | **Counter in front** | counter in front, oversized ghost label behind | plain label |
 
+- **Inline vertical alignment (2026-08-02, operator feedback):** in the two inline layouts (**Counter right** / **Counter left**) the label is vertically **centred** against the counter, not sat on its baseline — a large counter beside a small label otherwise reads as bottom-aligned. Stacked and behind layouts are unaffected.
 - **The label is always plain text and `{count}` is never required** (corrected 2026-08-02 — the earlier rule made `textBefore` and `textAfter` render identically, defeating the gallery). The layout alone decides where the number sits relative to the label, so the Setup field reads "Label text" and no layout blocks Save or Start for a missing token.
 - **Token as a power/compatibility path:** if the label does contain `{count}`, it is honoured — inline layouts split on it (the token then dictates placement) and stacked/behind layouts substitute it. Setup shows a neutral note when a token is present, explaining that it sets where the number goes. This keeps pre-gallery presets (whose templates carry the token) rendering exactly as before.
 - Live example renders with the current value in the chosen layout.
@@ -229,7 +230,9 @@ Four dock views — **Presets** (search, create, load, duplicate, edit, delete, 
 
 **Setup view structure (specified 2026-08-02, operator feedback: "I need the setup to be very simple and to have a preview to show the person setting up what the end result looks like before they get started").** Top to bottom:
 
-1. **Live preview, always visible** — a true WYSIWYG rendering of the overlay at the current settings, updating on every keystroke and every control change. It must be produced by the **same rendering code as the overlay itself** (a shared presentation module), not a lookalike, so the two can never drift.
+1. **Live preview, always visible** — a true WYSIWYG rendering of the overlay at the current settings, updating on every keystroke and every control change. It must be produced by the **same rendering code as the overlay itself** (a shared presentation module), not a lookalike, so the two can never drift. It carries a visible **"Preview"** caption so it is never mistaken for the live output, and it **stays pinned below the tab bar while the operator scrolls** the rest of Setup — the point of the preview is to watch it while changing settings further down.
+
+**Tab bar** — pinned to the top of the dock at all times; scrolling a long view (Setup in particular) must never scroll the tabs out of reach.
 2. **Counter** — Start and Finish on one row, two columns; mode; interval when Automatic.
 3. **Layout** — the six-thumbnail gallery, named from the counter's point of view (§8.8).
 4. **Label** — its own group: label text, size, colour.

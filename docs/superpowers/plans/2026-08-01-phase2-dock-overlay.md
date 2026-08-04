@@ -293,9 +293,24 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): setup redesign — shared WYSIWYG preview, counter-perspective layouts, grouped controls, reset`
 
+### Task 2.15: Sticky tabs + labelled sticky preview + inline vertical centring (operator feedback 2026-08-02 — PRD §8.8, §9)
+
+**Driver (verbatim, with a screenshot of the redesigned Setup):** "PLEASE FIX the top tab and add a label to the preview to show preview. Also fix the preview so no matter how the personnel scrolls, they always see it." · "The caption should label be at the vertical center for counter left and right."
+
+**Files:** Modify `src/dock/dock.html` (styles + shell markup), `src/dock/views/setup.ts` (preview caption), `src/shared/overlay-presentation.ts` (inline alignment); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/live.spec.ts`, `tests/ui/overlay.spec.ts`.
+
+**Contract:**
+1. **Tab bar pinned** — the four tabs stay visible at the top of the dock no matter how far any view is scrolled (`position: sticky; top: 0` on the tabs row with an appropriate `z-index` and an opaque background so content cannot show through). Verify no view's own scrolling container defeats it. Test: in Setup at 300×600, scroll to the bottom of the pane and assert all four tab buttons are still in the viewport and clickable.
+2. **Preview pinned and captioned** — the preview block gains a visible caption reading **Preview** (`[data-testid=setup-preview-caption]`) and sticks directly below the tab bar while the rest of Setup scrolls (`position: sticky` at an offset equal to the tab bar's height; it must not overlap the tabs, and the scaled preview node inside must keep working — the existing `transform: scale()` wrapper stays INSIDE the sticky container so it does not become the sticky element itself). Test: scroll Setup to the Completion group and assert the preview's bounding box is still within the viewport and below the tabs, with the caption visible.
+3. **Inline vertical centring** — in `src/shared/overlay-presentation.ts`, the inline layouts (`textBefore` / `textAfter`) align the label to the counter's vertical centre instead of its baseline; stacked and behind layouts keep their current alignment. This changes the OVERLAY as well as the preview, which is intended. Tests: in `overlay.spec.ts`, for both inline layouts with a large counter and a small label, assert the label's vertical centre is within a few px of the counter's vertical centre (and that it is NOT baseline-aligned — i.e. the old behaviour would fail); the preview-parity test already compares both surfaces, so extend it to cover the alignment.
+
+**Note on the regression fence:** `tests/ui/overlay.spec.ts` may be EXTENDED with the new alignment tests, but no existing assertion in it may be weakened or removed; if an existing overlay test fails because of the alignment change, report it rather than editing it — that would mean the change reached further than intended.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): sticky tabs and captioned sticky preview; centre inline labels`
+
 ---
 
-## Phase gate checklist (after Task 2.14)
+## Phase gate checklist (after Task 2.15)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)
