@@ -80,7 +80,17 @@ export function createPresentationNodes(): PresentationNodes {
   behindWrapEl.style.display = 'none';
 
   const behindEl = document.createElement('span');
-  behindEl.style.whiteSpace = 'nowrap';
+  // Task 2.17 (operator feedback, PRD §8.8 AC 28): the ghost label is a
+  // "stacked/ghost" node per that task's contract — `pre-wrap` preserves an
+  // operator's literal leading/trailing/repeated spaces (unlike the previous
+  // `nowrap`, which suppresses line breaks but still COLLAPSES whitespace
+  // runs exactly like the CSS default) while still letting a genuinely long
+  // ghost label wrap if the browser source is narrow. Mount-time constant —
+  // safe here because, unlike beforeEl/afterEl (whose stacked-vs-inline role
+  // depends on the CURRENT layout, so their whiteSpace is set per-layout in
+  // applyLayoutStyle below), behindEl always plays the same "ghost" role
+  // regardless of layout.
+  behindEl.style.whiteSpace = 'pre-wrap';
   behindEl.style.display = 'inline-block';
   behindWrapEl.appendChild(behindEl);
 
@@ -94,7 +104,7 @@ export function createPresentationNodes(): PresentationNodes {
 // never DOM reordering — nodes are created once and never moved), and the
 // ghost label's stacking/flow-participation for textBehind.
 function applyLayoutStyle(nodes: PresentationNodes, layout: OverlayLayout): void {
-  const { contentRoot, beforeEl, numberEl, behindWrapEl } = nodes;
+  const { contentRoot, beforeEl, numberEl, afterEl, behindWrapEl } = nodes;
   const stacked = layout === 'textAbove' || layout === 'textBelow';
   const behind = layout === 'textBehind';
   // Task 2.15 (operator feedback, PRD §9): "The caption should label be at
@@ -113,6 +123,26 @@ function applyLayoutStyle(nodes: PresentationNodes, layout: OverlayLayout): void
   contentRoot.style.flexDirection = stacked ? 'column' : 'row';
   contentRoot.style.alignItems = stacked || inline ? 'center' : 'baseline';
   contentRoot.style.position = behind ? 'relative' : '';
+
+  // Task 2.17 (operator feedback, PRD §8.8 AC 28 — "add space bar in the
+  // label input which will reflect in the preview as actual space"):
+  // beforeEl/afterEl carry EITHER an inline layout's label (textBefore/
+  // textAfter, sitting directly beside the number) OR a stacked layout's
+  // label (textAbove/textBelow, its own line above/below the number) —
+  // which role applies depends entirely on THIS layout, so (unlike behindEl
+  // above, always the ghost) their whiteSpace must be set here, per call,
+  // rather than once at creation. `pre` for inline: same "never preserves-
+  // but-then-wraps" contract as before (inline labels never wrapped even
+  // under the OLD default `white-space: normal`, since they sit on the same
+  // line as the number in a `nowrap`-equivalent flow) — `pre` simply adds
+  // literal-space preservation on top, without introducing wrapping that
+  // wasn't there before. `pre-wrap` for stacked: preserves spaces exactly
+  // like `pre`, but (matching the ghost's own choice above) still lets a
+  // genuinely long stacked label wrap in a narrow browser source, same as
+  // the OLD default `white-space: normal` already allowed (this is a strict
+  // superset — same wrap-ability, plus preserved spaces).
+  beforeEl.style.whiteSpace = stacked ? 'pre-wrap' : 'pre';
+  afterEl.style.whiteSpace = stacked ? 'pre-wrap' : 'pre';
 
   // textBelow's label (beforeEl) must appear AFTER the number visually
   // despite being the FIRST DOM child (mount-time append order, unchanged) —

@@ -2321,4 +2321,114 @@ test.describe('dock Setup + Presets views', () => {
       await mock.close();
     }
   });
+
+  // --- Task 2.17: literal label whitespace (operator feedback 2026-08-02) --
+  //
+  // Driver: "I want to be able to add space bar in the label input which
+  // will reflect in the preview as actual space." Typing "Hello x " (trailing
+  // space) rendered flush against the counter in the LIVE preview — before
+  // any Save — because renderPreviewBlock() ran the template text through
+  // `.trim()` before ever handing it to applyPresentation(). These tests
+  // measure the RENDERED WIDTH of the label, not just its textContent (which
+  // always retained the space characters regardless of any CSS/trim bug) —
+  // width is the assertion that genuinely fails before the fix.
+  test.describe('Task 2.17: literal label whitespace', () => {
+    test('setup preview: a trailing space and interior doubled spaces widen the rendered preview label (not just textContent)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+
+        await page.getByTestId('setup-template').fill('Hello x');
+        await expect(page.getByTestId('setup-preview-label')).toHaveText('Hello x');
+        const noTrailingBox = await page.getByTestId('setup-preview-label').boundingBox();
+        expect(noTrailingBox).not.toBeNull();
+
+        await page.getByTestId('setup-template').fill('Hello x '); // trailing space
+        const labelEl = page.getByTestId('setup-preview-label');
+        expect(await labelEl.textContent()).toBe('Hello x ');
+        const withTrailingBox = await labelEl.boundingBox();
+        expect(withTrailingBox).not.toBeNull();
+        expect(withTrailingBox!.width).toBeGreaterThan(noTrailingBox!.width);
+
+        // Interior doubled spaces (not just a trailing one) also survive.
+        await page.getByTestId('setup-template').fill('A B'); // single space
+        const oneSpaceBox = await page.getByTestId('setup-preview-label').boundingBox();
+        expect(oneSpaceBox).not.toBeNull();
+
+        await page.getByTestId('setup-template').fill('A  B'); // two spaces
+        expect(await labelEl.textContent()).toBe('A  B');
+        const twoSpaceBox = await labelEl.boundingBox();
+        expect(twoSpaceBox).not.toBeNull();
+        expect(twoSpaceBox!.width).toBeGreaterThan(oneSpaceBox!.width);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('save -> load preset restores a label\'s literal leading/interior/trailing spaces verbatim', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, {
+          start: 0,
+          finish: 10,
+          title: 'Spacey',
+          template: '  Hello  x  ', // leading + doubled-interior + trailing
+        });
+        await page.getByTestId('setup-save').click();
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-load').click();
+
+        await expect(page.getByTestId('setup-template')).toHaveValue('  Hello  x  ');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('export -> import round-trip preserves a label\'s literal trailing space, not just its trimmed content', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, {
+          start: 0,
+          finish: 10,
+          title: 'Spacey Export',
+          template: 'Hello x ', // trailing space
+        });
+        await page.getByTestId('setup-save').click();
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('presets-export').click();
+        await expect(page.getByTestId('export-confirm')).toBeVisible();
+        const clip = await page.evaluate(() => navigator.clipboard.readText());
+
+        // The exported envelope itself must carry the space verbatim — proves
+        // the fix isn't just "the UI redisplays it right": the stored/exported
+        // data must never have been trimmed in the first place.
+        const envelope = JSON.parse(clip) as { presets: Array<{ template: string | null }> };
+        expect(envelope.presets[0]!.template).toBe('Hello x ');
+
+        await page.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+        await page.getByTestId('presets-import').click();
+        await page.getByTestId('import-textarea').fill(clip);
+        await page.getByTestId('import-apply').click();
+        await expect(page.getByTestId('import-confirm')).toBeVisible();
+
+        const row = page.getByTestId('preset-row').filter({ hasText: 'Spacey Export' });
+        await row.getByTestId('preset-load').click();
+        await expect(page.getByTestId('setup-template')).toHaveValue('Hello x ');
+      } finally {
+        await mock.close();
+      }
+    });
+  });
 });

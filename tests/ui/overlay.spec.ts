@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { startMockObs } from '../helpers/mock-obsws.js';
+import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { createSession } from '../../src/engine/counter.js';
@@ -38,6 +38,23 @@ async function connectTestBus(port: number): Promise<{ bus: Bus; close: () => vo
   await identified;
   const bus = new Bus(client, 'test');
   return { bus, close: () => client.close() };
+}
+
+// Waits for the overlay's OWN client to have identified with the mock server
+// (its 'hello' broadcast is proof) before this test's separate connectTestBus
+// client sends any 'state' message — otherwise a message sent before the
+// overlay finishes connecting can be missed entirely, an unrelated flake no
+// assertion here has any business catching (same reasoning as the
+// vertical-centering test's own inline version of this wait, below).
+async function waitForOverlayHello(mock: MockObs): Promise<void> {
+  await expect
+    .poll(() =>
+      mock.broadcasts.some((b) => {
+        const d = b.eventData as { kind?: string; source?: string } | undefined;
+        return d?.kind === 'hello' && d?.source === 'overlay';
+      }),
+    )
+    .toBe(true);
 }
 
 function styleFixture(overrides: Partial<StyleConfig> = {}): StyleConfig {
@@ -1547,6 +1564,207 @@ test.describe('overlay renderer', () => {
             .getByTestId('overlay-number')
             .evaluate((el) => (el.getAnimations()[0] as Animation).currentTime as number);
           expect(currentTimeAfter).toBeGreaterThanOrEqual(currentTimeBefore);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+
+  // --- Task 2.17: literal label whitespace (operator feedback 2026-08-02) --
+  //
+  // Driver: "I want to be able to add space bar in the label input which
+  // will reflect in the preview as actual space." Typing "Hello x " rendered
+  // flush against the counter — HTML's default `white-space: normal`
+  // collapses a run of whitespace (including a lone trailing space) for
+  // rendering purposes even though the DOM text node's own `textContent`
+  // always retained it verbatim. These tests measure the RENDERED WIDTH of
+  // the label — the assertion that genuinely fails before the fix — not just
+  // textContent.
+  test.describe('Task 2.17: literal label whitespace', () => {
+    test('a trailing space on an inline (textBefore) label widens the rendered label vs. the same text without it', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBefore' }),
+            template: 'Hello x',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Hello x');
+          const noSpaceBox = await page.getByTestId('overlay-text-before').boundingBox();
+          expect(noSpaceBox).not.toBeNull();
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBefore' }),
+            template: 'Hello x ', // trailing space
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          const labelEl = page.getByTestId('overlay-text-before');
+          expect(await labelEl.textContent()).toBe('Hello x ');
+          const withSpaceBox = await labelEl.boundingBox();
+          expect(withSpaceBox).not.toBeNull();
+          expect(withSpaceBox!.width).toBeGreaterThan(noSpaceBox!.width);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('two consecutive interior spaces in an inline (textAfter) label are not collapsed to one', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAfter' }),
+            template: 'A B', // single space
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-after')).toHaveText('A B');
+          const oneSpaceBox = await page.getByTestId('overlay-text-after').boundingBox();
+          expect(oneSpaceBox).not.toBeNull();
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAfter' }),
+            template: 'A  B', // two spaces
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          const labelEl = page.getByTestId('overlay-text-after');
+          expect(await labelEl.textContent()).toBe('A  B');
+          const twoSpaceBox = await labelEl.boundingBox();
+          expect(twoSpaceBox).not.toBeNull();
+          expect(twoSpaceBox!.width).toBeGreaterThan(oneSpaceBox!.width);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // Stacked (textAbove) and ghost (textBehind) label nodes use `pre-wrap`
+    // rather than `pre` (so a genuinely long label can still wrap inside a
+    // narrow browser source) — this proves that choice still preserves
+    // literal spaces, exactly like the inline `pre` spans above.
+    //
+    // The ghost (`behindEl`) sits inside `behindWrapEl`, a `position:
+    // absolute` box centred over the NUMBER via `translate(-50%, -50%)` —
+    // its shrink-to-fit width is computed against the NUMBER's own box as an
+    // available-width budget. Under `pre-wrap`, CSS's shrink-to-fit width
+    // can never go below the widest UNBREAKABLE word in the text — so a
+    // multi-letter word like "Score" (no internal break opportunity) already
+    // pins the box at its own width regardless of any trailing/wrappable
+    // space run, which would just "hang" past that pinned width instead of
+    // growing it (a genuine, pre-existing shrink-to-fit interaction, not
+    // something this fix controls or should try to control — the SPACES
+    // still reach the DOM verbatim, as the `textContent` assertions below
+    // confirm; only the ghost's specific box-width measurement is
+    // insensitive to them for a wide unbreakable word). A single-CHARACTER
+    // ghost label ("S") sidesteps that: its own unbreakable-word minimum is
+    // small enough that the trailing spaces genuinely widen the box, given a
+    // six-digit number (999999, the engine's own max — see
+    // engine/format.ts's isValidCountValue) for a wide enough number box to
+    // size the ghost's shrink-to-fit against.
+    test('stacked (textAbove) label preserves trailing spaces (wider than without them)', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAbove' }),
+            template: 'Score',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-before')).toHaveText('Score');
+          const noSpaceBox = await page.getByTestId('overlay-text-before').boundingBox();
+          expect(noSpaceBox).not.toBeNull();
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 5 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textAbove' }),
+            template: 'Score  ', // two trailing spaces
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          const labelEl = page.getByTestId('overlay-text-before');
+          expect(await labelEl.textContent()).toBe('Score  ');
+          const withSpaceBox = await labelEl.boundingBox();
+          expect(withSpaceBox).not.toBeNull();
+          expect(withSpaceBox!.width).toBeGreaterThan(noSpaceBox!.width);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('ghost (textBehind) label preserves trailing spaces (wider than without them)', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          // A six-digit value (999999) widens the ghost's shrink-to-fit
+          // available-width budget (see the doc comment above) enough that
+          // a single-character label's trailing spaces are actually
+          // reflected in its measured box width.
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 999999 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'S',
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-text-behind')).toHaveText('S');
+          const noSpaceBox = await page.getByTestId('overlay-text-behind').boundingBox();
+          expect(noSpaceBox).not.toBeNull();
+
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 999999 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'textBehind' }),
+            template: 'S  ', // two trailing spaces
+            animation: null,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          const labelEl = page.getByTestId('overlay-text-behind');
+          expect(await labelEl.textContent()).toBe('S  ');
+          const withSpaceBox = await labelEl.boundingBox();
+          expect(withSpaceBox).not.toBeNull();
+          expect(withSpaceBox!.width).toBeGreaterThan(noSpaceBox!.width);
         } finally {
           close();
         }

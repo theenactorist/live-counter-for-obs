@@ -306,9 +306,18 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // `contentRoot` never wraps a label either (its container is the full
   // browser-source viewport, effectively always wide enough), so a preview
   // that wraps while the stream renders one line would be a real, visible
-  // lie about what the audience sees. `white-space` inherits to every
-  // child span that doesn't set its own (behindEl already sets one
-  // explicitly in the shared module; same value, harmless).
+  // lie about what the audience sees.
+  //
+  // Task 2.17 update: `white-space` is inherited, but only by a child that
+  // doesn't set its OWN value — since that task gave beforeEl/afterEl/
+  // behindEl their own explicit `pre`/`pre-wrap` (shared module, so the real
+  // overlay can still wrap a genuinely long stacked/ghost label in a narrow
+  // browser source), this `nowrap` no longer reaches them by inheritance.
+  // `renderPreviewBlock()` below re-asserts `pre` directly on all three,
+  // every render, right after applyPresentation() runs — `pre`, not
+  // `nowrap`, because `nowrap` suppresses wrapping but still COLLAPSES
+  // whitespace runs exactly like the CSS default, which would silently
+  // undo Task 2.17's whole fix for this preview specifically.
   previewNodes.contentRoot.style.whiteSpace = 'nowrap';
 
   // The box `fitPreviewToScale()` (below) scales via CSS transform to keep
@@ -555,7 +564,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       finishValue,
       mode: ui.mode,
       intervalSeconds: ui.intervalSeconds,
-      template: ui.template.trim().length > 0 ? ui.template.trim() : null,
+      // Task 2.17 (operator feedback, PRD §8.8 AC 28) — `.trim()` used to be
+      // applied to the STORED value too, silently eating an operator's
+      // leading/trailing label spaces on every Save (and surfacing again on
+      // the next Load/export). `.trim().length > 0` still decides "is this
+      // field empty" (an all-whitespace label still saves as `null`, same as
+      // before) — but the persisted value is the RAW `ui.template`.
+      template: ui.template.trim().length > 0 ? ui.template : null,
       style,
       animation,
       completion,
@@ -611,7 +626,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       presetId: ui.editing ? ui.editing.id : null,
     };
     const style = buildStyle();
-    const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
+    // Task 2.17 — same fix as performSave()/renderPreviewBlock() above: the
+    // broadcast template must carry the operator's literal spaces, not a
+    // trimmed copy.
+    const template = ui.template.trim().length > 0 ? ui.template : null;
     const animation = buildAnimation();
     // Review fix (Critical 2): canStart()'s completionValid() gate above
     // should already prevent createSession() from throwing on an invalid
@@ -945,9 +963,28 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const scaleBox = el('div', { class: 'setup-preview-scale-box' });
     previewScaleBox = scaleBox;
 
-    const template = ui.template.trim().length > 0 ? ui.template.trim() : null;
+    // Task 2.17 (operator feedback, PRD §8.8 AC 28) — `.trim()` used to
+    // apply to the STORED/rendered value too, not just this emptiness check,
+    // silently eating an operator's leading/trailing spaces (e.g. typing
+    // "Hello x " previewed flush as "Hello x") before applyPresentation()
+    // ever saw them. `ui.template.trim().length > 0` still decides whether
+    // an all-whitespace field counts as "no label" (-> null, same as
+    // before) — but the value actually painted is the RAW `ui.template`,
+    // spaces intact.
+    const template = ui.template.trim().length > 0 ? ui.template : null;
     applyPresentation(previewNodes, { style: buildStyle(), template, value: String(previewValue()) });
     updatePreviewTestids(ui.layout);
+
+    // Setup-preview-ONLY override (see this view's `previewNodes.contentRoot`
+    // `nowrap` comment, above) — re-asserted every render since
+    // applyPresentation() just set beforeEl/afterEl/behindEl's OWN
+    // `pre`/`pre-wrap` (shared module). `pre`: never wraps in the narrow
+    // dock (matching contentRoot's own nowrap), while still preserving every
+    // literal space Task 2.17 fixes — `nowrap` would collapse them right
+    // back.
+    previewNodes.beforeEl.style.whiteSpace = 'pre';
+    previewNodes.afterEl.style.whiteSpace = 'pre';
+    previewNodes.behindEl.style.whiteSpace = 'pre';
 
     scaleBox.appendChild(previewNodes.contentRoot);
     wrap.appendChild(scaleBox);
