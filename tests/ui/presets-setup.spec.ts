@@ -2614,6 +2614,137 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
+    // --- Fix wave 2 (coordinator re-review, Important): fix wave 1's
+    // whole-form dirty flag suppressed refresh() ENTIRELY the instant any
+    // field was dirty — including Mode/Interval, which need to stay synced
+    // to Live's own mode-toggle/Faster/Slower controls even while an
+    // unrelated field is mid-edit. Per-field `dirtyFields` fixes this: only
+    // the fields the operator actually touched are protected; everything
+    // else re-syncs on every clean tab activation. ------------------------
+
+    test('fix wave 2 repro: an unrelated field edit does not freeze Mode — a mode+start change made from Live survives an Update that only intends to apply the edit', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('Score: {count}'); // unrelated edit — 'template' goes dirty
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('mode-toggle').click(); // manual -> automatic, from Live
+        await page.getByTestId('auto-start').click(); // start counting
+        await expect(page.getByTestId('auto-pause')).toBeEnabled();
+
+        await page.getByTestId('tab-setup').click();
+        // Mode is CLEAN (never touched in this form) — it must re-sync to
+        // the live session's actual mode, even though `template` is dirty.
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+        await expect(page.getByTestId('setup-template')).toHaveValue('Score: {count}'); // unrelated edit preserved
+
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        // The automatic count must still be RUNNING — not force-reset to
+        // manual/idle by a stale `setMode('manual')` dispatch.
+        await expect(page.getByTestId('auto-rate')).toBeVisible();
+        const valueRightAfterUpdate = Number(await page.getByTestId('current-value').textContent());
+        await page.waitForTimeout(1500);
+        const valueAfterWait = Number(await page.getByTestId('current-value').textContent());
+        expect(valueAfterWait).toBeGreaterThan(valueRightAfterUpdate); // still ticking
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Faster from Live, then an unrelated Update: the faster interval survives (an untouched interval is never reverted)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-interval')).toHaveValue('1');
+        await page.getByTestId('setup-template').fill('Lap {count}'); // unrelated edit — form goes dirty
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('auto-start').click();
+        await page.getByTestId('auto-faster').click(); // 1 -> 0.75
+
+        await page.getByTestId('tab-setup').click();
+        // Interval is CLEAN — it must re-sync to the faster value.
+        await expect(page.getByTestId('setup-interval')).toHaveValue('0.75');
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 0.75s');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('an untouched Mode field re-syncs to the live session on tab activation', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('manual'); // prefilled, untouched
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('mode-toggle').click(); // manual -> automatic, from Live
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic'); // re-synced
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 2 (minor): canUpdate() previously never checked
+    // `intervalSeconds ∈ SPEED_LEVELS` at all — reachable in practice only
+    // via a session recovered with an off-menu interval (never through this
+    // form's own <select>, which only ever offers SPEED_LEVELS values).
+    test('a recovered session with an off-menu interval disables Update session', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.evaluate(() => {
+          const now = new Date().toISOString();
+          const session = {
+            schemaVersion: 1,
+            revision: 0,
+            presetId: null,
+            startValue: 0,
+            finishValue: 50,
+            currentValue: 0,
+            direction: 'up',
+            mode: 'automatic',
+            status: 'idle',
+            intervalSeconds: 1.3, // off-menu: not one of SPEED_LEVELS
+            overlayVisible: true,
+            hiddenByCompletion: false,
+            undoStack: [],
+            completion: { kind: 'hold' },
+            updatedAt: now,
+          };
+          window.localStorage.setItem('lc.session.v1', JSON.stringify(session));
+        });
+        await openDock(page, { port: mock.port, devhook: false }); // reload: recovers it
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('current-value')).toHaveText('0'); // sanity: the session really did recover
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+      } finally {
+        await mock.close();
+      }
+    });
+
     // --- Fix wave 1 (coordinator review, Important 3): `ui.mode` is
     // prefilled and editable but was previously silently ignored by Update
     // (reconfigure has no mode field). Update now dispatches `setMode` first
@@ -2660,10 +2791,15 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('auto-rate')).toHaveCount(0); // manual: no automatic cluster at all
 
         // The timer must have actually stopped, not just the UI hiding the
-        // cluster — wait long enough that a still-running 1s timer would
-        // have ticked at least once, and confirm the value never moved.
-        await page.waitForTimeout(1500);
-        await expect(page.getByTestId('current-value')).toHaveText('0');
+        // cluster. Fix wave 2 (minor, timing-fragility): capture the value
+        // immediately after Update rather than asserting a hardcoded '0' —
+        // a tick could plausibly have already landed during the preceding
+        // actions (this test failed once on a cold run for exactly that
+        // reason), and the actual claim under test is "no MORE ticks fire",
+        // not "it happens to still read its start value".
+        const valueAfterUpdate = await page.getByTestId('current-value').textContent();
+        await page.waitForTimeout(1500); // long enough for a still-running 1s timer to have ticked at least once
+        await expect(page.getByTestId('current-value')).toHaveText(valueAfterUpdate ?? '0');
       } finally {
         await mock.close();
       }

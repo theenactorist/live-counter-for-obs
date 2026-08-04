@@ -47,7 +47,7 @@
 // `textContent`/`.value`, never `innerHTML`.
 import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout, Session } from '../../engine/types.js';
 import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION } from '../../engine/types.js';
-import type { SessionConfig } from '../../engine/counter.js';
+import { applyCommand, type SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
@@ -192,16 +192,34 @@ interface SetupUiState {
   // next Update session click, so the operator sees it whether they check
   // right away or after a moment on Live.
   reconfigureWarning: string | null;
-  // Fix wave 1 (Important 2) — set by ANY field's own input/change handler
-  // (the operator has unsaved edits in progress) and cleared by prefill
-  // (`prefillFromSession`), Save, Start, and Update — the four points where
-  // the form's state is either freshly derived from something authoritative
-  // or has just been successfully applied. `refresh()` (tab-activation)
-  // consults this alongside `ui.editing` before re-deriving from the active
-  // session: without it, switching to Live and back mid-edit (with no
-  // preset being edited) silently threw away whatever the operator had just
-  // typed.
-  dirty: boolean;
+  // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
+  // tracking, replacing fix wave 1's single whole-form boolean. Each control
+  // adds its own canonical field name (matching the `SetupUiState` property
+  // it writes — 'startValue', 'mode', 'intervalSeconds', etc.) when the
+  // operator changes it. `refresh()` (tab-activation) re-prefills every field
+  // NOT in this set from the live session and leaves fields that ARE in it
+  // untouched — so an unrelated edit elsewhere in the form no longer freezes
+  // Mode/Interval at whatever they showed when the operator last looked,
+  // which was fix wave 1's own bug: editing any field, then switching mode
+  // to Automatic and starting counting from LIVE, then returning to Setup
+  // (refresh suppressed wholesale because *something* was dirty) showed
+  // Mode still reading "Manual" with no cue — clicking Update to apply the
+  // unrelated edit silently dispatched `setMode('manual')` first, killing a
+  // running automatic count on air. The `reconfigure` payload itself is
+  // built the same way, field by field (`reconfigureCommandFor`, below):
+  // the operator's own value for a dirty field, the LIVE session's current
+  // value for a clean one — so an untouched Interval field can never revert
+  // a Faster/Slower made from Live.
+  //
+  // Cleared (fully — `.clear()`) on a successful Save, Start, Update, and
+  // `loadPreset()` — the points where the form's state has just become
+  // authoritative again. Deliberately NOT cleared inside `prefillFromSession`
+  // itself: that function is called from `refresh()`, whose whole point is
+  // to leave dirty fields (value AND marker) untouched across an arbitrary
+  // number of tab round-trips until the operator explicitly commits or
+  // discards them — clearing markers there would silently revert an edit on
+  // the SECOND round-trip even though nothing was ever applied.
+  dirtyFields: Set<string>;
 }
 
 interface FocusSnapshot {
@@ -297,7 +315,7 @@ function defaultUiState(): SetupUiState {
     conflict: null,
     error: null,
     reconfigureWarning: null,
-    dirty: false,
+    dirtyFields: new Set(),
   };
 }
 
@@ -559,14 +577,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return rangeValid() && completionValid() && styleValid();
   }
 
-  // Task 2.18 — gated identically to canStart() (the reconfigure command
-  // validates the exact same range/completion rules createSession does, and
-  // Update also applies presentation via buildStyle()) PLUS an active
-  // session actually existing to reconfigure.
-  function canUpdate(): boolean {
-    return opts.controller.getState().session !== null && rangeValid() && completionValid() && styleValid();
-  }
-
   // Task 2.18 — copies the reconfigure-relevant fields of an ACTIVE session
   // into the form: startValue/finishValue/intervalSeconds/completion, plus
   // `mode` (not itself part of the `reconfigure` command — it has no mode
@@ -576,27 +586,81 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // those (they live only on Preset, or as controller-instance-only state
   // with no public getter), so "prefill from it" is scoped to what the
   // session actually owns.
+  //
+  // Fix wave 2 (Important) — each field is now skipped individually when it
+  // is in `ui.dirtyFields`, instead of the whole function being skipped (or
+  // not) as one unit. This is what lets Mode/Interval stay in sync with the
+  // live session (re-synced on every clean tab-activation) while a
+  // completely unrelated edit elsewhere in the form survives the same
+  // round-trip untouched.
   function prefillFromSession(session: Session): void {
-    ui.startValue = String(session.startValue);
-    ui.finishValue = String(session.finishValue);
-    ui.mode = session.mode;
-    ui.intervalSeconds = session.intervalSeconds;
-    ui.completionKind = session.completion.kind;
-    ui.completionSeconds = session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
-    // Fix wave 1 (Important 2) — a fresh prefill is, by definition, not an
-    // unsaved edit; `refresh()`'s own `!ui.dirty` guard (below) means this is
-    // already false whenever this runs from THAT call site, but clearing it
-    // here too keeps this function correct standalone (e.g. the mount-time
-    // call site above, which has no dirty guard of its own).
-    ui.dirty = false;
+    if (!ui.dirtyFields.has('startValue')) ui.startValue = String(session.startValue);
+    if (!ui.dirtyFields.has('finishValue')) ui.finishValue = String(session.finishValue);
+    if (!ui.dirtyFields.has('mode')) ui.mode = session.mode;
+    if (!ui.dirtyFields.has('intervalSeconds')) ui.intervalSeconds = session.intervalSeconds;
+    if (!ui.dirtyFields.has('completionKind')) ui.completionKind = session.completion.kind;
+    if (!ui.dirtyFields.has('completionSeconds')) {
+      ui.completionSeconds = session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
+    }
   }
 
-  // Fix wave 1 (Important 2) — every field's own input/change handler below
-  // calls this instead of `render()` directly, marking the form dirty BEFORE
-  // repainting so `refresh()`'s guard sees it the instant a tab-activation
-  // race could otherwise ask "is there an unsaved edit right now?"
-  function markDirty(): void {
-    ui.dirty = true;
+  // Fix wave 1 (Important 2), field-scoped in fix wave 2 — every field's own
+  // input/change handler below calls this (with ITS OWN canonical field
+  // name, matching the `SetupUiState` property it writes) instead of
+  // `render()` directly, marking that one field dirty before repainting.
+  function markDirty(field: string): void {
+    ui.dirtyFields.add(field);
+  }
+
+  // Fix wave 2 (Important + minor) — resolves what `reconfigure` should
+  // actually be dispatched with: the OPERATOR's own value for each field the
+  // operator actually touched (`ui.dirtyFields`), and the LIVE session's
+  // CURRENT value for every field they didn't — never this form's possibly-
+  // stale displayed value for an untouched field (which used to blindly
+  // dispatch whatever `ui.*` happened to show, silently reverting a
+  // Faster/Slower or mode change made from Live in the meantime). Returns
+  // `null` only when a DIRTY numeric field fails to parse — `canUpdate()`
+  // below pre-validates the result through the engine's own `applyCommand`
+  // (not a hand-rolled duplicate of its rules) before this is ever actually
+  // dispatched, so a rejection is never silently partial.
+  function reconfigureCommandFor(
+    session: Session,
+  ): { type: 'reconfigure'; startValue: number; finishValue: number; intervalSeconds: number; completion: CompletionConfig; nonce: string } | null {
+    const startValue = ui.dirtyFields.has('startValue') ? parseIntStrict(ui.startValue) : session.startValue;
+    const finishValue = ui.dirtyFields.has('finishValue') ? parseIntStrict(ui.finishValue) : session.finishValue;
+    if (startValue === null || finishValue === null) return null;
+    const intervalSeconds = ui.dirtyFields.has('intervalSeconds') ? ui.intervalSeconds : session.intervalSeconds;
+    const completionKind = ui.dirtyFields.has('completionKind') ? ui.completionKind : session.completion.kind;
+    const completionSecondsValue = ui.dirtyFields.has('completionSeconds')
+      ? ui.completionSeconds
+      : (session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS);
+    const completion: CompletionConfig =
+      completionKind === 'holdThenHide' ? { kind: 'holdThenHide', seconds: completionSecondsValue } : { kind: completionKind };
+    return { type: 'reconfigure', startValue, finishValue, intervalSeconds, completion, nonce: '' };
+  }
+
+  // Fix wave 2 — same per-field resolution as `reconfigureCommandFor`, for
+  // the one field `reconfigure` itself has no room for.
+  function resolvedModeFor(session: Session): Mode {
+    return ui.dirtyFields.has('mode') ? ui.mode : session.mode;
+  }
+
+  // Task 2.18, hardened in fix wave 2 (minor) — an active session to
+  // reconfigure, PLUS the resolved payload (per-field dirty-aware, above)
+  // actually passing the engine's own validation. Calling `applyCommand`
+  // directly (pure — no side effects: no persistence, no broadcast, no nonce
+  // consumed) is what closes the gap a hand-duplicated rule set left open —
+  // it previously never checked `intervalSeconds ∈ SPEED_LEVELS` at all, so
+  // a session recovered with an off-menu interval could reach a REAL
+  // dispatch that the engine then rejected, after a `setMode` had already
+  // been applied (see `onUpdateSession`'s doc comment for why dispatch order
+  // alone isn't enough without this).
+  function canUpdate(): boolean {
+    const session = opts.controller.getState().session;
+    if (session === null || !styleValid()) return false;
+    const cmd = reconfigureCommandFor(session);
+    if (!cmd) return false;
+    return applyCommand(session, cmd, Date.now()).accepted;
   }
 
   function previewValue(): number {
@@ -695,11 +759,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
     }
     ui.conflict = null;
-    // Fix wave 1 (Important 2) — a successful Save is one of the four
-    // dirty-clearing points (prefill/Save/Start/Update): the form's current
-    // contents are now the authoritative, persisted preset, not an unsaved
-    // edit `refresh()` needs to protect from a tab-activation prefill.
-    ui.dirty = false;
+    // Fix wave 1 (Important 2) — a successful Save is one of the
+    // dirty-clearing points: the form's current contents are now the
+    // authoritative, persisted preset, not an unsaved edit `refresh()` needs
+    // to protect from a tab-activation prefill.
+    ui.dirtyFields.clear();
     render();
   }
 
@@ -738,10 +802,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       render();
       return;
     }
-    // Fix wave 1 (Important 2) — Start is one of the four dirty-clearing
-    // points: a freshly-started session's form is authoritative again, not
-    // an unsaved edit.
-    ui.dirty = false;
+    // Fix wave 1 (Important 2) — Start is one of the dirty-clearing points:
+    // a freshly-started session's form is authoritative again, not an
+    // unsaved edit.
+    ui.dirtyFields.clear();
     opts.onSessionStarted();
   }
 
@@ -755,18 +819,43 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // Fix wave 1 (Important 3): `reconfigure` itself has no `mode` field
   // (switching manual/automatic mid-session was always `setMode`'s job), but
   // `ui.mode` IS prefilled from, and editable alongside, the reconfigure
-  // fields — so a mode change here was previously silently dropped. When
-  // `ui.mode` differs from the session's current mode, `setMode` is
-  // dispatched FIRST, so `reconfigure`'s own exit-complete mapping (manual ->
-  // idle / automatic -> paused) evaluates against the FINAL mode, not the one
-  // the session happened to be in before this click. `setMode` never rejects
-  // (see counter.ts), so there is no failure path to handle for it.
+  // fields — so a mode change here was previously silently dropped.
   //
-  // Fix wave 1 (Important, minor fold-in): `reconfigure` dispatches BEFORE
-  // `adoptPresentation` now (previously the other way around) — a rejected
-  // reconfigure (should be unreachable given `canUpdate()`'s gates, but
-  // defense in depth) now leaves NOTHING applied, rather than a stray
-  // presentation change with no matching range update.
+  // Fix wave 2 (Important) — fix wave 1 dispatched `setMode` whenever
+  // `ui.mode` differed from the session's, which reintroduced the exact
+  // problem per-field tracking exists to prevent: if an UNRELATED field was
+  // dirty (so `refresh()` correctly left the WHOLE form untouched, Mode
+  // included) while the session's mode/interval had changed from Live in
+  // the meantime, `ui.mode` could be stale — clicking Update to apply the
+  // unrelated edit would then silently dispatch `setMode` back to whatever
+  // stale value the form still showed, killing a running automatic count.
+  // `resolvedModeFor`/`reconfigureCommandFor` (above) resolve EVERY field
+  // — mode included — the operator's value when THAT field is dirty, the
+  // live session's current value otherwise; only a genuinely dirty, genuinely
+  // different mode dispatches `setMode`, and it does so FIRST so
+  // `reconfigure`'s own exit-complete mapping (manual -> idle / automatic ->
+  // paused) evaluates against the FINAL mode. `setMode` never rejects (see
+  // counter.ts), so there is no failure path to handle for it.
+  //
+  // Fix wave 1 (minor fold-in) — `reconfigure` dispatches BEFORE
+  // `adoptPresentation`, so a rejection leaves the PRESENTATION side
+  // untouched (no stray style/template change with no matching range
+  // update). Fix wave 2 correction: that comment previously overstated the
+  // claim to "nothing applied" — a `setMode` dispatched first (when `mode`
+  // is dirty and different) would NOT have been undone by a subsequent
+  // `reconfigure` rejection, since `setMode` never fails and is a genuinely
+  // separate, already-committed dispatch by the time `reconfigure` even
+  // runs. Fix wave 2 (minor) actually closes that gap instead of just
+  // documenting it: `canUpdate()` now pre-validates the EXACT reconfigure
+  // payload through the engine's own `applyCommand` (including
+  // `intervalSeconds ∈ SPEED_LEVELS`, which the old hand-rolled gate never
+  // checked at all — reachable from e.g. a session recovered with an
+  // off-menu interval) BEFORE the button is even clickable. So in current
+  // behavior, reaching a rejection here — with or without a `setMode`
+  // already dispatched — should be unreachable through this UI; the
+  // `!result.accepted` branch below is defense in depth only, matching
+  // `onStartSession()`'s own try/catch above, not a claim that the ordering
+  // alone makes rejection consequence-free.
   function onUpdateSession(): void {
     if (!canUpdate()) return;
     const activeSession = opts.controller.getState().session;
@@ -780,26 +869,27 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     const previousValue = activeSession.currentValue;
 
-    if (ui.mode !== activeSession.mode) {
-      opts.controller.dispatch({ type: 'setMode', mode: ui.mode, nonce: generateNonce() });
+    // `activeSession` is read once, before either dispatch below, and reused
+    // for BOTH the mode resolution and the reconfigure payload — safe
+    // because `setMode` never touches startValue/finishValue/intervalSeconds/
+    // completion, so a stale reference for those specific fields is a
+    // non-issue even though `setMode` itself may run first.
+    const mode = resolvedModeFor(activeSession);
+    if (mode !== activeSession.mode) {
+      opts.controller.dispatch({ type: 'setMode', mode, nonce: generateNonce() });
     }
 
-    const startValue = parseIntStrict(ui.startValue)!;
-    const finishValue = parseIntStrict(ui.finishValue)!;
-    const completion = buildCompletion();
-    const result = opts.controller.dispatch({
-      type: 'reconfigure',
-      startValue,
-      finishValue,
-      intervalSeconds: ui.intervalSeconds,
-      completion,
-      nonce: generateNonce(),
-    });
+    const cmd = reconfigureCommandFor(activeSession);
+    if (!cmd) {
+      // canUpdate() already validated this exact payload; unreachable in
+      // practice — defense in depth only.
+      ui.error = 'Could not update the session: the configuration is invalid.';
+      render();
+      return;
+    }
+    const result = opts.controller.dispatch({ ...cmd, nonce: generateNonce() });
 
     if (!result.accepted) {
-      // canUpdate()'s gates mirror reconfigure's own validation exactly, so
-      // this should be unreachable in practice — defense in depth only, same
-      // spirit as onStartSession()'s try/catch above.
       ui.error = 'Could not update the session: the configuration is invalid.';
       render();
       return;
@@ -818,10 +908,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         `Current value ${previousValue} was outside the new range and was clamped to ${result.session.currentValue}.`;
     }
 
-    // Fix wave 1 (Important 2) — Update is one of the four dirty-clearing
-    // points: the form now matches the just-applied session, not an unsaved
-    // edit.
-    ui.dirty = false;
+    // Fix wave 1 (Important 2) — Update is one of the dirty-clearing points:
+    // the form now matches the just-applied session, not an unsaved edit.
+    ui.dirtyFields.clear();
     render();
     opts.onSessionStarted();
   }
@@ -860,10 +949,16 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
   }
 
+  // `field` (fix wave 2) is the canonical `SetupUiState` property this
+  // control writes — e.g. 'startValue', 'template' — used as the
+  // `ui.dirtyFields` key. It is a separate parameter from `testid`
+  // deliberately: several DOM testids (e.g. the per-layout gallery buttons)
+  // don't correspond 1:1 with a single ui-state property.
   function inputField(
     testid: string,
     value: string,
     onChange: (v: string) => void,
+    field: string,
     type: 'text' | 'number' = 'text',
     extraAttrs: Record<string, string> = {},
   ): HTMLInputElement {
@@ -871,18 +966,18 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     input.value = value;
     input.addEventListener('input', () => {
       onChange(input.value);
-      markDirty();
+      markDirty(field);
       render();
     });
     return input;
   }
 
-  function colorField(testid: string, value: string, onChange: (v: string) => void): HTMLInputElement {
+  function colorField(testid: string, value: string, onChange: (v: string) => void, field: string): HTMLInputElement {
     const input = el('input', { 'data-testid': testid, type: 'color' }) as HTMLInputElement;
     input.value = value;
     input.addEventListener('input', () => {
       onChange(input.value);
-      markDirty();
+      markDirty(field);
       render();
     });
     return input;
@@ -904,7 +999,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.mode = select.value as Mode;
-      markDirty();
+      markDirty('mode');
       render();
     });
     return select;
@@ -919,7 +1014,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.intervalSeconds = Number(select.value);
-      markDirty();
+      markDirty('intervalSeconds');
       render();
     });
     return select;
@@ -934,7 +1029,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.fontFamily = select.value;
-      markDirty();
+      markDirty('fontFamily');
       render();
     });
     return select;
@@ -949,7 +1044,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.animType = select.value as AnimationConfig['type'];
-      markDirty();
+      markDirty('animType');
       render();
     });
     return select;
@@ -964,7 +1059,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.animTarget = select.value as AnimationConfig['target'];
-      markDirty();
+      markDirty('animTarget');
       render();
     });
     return select;
@@ -982,7 +1077,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     range.value = String(ui.animDurationMs);
     range.addEventListener('input', () => {
       ui.animDurationMs = Number(range.value);
-      markDirty();
+      markDirty('animDurationMs');
       render();
     });
     wrap.appendChild(range);
@@ -1004,7 +1099,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.completionKind = select.value as CompletionConfig['kind'];
-      markDirty();
+      markDirty('completionKind');
       render();
     });
     return select;
@@ -1070,7 +1165,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       btn.appendChild(el('span', { class: 'layout-thumb-caption' }, LAYOUT_LABELS[layout]));
       btn.addEventListener('click', () => {
         ui.layout = layout;
-        markDirty();
+        markDirty('layout');
         render();
       });
       gallery.appendChild(btn);
@@ -1252,6 +1347,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         (v) => {
           ui.startValue = v;
         },
+        'startValue',
         'number',
         { min: '0', max: '999999', step: '1' },
       ),
@@ -1264,6 +1360,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
         (v) => {
           ui.finishValue = v;
         },
+        'finishValue',
         'number',
         { min: '0', max: '999999', step: '1' },
       ),
@@ -1282,9 +1379,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const labelChildren: HTMLElement[] = [
       formRow(
         'Label text',
-        inputField('setup-template', ui.template, (v) => {
-          ui.template = v;
-        }),
+        inputField(
+          'setup-template',
+          ui.template,
+          (v) => {
+            ui.template = v;
+          },
+          'template',
+        ),
       ),
     ];
     // Fix-wave contract correction: no layout blocks Save/Start for a
@@ -1319,6 +1421,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           (v) => {
             ui.textSizePx = v;
           },
+          'textSizePx',
           'number',
           { min: String(MIN_SIZE_PX), max: String(MAX_SIZE_PX), step: '1' },
         ),
@@ -1336,9 +1439,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     labelChildren.push(
       formRow(
         'Label color',
-        colorField('setup-text-color', ui.textColor, (v) => {
-          ui.textColor = v;
-        }),
+        colorField(
+          'setup-text-color',
+          ui.textColor,
+          (v) => {
+            ui.textColor = v;
+          },
+          'textColor',
+        ),
       ),
     );
     root.appendChild(group('setup-group-label', 'Label', labelChildren));
@@ -1354,6 +1462,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           (v) => {
             ui.numberSizePx = v;
           },
+          'numberSizePx',
           'number',
           { min: String(MIN_SIZE_PX), max: String(MAX_SIZE_PX), step: '1' },
         ),
@@ -1371,9 +1480,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     counterStyleChildren.push(
       formRow(
         'Counter color',
-        colorField('setup-number-color', ui.numberColor, (v) => {
-          ui.numberColor = v;
-        }),
+        colorField(
+          'setup-number-color',
+          ui.numberColor,
+          (v) => {
+            ui.numberColor = v;
+          },
+          'numberColor',
+        ),
       ),
     );
     counterStyleChildren.push(formRow('Typeface', renderFontSelect()));
@@ -1402,6 +1516,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
               const n = Number(v);
               if (Number.isFinite(n)) ui.completionSeconds = n;
             },
+            'completionSeconds',
             'number',
           ),
         ),
@@ -1417,9 +1532,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     root.appendChild(
       formRow(
         'Title',
-        inputField('setup-title', ui.title, (v) => {
-          ui.title = v;
-        }),
+        inputField(
+          'setup-title',
+          ui.title,
+          (v) => {
+            ui.title = v;
+          },
+          'title',
+        ),
       ),
     );
 
@@ -1492,9 +1612,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // spirit as prefill/Save/Start/Update — not an unsaved edit in
       // progress. (The separate `ui.editing !== null` check in `refresh()`
       // below already protects this load from a session-prefill regardless
-      // of `dirty`, but clearing it here too avoids a stale `dirty: true`
+      // of dirty state, but clearing it here too avoids stale dirty markers
       // lingering after a deliberate load.)
-      ui.dirty = false;
+      ui.dirtyFields.clear();
       render();
     },
     // Task 2.18 — called by main.ts whenever the Setup tab is (re)activated.
@@ -1505,13 +1625,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // from THAT preset, and main.ts calls it immediately before activating
     // this tab (see `onLoadPreset` in main.ts), so re-deriving from the
     // session here would silently clobber the freshly-loaded preset the
-    // instant the tab switch's onActivate callback ran. Fix wave 1
-    // (Important 2): ALSO skipped while `ui.dirty` — an unsaved edit
-    // anywhere in the form (not just a preset load) must survive a round
-    // trip to another tab and back, same reasoning, different cause.
+    // instant the tab switch's onActivate callback ran.
+    //
+    // Fix wave 2 (Important) — no outer "is anything dirty" gate anymore:
+    // `prefillFromSession()` itself now skips only the INDIVIDUAL fields in
+    // `ui.dirtyFields`, so this always runs (while not editing a preset) and
+    // correctly re-syncs every clean field — Mode and Interval included —
+    // to the live session, even when some UNRELATED field is dirty. Fix
+    // wave 1's own whole-form boolean gate here was the direct cause of the
+    // Important bug that fix wave 2 corrects: it suppressed EVERY field's
+    // refresh, including Mode, the instant anything else was dirty.
     refresh(): void {
       if (destroyed) return;
-      if (ui.editing === null && !ui.dirty) {
+      if (ui.editing === null) {
         const session = opts.controller.getState().session;
         if (session) prefillFromSession(session);
       }
