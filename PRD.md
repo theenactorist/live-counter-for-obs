@@ -201,7 +201,7 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 - Types: None, Scale/Pop, Fade, Slide Up, Flip — applied to number, text, or both; duration 100–2000 ms.
 - **Interrupt semantics:** an accepted count change cancels any in-flight transition and starts one new transition from the current visual state toward the latest authoritative value. At most one transition is ever in flight; the final rendered value always equals the authoritative value. When the automatic interval is shorter than the configured duration, the dock shows a one-line hint and behaviour follows the interrupt rule.
 - Animations are restricted to compositor-friendly properties (`transform`, `opacity`) — no animated layout, shadows, or filters — so the overlay cannot degrade OBS rendering.
-- **Test animation** exists only in the Setup view's embedded preview and never touches the live overlay.
+- **Test animation** exists only in the Setup view's embedded preview and never touches the live overlay. It must animate **exactly what a real count change would animate** for the chosen target and layout — number only, label only (the ghost when the layout is Counter in front), or both — using the same target-selection logic as the overlay renderer, so the rehearsal cannot mislead the operator about what the stream will do.
 
 ### 8.11 Overlay visibility and live safety
 

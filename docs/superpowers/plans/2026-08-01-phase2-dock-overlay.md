@@ -308,9 +308,24 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat(dock): sticky tabs and captioned sticky preview; centre inline labels`
 
+### Task 2.16: Test animation must honour the animation target (operator feedback 2026-08-02 — PRD §8.10)
+
+**Driver:** with target **Number only**, clicking Test animation pops the label too. The overlay is correct; the Setup preview is not — it animates the whole preview element, a shortcut taken in Task 2.6 and explicitly deferred with "per-part targeting deferred to Task 2.7's overlay renderer". The renderer is now shared (Task 2.14), so the deferral is due.
+
+**Files:** Modify `src/shared/overlay-presentation.ts` (export the target-selection), `src/overlay/renderer.ts` (consume it), `src/dock/views/setup.ts` (Test animation uses it); tests in `tests/ui/presets-setup.spec.ts`, `tests/ui/overlay.spec.ts`.
+
+**Contract:**
+1. Extract the renderer's existing target-selection into the shared module — e.g. `animationTargets(nodes, layout, target): HTMLElement[]` returning: `number` → the counter node; `text` → the before/after label spans, or the ghost node when layout is `textBehind`; `both` → the content root. The overlay renderer must consume it and behave **identically** (its existing tests are the fence: extend only, never weaken).
+2. Setup's Test animation animates exactly those elements with the configured type and duration, cancelling any in-flight test animation first (at most one in flight, mirroring the overlay's interrupt rule). It still must not broadcast state or touch the controller.
+3. `numberOnly` layout with target `text` or `both`: there is no label, so animate the counter (or the content root for `both`) — never a zero-size node that would appear to do nothing.
+
+**Mandatory tests:** for each target (`number`, `text`, `both`) at a layout with a visible label, clicking Test animation produces a running animation on exactly the expected node(s) and **none on the others** (assert via `getAnimations()` per element — the current bug would fail the "none on the others" half); with layout `textBehind` and target `text`, the ghost animates and the empty inline spans do not; repeated rapid clicks leave at most one animation in flight per node; the isolation assertion (no `state` broadcast during a test animation) still holds; the overlay's own targeting tests still pass unchanged.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `fix(dock): test animation honours the animation target`
+
 ---
 
-## Phase gate checklist (after Task 2.15)
+## Phase gate checklist (after Task 2.16)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)
