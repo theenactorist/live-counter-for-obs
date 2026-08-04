@@ -535,6 +535,45 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // M-6 (review, cheap regression) — Task 2.19's document-level keyboard
+  // clipboard handler (clipboard-keys.ts) and this view's own '+'/'-' guard
+  // both listen on `document`, and both must keep working with the Live pane
+  // actually the VISIBLE one (unlike the "+guard intact" coverage added
+  // alongside the keyboard-clipboard feature itself, which exercises this
+  // from the Setup tab): a bare '+' inside jump-input still must not
+  // increment, and Cmd/Ctrl+A on that SAME field must still select it.
+  test('the clipboard-keys keyboard handler and the Live "+"/"-" guard coexist correctly in jump-input', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      await page.getByTestId('btn-jump').click();
+      const jumpInput = page.getByTestId('jump-input');
+      await jumpInput.fill('7');
+
+      await page.keyboard.press('+');
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // guard intact
+      // The '+' keystroke itself is untouched by both handlers (no modifier
+      // held, so clipboard-keys.ts ignores it entirely, and Live's own
+      // guard only ever prevents the COUNTER's default action) — it lands
+      // in the field exactly like any other ordinary character would.
+      await expect(jumpInput).toHaveValue('7+');
+
+      const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+      await page.keyboard.press(`${mod}+a`);
+      const selection = await jumpInput.evaluate((el) => {
+        const input = el as HTMLInputElement;
+        return { start: input.selectionStart, end: input.selectionEnd };
+      });
+      expect(selection).toEqual({ start: 0, end: '7+'.length });
+    } finally {
+      await mock.close();
+    }
+  });
+
   // --- Fix round 1 (coordinator review) -----------------------------------
 
   test('ws goes down mid-session: counting continues offline, banner-ws appears, value survives a reload', async ({

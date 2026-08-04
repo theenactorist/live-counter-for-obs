@@ -47,11 +47,13 @@ import {
   onOverlayScanChange,
   refreshOverlayScan,
   runAddOverlay,
-  pasteIntoField,
-  CLIPBOARD_BLOCKED_TEXT,
   type AddOverlayResult,
   type OverlayIntent,
 } from '../diagnostics.js';
+// Task 2.19 fix wave (review, M-9) — imported directly from clipboard-keys.ts
+// (the single home for both), not indirected through diagnostics.ts's own
+// settings-paste-only usage of them.
+import { pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
 import { CONNECTION_GRACE_MS } from '../connection-grace.js';
 
 export interface LiveViewHandle {

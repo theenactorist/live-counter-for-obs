@@ -1316,8 +1316,10 @@ test.describe('Diagnostics view', () => {
   // Controller clarification: "Cut/copy on input[type=password]: allow paste
   // and select-all, but REFUSE copy/cut ... never put the password on the
   // clipboard from a keyboard shortcut". The explicit Copy buttons next to a
-  // URL remain the only sanctioned copy path.
-  test('Cmd/Ctrl+C and Cmd/Ctrl+X on settings-password never put the password on the clipboard, and Cmd/Ctrl+A still selects it', async ({
+  // URL remain the only sanctioned copy path. Fix wave (review, M-4): silence
+  // on the refused copy/cut used to read as broken (this task's own origin
+  // story) — a hint now names why nothing happened.
+  test('Cmd/Ctrl+C and Cmd/Ctrl+X on settings-password never put the password on the clipboard (and say why), and Cmd/Ctrl+A still selects it', async ({
     page,
     context,
   }) => {
@@ -1338,12 +1340,19 @@ test.describe('Diagnostics view', () => {
       await page.keyboard.press(`${CLIPBOARD_MOD}+c`);
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel-untouched');
       await expect(password).toHaveValue('super-secret');
+      await expect(page.getByTestId('clipboard-key-hint')).toBeVisible();
+      await expect(page.getByTestId('clipboard-key-hint')).toContainText('Copying the password is disabled');
 
       await page.keyboard.press(`${CLIPBOARD_MOD}+x`);
       expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('sentinel-untouched');
       // Cut is refused entirely on a password field — the value must survive too.
       await expect(password).toHaveValue('super-secret');
+      await expect(page.getByTestId('clipboard-key-hint')).toContainText('Copying the password is disabled');
 
+      // M-5: collapse the selection first — otherwise this assertion would
+      // pass even if Cmd/Ctrl+A did nothing at all, since the field was
+      // already selected end-to-end by the setSelectionRange() call above.
+      await password.evaluate((el) => (el as HTMLInputElement).setSelectionRange(3, 3));
       // Select-all is still allowed on a password field (only copy/cut are refused).
       await page.keyboard.press(`${CLIPBOARD_MOD}+a`);
       const selection = await password.evaluate((el) => {
@@ -1351,6 +1360,109 @@ test.describe('Diagnostics view', () => {
         return { start: input.selectionStart, end: input.selectionEnd };
       });
       expect(selection).toEqual({ start: 0, end: 'super-secret'.length });
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // I-1 (review): a denied async writeText on Cmd/Ctrl+C must not silently
+  // swallow the operator's manual recovery keystroke after the existing
+  // "select the text, copy it yourself" fallback (copyFallback/
+  // selectFallbackSource in diagnostics.ts) already ran — this handler's own
+  // legacy execCommand('copy') fallback is what keeps that recovery reachable
+  // once the async Clipboard API is denied for real.
+  test('after a denied Copy overlay URL, pressing Cmd/Ctrl+C on the now-selected field either copies via execCommand or shows the blocked hint — never silent nothing', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // clipboard-read is granted so the VERIFICATION read below is never
+      // itself the reason nothing is observed — only navigator.clipboard.
+      // writeText (patched below, simulating a genuinely denied write) is
+      // meant to fail here.
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await page.addInitScript(() => {
+        navigator.clipboard.writeText = () => Promise.reject(new Error('denied (test)'));
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      const overlayUrlValue = await page.getByTestId('diag-overlay-url').inputValue();
+
+      await page.getByTestId('diag-copy-overlay-url').click();
+      await expect(page.getByTestId('copy-fallback')).toBeVisible(); // existing recovery: field is now selected + focused
+
+      await page.keyboard.press(`${CLIPBOARD_MOD}+c`);
+
+      // Reading back is how we observe whether execCommand('copy') actually
+      // landed the URL on the real OS clipboard a moment ago (writeText
+      // itself stays patched to reject throughout).
+      const clip = await page.evaluate(() => navigator.clipboard.readText().catch(() => null));
+      const hintVisible = await page.getByTestId('clipboard-key-hint').isVisible().catch(() => false);
+
+      // Assert SOMETHING observable happened — never both absent, which
+      // would mean the operator's manual recovery keystroke vanished with
+      // no feedback at all (the exact regression this finding guards
+      // against).
+      expect(clip === overlayUrlValue || hintVisible).toBe(true);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // I-2: a mutating combo (paste) must never touch a readonly field, even
+  // though the SAME field is a fully legitimate target for Copy (C) and
+  // Select-all (A) — see the settings-password test above for those two.
+  test('Cmd/Ctrl+V onto the readonly overlay-URL field leaves it unchanged', async ({ page, context }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      const before = await page.getByTestId('diag-overlay-url').inputValue();
+      await page.evaluate(() => navigator.clipboard.writeText('should-never-land-here'));
+      await page.getByTestId('diag-overlay-url').click();
+      await page.keyboard.press(`${CLIPBOARD_MOD}+v`);
+
+      await expect(page.getByTestId('diag-overlay-url')).toHaveValue(before);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // M-6/M-7 (review, cheap regression tests).
+
+  // M-7: a settings-save reconnect tears down and remounts every view via
+  // main.ts's boot() — installClipboardKeyboardHandler() must NOT be called
+  // again from inside that path, or a single physical keypress would be
+  // handled twice (e.g. a pasted value landing in the field twice over).
+  test('a settings-save reconnect does not double-install the keyboard handler (one paste inserts the text exactly once)', async ({
+    page,
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      // Trigger main.ts's boot() reconnect path (same one settings-save
+      // always uses) — this is the moment a second installClipboardKeyboard
+      // Handler() call, if one existed, would register a duplicate listener.
+      await page.getByTestId('settings-port').fill(String(mock.port));
+      await page.getByTestId('settings-save').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      await page.evaluate(() => navigator.clipboard.writeText('once-only'));
+      await page.getByTestId('settings-password').click();
+      await page.keyboard.press(`${CLIPBOARD_MOD}+v`);
+
+      // A doubled listener would paste this twice ("once-onlyonce-only");
+      // exactly one copy landing is what proves the handler is still a
+      // singleton after the reconnect.
+      await expect(page.getByTestId('settings-password')).toHaveValue('once-only');
     } finally {
       await mock.close();
     }

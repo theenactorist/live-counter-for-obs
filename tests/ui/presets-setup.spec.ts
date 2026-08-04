@@ -4072,7 +4072,10 @@ test.describe('dock Setup + Presets views', () => {
     // own isMacPlatform() relies on.
     const MOD = process.platform === 'darwin' ? 'Meta' : 'Control';
 
-    test('Cmd/Ctrl+V pastes into the Label field at the caret (mid-string insertion)', async ({ page, context }) => {
+    test('Cmd/Ctrl+V pastes into the Label field at the caret (mid-string insertion), and the caret survives the app\'s own re-render (I-3)', async ({
+      page,
+      context,
+    }) => {
       const mock = await startMockObs();
       try {
         await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -4087,6 +4090,14 @@ test.describe('dock Setup + Presets views', () => {
         await page.keyboard.press(`${MOD}+v`);
 
         await expect(label).toHaveValue('A-middle-Z');
+
+        // I-3 (review): setup.ts's own 'input' listener fully rebuilds this
+        // view's mounted subtree on every keystroke (captureFocus/
+        // restoreFocus around it) — a wrong caret position here would show
+        // up as the very next keystroke landing at the END of the value
+        // instead of right after what was just pasted.
+        await page.keyboard.type('Q');
+        await expect(label).toHaveValue('A-middle-QZ');
       } finally {
         await mock.close();
       }
@@ -4155,6 +4166,115 @@ test.describe('dock Setup + Presets views', () => {
         // state every other input path drives) reflects the cut, not the
         // pre-cut text.
         await expect(page.getByTestId('setup-preview-label')).toHaveText('World');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // M-3 (review) — deliberate divergence from a traditional text editor's
+    // Cut, which does nothing without an explicit selection: here, "no
+    // selection" resolves to "the whole value" for BOTH copy and cut (see
+    // clipboard-keys.ts's handleCopy doc comment), so cutting with nothing
+    // selected clears the field entirely rather than being a silent no-op.
+    test('Cmd/Ctrl+X with nothing explicitly selected clears the whole Label field (deliberate — M-3)', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('Whole Field');
+        // No setSelectionRange call — a plain caret, no explicit selection.
+        await page.keyboard.press(`${MOD}+x`);
+
+        await expect(label).toHaveValue('');
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('Whole Field');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // I-4 (review) — number-field paste: incidental whitespace is trimmed
+    // before giving up (never anything else, like a comma, silently
+    // stripped), and a genuinely rejected paste restores the prior value
+    // instead of leaving whatever the browser's own sanitization coerced it
+    // to.
+    test('Cmd/Ctrl+V into the Start field (a number input) trims incidental whitespace before pasting', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const start = page.getByTestId('setup-start');
+        await start.fill('0');
+        await start.click();
+        await page.evaluate(() => navigator.clipboard.writeText('12 '));
+        await page.keyboard.press(`${MOD}+v`);
+        await expect(start).toHaveValue('12');
+
+        await start.fill('0');
+        await start.click();
+        await page.evaluate(() => navigator.clipboard.writeText('5\n'));
+        await page.keyboard.press(`${MOD}+v`);
+        await expect(start).toHaveValue('5');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a rejected number paste (non-numeric clipboard content) restores the prior value and shows an accurate hint near the field', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const start = page.getByTestId('setup-start');
+        await start.fill('7');
+        await start.click();
+        await page.evaluate(() => navigator.clipboard.writeText('abc'));
+        await page.keyboard.press(`${MOD}+v`);
+
+        // I-4: the prior value survives — the browser's own sanitization
+        // would otherwise have silently left it cleared.
+        await expect(start).toHaveValue('7');
+        await expect(page.getByTestId('clipboard-key-hint')).toBeVisible();
+        // The ACCURATE message ("can't paste that here"), never the generic
+        // clipboard-denial one — this was never a clipboard-read failure.
+        await expect(page.getByTestId('clipboard-key-hint')).toContainText("Can't paste that into a number field");
+        await expect(page.getByTestId('clipboard-key-hint')).not.toContainText('Clipboard blocked');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // I-5 (review) — setSelectionRange() throws on a number input;
+    // .select() is what Cmd/Ctrl+A uses there instead, and the practical
+    // test is that a keystroke right afterward replaces the whole value.
+    test('Cmd/Ctrl+A in the Start field (a number input) selects the whole value so typing replaces it', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const start = page.getByTestId('setup-start');
+        await start.fill('999');
+        await start.click();
+        await page.keyboard.press(`${MOD}+a`);
+        await page.keyboard.type('4');
+
+        await expect(start).toHaveValue('4');
       } finally {
         await mock.close();
       }

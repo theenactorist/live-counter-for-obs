@@ -25,12 +25,11 @@ import { VERSION } from '../shared/version.js';
 // Task 2.19 — CLIPBOARD_BLOCKED_TEXT and pasteIntoField now live in
 // clipboard-keys.ts (the single home shared with the new keyboard-clipboard
 // handler and presets.ts's import-paste, replacing what used to be two
-// independent copies of the same string). Re-exported below so every
-// existing import site (live.ts, this file's own settings-paste, and
-// tests/ui/diagnostics.spec.ts if it ever reaches for either by name)
-// keeps working unchanged.
+// independent copies of the same string). Fix wave (review, M-9): this
+// file's own re-export of both names is gone — live.ts (the only other
+// consumer) now imports directly from clipboard-keys.ts instead of
+// indirecting through this module's settings-paste-only usage of them.
 import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
-export { CLIPBOARD_BLOCKED_TEXT, pasteIntoField };
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
