@@ -196,13 +196,20 @@ function mulberry32(seed: number): () => number {
 // commands (session teardown / dock-owned completion hide) rather than part
 // of the count-changing core loop this replay oracle exercises, so including
 // them would churn the deterministic sequence without adding coverage here.
-// `reconfigure` (Task 2.18) is excluded for a second, stronger reason on top
-// of that: it changes startValue/finishValue themselves, i.e. the very RANGE
-// this oracle's determinism is checked against — a seed's replay is only
-// meaningful (byte-identical JSON.stringify across runs) if every step
-// operates against the SAME fixed range, so mixing in a command that moves
-// the goalposts would make two "identical" replays diverge for reasons that
-// have nothing to do with a genuine behavioral regression.
+// `reconfigure` (Task 2.18) is excluded too — but the honest reason is SCOPE,
+// not determinism (fix wave 1 correction: an earlier version of this comment
+// claimed including it would make two "identical" replays "diverge", which
+// is false — replaySeed is deterministic per seed regardless of which
+// commands are in this menu; the same seed always draws the same sequence,
+// with or without reconfigure in the pool). The real reason: this oracle
+// exists to compare a FIXED baseline (one range, 0->50, held constant for the
+// whole run) across refactors/platforms, and reconfigure changes that range
+// mid-run — which would mean redefining what "the baseline" even means at
+// step N for every future soak comparison, for no coverage gain. The
+// clamp/boundary/direction interaction reconfigure introduces is already
+// fuzzed for real by tests/engine/properties.test.ts's `cmdArb`, which DOES
+// include it — property-based testing, unlike this fixed replay, doesn't
+// need a stable range to stay meaningful.
 const BARE_COMMAND_TYPES = [
   'increment', 'decrement', 'undo', 'reverse', 'reset',
   'start', 'pause', 'resume', 'faster', 'slower',

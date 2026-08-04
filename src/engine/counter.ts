@@ -386,6 +386,13 @@ function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResul
   return accept(s, { status: 'idle', hiddenByCompletion: false }, nowMs, [{ kind: 'session-ended', keepOverlay }]);
 }
 
+// Compares two completion configs by value (kind + optional seconds) — used
+// only to detect a genuinely no-op reconfigure below; NOT a general-purpose
+// export, since every other engine comparison so far has had no need for one.
+function completionEqual(a: CompletionConfig, b: CompletionConfig): boolean {
+  return a.kind === b.kind && a.seconds === b.seconds;
+}
+
 // Task 2.18 (operator feedback 2026-08-02, PRD §8.7, AC 27) — "update
 // session": reconfigures a RUNNING session's range/interval/completion
 // without resetting `currentValue` to the new `startValue` (unlike starting
@@ -396,14 +403,21 @@ function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResul
 // reference and no change at all, same contract as `jump`'s out-of-range
 // rejection.
 //
-// Three binding semantics (controller clarification):
+// Binding semantics (controller clarification, fix wave 1):
 //  1. NEVER auto-completes: a clamped/unchanged value that lands exactly on
 //     the new active boundary just HOLDS there — status stays whatever it
 //     already was, no `completed` effect, no completion-hide side effect.
 //     Completion is only ever reached by counting INTO it (increment/
 //     decrement/jump/tick/undo) — an operator lowering the target to the
 //     value the session is already sitting at must not blow away the
-//     overlay mid-service.
+//     overlay mid-service. One consequence worth being explicit about: an
+//     AUTOMATIC session left `running` and pinned onto the new boundary by
+//     this clamp does NOT pause here — it keeps ticking (still `running`)
+//     until the controller's next self-dispatched `tick` tries to move past
+//     the (new) boundary, gets rejected `out-of-range` by `tick()` below,
+//     and the controller's own onTick handler responds to that rejection by
+//     dispatching `pause` (see SessionController.timerHooks). So the visible
+//     effect is a one-tick-later pause, never a completion.
 //  2. Exits complete when the boundary moves away: if the session WAS
 //     `complete` and the (possibly clamped) value no longer sits on the new
 //     active boundary, this defers to the EXACT SAME `exitComplete` every
@@ -413,10 +427,23 @@ function endSession(s: Session, keepOverlay: boolean, nowMs: number): ApplyResul
 //     no-op when `s.status !== 'complete'`, so combined with rule 1 the net
 //     effect is: status changes ONLY in the "was complete, no longer at the
 //     boundary" case; every other combination leaves it untouched.
-//  3. Clears `undoStack` unconditionally: earlier entries can reference
-//     values outside the NEW range (restoring one is the whole point of
-//     `undo`), and restoring one after a reconfigure would break the range
-//     invariant every other engine command guarantees.
+//  3. Clears `undoStack` unconditionally (except in the true-no-op case
+//     below): earlier entries can reference values outside the NEW range
+//     (restoring one is the whole point of `undo`), and restoring one after
+//     a reconfigure would break the range invariant every other engine
+//     command guarantees.
+//  4. Direction: reconfiguring is a range change, not a direction change, so
+//     the operator's own `direction` is preserved WHEN the new range is the
+//     same orientation as the old one (e.g. widening/narrowing 0->50 into
+//     0->80 keeps 'up', including a prior explicit Reverse to 'down' within
+//     that same orientation). But if the new range's own natural orientation
+//     FLIPS relative to the old one (0->50 reconfigured into 50->0), keeping
+//     the stale `direction` would be actively wrong: `activeBoundary` would
+//     point at the new session's START, not its finish, silently completing
+//     there next count and (under a `hide`-style completion) blanking the
+//     overlay on the wrong end. So direction is only ever carried over
+//     within the SAME orientation; a flipped orientation snaps `direction`
+//     to match the NEW range's own natural direction instead.
 function reconfigure(
   s: Session,
   startValue: number,
@@ -431,12 +458,35 @@ function reconfigure(
   if (!(SPEED_LEVELS as readonly number[]).includes(intervalSeconds)) return reject(s, 'invalid-value');
   if (!isCompletionConfig(completion)) return reject(s, 'invalid-value');
 
+  // True no-op (rule 3's exception): every wire-level input is byte-identical
+  // to what's already stored AND there is no undo history to clear — nothing
+  // downstream (range, clamp, direction, boundary, status) can possibly
+  // differ either, since all of those are pure functions of these same
+  // inputs plus the session's own (untouched) currentValue/status. Matches
+  // every other command's own no-op contract (same reference, no revision
+  // bump) instead of manufacturing a revision bump for a click that changed
+  // nothing at all.
+  if (
+    startValue === s.startValue &&
+    finishValue === s.finishValue &&
+    intervalSeconds === s.intervalSeconds &&
+    completionEqual(completion, s.completion) &&
+    s.undoStack.length === 0
+  ) {
+    return noop(s);
+  }
+
+  // Rule 4 above.
+  const oldOrientation = initialDirection(s.startValue, s.finishValue);
+  const newOrientation = initialDirection(startValue, finishValue);
+  const direction = oldOrientation === newOrientation ? s.direction : newOrientation;
+
   const { lo, hi } = rangeOf({ startValue, finishValue });
   const currentValue = Math.min(Math.max(s.currentValue, lo), hi);
   const valueChanged = currentValue !== s.currentValue;
   const baseEffects: Effect[] = valueChanged ? [{ kind: 'animate' }] : [];
 
-  const boundary = activeBoundary({ startValue, finishValue, direction: s.direction });
+  const boundary = activeBoundary({ startValue, finishValue, direction });
   const atBoundary = currentValue === boundary;
 
   // Rule 2 above: only ever EXITS complete, and only in the one combination
@@ -450,7 +500,22 @@ function reconfigure(
 
   return accept(
     s,
-    { startValue, finishValue, intervalSeconds, completion, currentValue, undoStack: [], status, overlayVisible, hiddenByCompletion },
+    {
+      startValue,
+      finishValue,
+      intervalSeconds,
+      // Shallow-copied, not the caller's object by reference — same
+      // copy-on-write discipline createSession's own completion handling
+      // documents (a mutation of the CALLER's completion object after this
+      // call must never alias into the stored session).
+      completion: { ...completion },
+      currentValue,
+      direction,
+      undoStack: [],
+      status,
+      overlayVisible,
+      hiddenByCompletion,
+    },
     nowMs,
     effects,
   );

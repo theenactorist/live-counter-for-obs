@@ -192,6 +192,16 @@ interface SetupUiState {
   // next Update session click, so the operator sees it whether they check
   // right away or after a moment on Live.
   reconfigureWarning: string | null;
+  // Fix wave 1 (Important 2) — set by ANY field's own input/change handler
+  // (the operator has unsaved edits in progress) and cleared by prefill
+  // (`prefillFromSession`), Save, Start, and Update — the four points where
+  // the form's state is either freshly derived from something authoritative
+  // or has just been successfully applied. `refresh()` (tab-activation)
+  // consults this alongside `ui.editing` before re-deriving from the active
+  // session: without it, switching to Live and back mid-edit (with no
+  // preset being edited) silently threw away whatever the operator had just
+  // typed.
+  dirty: boolean;
 }
 
 interface FocusSnapshot {
@@ -287,6 +297,7 @@ function defaultUiState(): SetupUiState {
     conflict: null,
     error: null,
     reconfigureWarning: null,
+    dirty: false,
   };
 }
 
@@ -295,9 +306,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // Task 2.18 — prefill from an already-active session at mount time (the
   // "on mount" half of the brief's "prefill on mount/tab-activation"; the
   // "tab-activation" half is `refresh()`, on the returned handle, below).
-  // Covers a fresh boot that recovers/keeps a session already running before
-  // this view (or the operator) ever touches it — e.g. a reload, or a
-  // session started via Presets' `preset-start` before Setup was visited.
+  // Fix wave 1 correction: under main.ts's ACTUAL boot() order this is a
+  // no-op every real boot — `mountSetupView()` runs synchronously, before
+  // `controller.init()` is even called (let alone awaited), and a fresh
+  // `SessionController` starts with `session: null`, so
+  // `opts.controller.getState().session` is always `null` at this exact
+  // point in main.ts's own sequencing. It is kept anyway as a defensive
+  // no-op for any OTHER caller that constructs/mounts this view against an
+  // already-initialized controller (a unit-test harness, or a hypothetical
+  // future boot() reordering) — cheap correctness with no real-boot cost,
+  // rather than a claim (the old comment's, now corrected) that it covers a
+  // scenario main.ts's own boot() order never actually produces.
   const activeSessionAtMount = opts.controller.getState().session;
   if (activeSessionAtMount) prefillFromSession(activeSessionAtMount);
   // Phase 2 final-review fix (code-quality:P2-Q-03): performSave() awaits
@@ -564,6 +583,20 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.intervalSeconds = session.intervalSeconds;
     ui.completionKind = session.completion.kind;
     ui.completionSeconds = session.completion.seconds ?? DEFAULT_COMPLETION_SECONDS;
+    // Fix wave 1 (Important 2) — a fresh prefill is, by definition, not an
+    // unsaved edit; `refresh()`'s own `!ui.dirty` guard (below) means this is
+    // already false whenever this runs from THAT call site, but clearing it
+    // here too keeps this function correct standalone (e.g. the mount-time
+    // call site above, which has no dirty guard of its own).
+    ui.dirty = false;
+  }
+
+  // Fix wave 1 (Important 2) — every field's own input/change handler below
+  // calls this instead of `render()` directly, marking the form dirty BEFORE
+  // repainting so `refresh()`'s guard sees it the instant a tab-activation
+  // race could otherwise ask "is there an unsaved edit right now?"
+  function markDirty(): void {
+    ui.dirty = true;
   }
 
   function previewValue(): number {
@@ -662,6 +695,11 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
     }
     ui.conflict = null;
+    // Fix wave 1 (Important 2) — a successful Save is one of the four
+    // dirty-clearing points (prefill/Save/Start/Update): the form's current
+    // contents are now the authoritative, persisted preset, not an unsaved
+    // edit `refresh()` needs to protect from a tab-activation prefill.
+    ui.dirty = false;
     render();
   }
 
@@ -700,17 +738,35 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       render();
       return;
     }
+    // Fix wave 1 (Important 2) — Start is one of the four dirty-clearing
+    // points: a freshly-started session's form is authoritative again, not
+    // an unsaved edit.
+    ui.dirty = false;
     opts.onSessionStarted();
   }
 
-  // Task 2.18 — "update session": applies the form's presentation (style/
-  // template/animation) via the existing `adoptPresentation`, then
-  // reconfigures the ACTIVE session's range/interval/completion in place via
-  // the engine's `reconfigure` command — never `startSession()`, which would
-  // reset currentValue to the new startValue and is exactly the "restart"
-  // behavior this button exists to avoid. `mode` is deliberately NOT part of
-  // the reconfigure payload (the command has no mode field — switching
-  // manual/automatic mid-session is `setMode`'s job, not this one's).
+  // Task 2.18 — "update session": reconfigures the ACTIVE session's range/
+  // interval/completion in place via the engine's `reconfigure` command —
+  // never `startSession()`, which would reset currentValue to the new
+  // startValue and is exactly the "restart" behavior this button exists to
+  // avoid — then applies the form's presentation (style/template/animation)
+  // via the existing `adoptPresentation`.
+  //
+  // Fix wave 1 (Important 3): `reconfigure` itself has no `mode` field
+  // (switching manual/automatic mid-session was always `setMode`'s job), but
+  // `ui.mode` IS prefilled from, and editable alongside, the reconfigure
+  // fields — so a mode change here was previously silently dropped. When
+  // `ui.mode` differs from the session's current mode, `setMode` is
+  // dispatched FIRST, so `reconfigure`'s own exit-complete mapping (manual ->
+  // idle / automatic -> paused) evaluates against the FINAL mode, not the one
+  // the session happened to be in before this click. `setMode` never rejects
+  // (see counter.ts), so there is no failure path to handle for it.
+  //
+  // Fix wave 1 (Important, minor fold-in): `reconfigure` dispatches BEFORE
+  // `adoptPresentation` now (previously the other way around) — a rejected
+  // reconfigure (should be unreachable given `canUpdate()`'s gates, but
+  // defense in depth) now leaves NOTHING applied, rather than a stray
+  // presentation change with no matching range update.
   function onUpdateSession(): void {
     if (!canUpdate()) return;
     const activeSession = opts.controller.getState().session;
@@ -722,22 +778,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     ui.error = null;
     ui.reconfigureWarning = null;
 
+    const previousValue = activeSession.currentValue;
+
+    if (ui.mode !== activeSession.mode) {
+      opts.controller.dispatch({ type: 'setMode', mode: ui.mode, nonce: generateNonce() });
+    }
+
     const startValue = parseIntStrict(ui.startValue)!;
     const finishValue = parseIntStrict(ui.finishValue)!;
     const completion = buildCompletion();
-    const style = buildStyle();
-    // Task 2.17 — same fix as onStartSession()/performSave() above: the
-    // broadcast template must carry the operator's literal spaces, not a
-    // trimmed copy.
-    const template = ui.template.trim().length > 0 ? ui.template : null;
-    const animation = buildAnimation();
-    const previousValue = activeSession.currentValue;
-
-    // Presentation rides adoptPresentation() (controller clarification) —
-    // independent of, and broadcast separately from, the reconfigure command
-    // itself.
-    opts.controller.adoptPresentation(style, template, animation);
-
     const result = opts.controller.dispatch({
       type: 'reconfigure',
       startValue,
@@ -756,11 +805,23 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       return;
     }
 
+    const style = buildStyle();
+    // Task 2.17 — same fix as onStartSession()/performSave() above: the
+    // broadcast template must carry the operator's literal spaces, not a
+    // trimmed copy.
+    const template = ui.template.trim().length > 0 ? ui.template : null;
+    const animation = buildAnimation();
+    opts.controller.adoptPresentation(style, template, animation);
+
     if (result.session.currentValue !== previousValue) {
       ui.reconfigureWarning =
         `Current value ${previousValue} was outside the new range and was clamped to ${result.session.currentValue}.`;
     }
 
+    // Fix wave 1 (Important 2) — Update is one of the four dirty-clearing
+    // points: the form now matches the just-applied session, not an unsaved
+    // edit.
+    ui.dirty = false;
     render();
     opts.onSessionStarted();
   }
@@ -810,6 +871,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     input.value = value;
     input.addEventListener('input', () => {
       onChange(input.value);
+      markDirty();
       render();
     });
     return input;
@@ -820,6 +882,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     input.value = value;
     input.addEventListener('input', () => {
       onChange(input.value);
+      markDirty();
       render();
     });
     return input;
@@ -841,6 +904,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.mode = select.value as Mode;
+      markDirty();
       render();
     });
     return select;
@@ -855,6 +919,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.intervalSeconds = Number(select.value);
+      markDirty();
       render();
     });
     return select;
@@ -869,6 +934,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.fontFamily = select.value;
+      markDirty();
       render();
     });
     return select;
@@ -883,6 +949,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.animType = select.value as AnimationConfig['type'];
+      markDirty();
       render();
     });
     return select;
@@ -897,6 +964,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.animTarget = select.value as AnimationConfig['target'];
+      markDirty();
       render();
     });
     return select;
@@ -914,6 +982,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     range.value = String(ui.animDurationMs);
     range.addEventListener('input', () => {
       ui.animDurationMs = Number(range.value);
+      markDirty();
       render();
     });
     wrap.appendChild(range);
@@ -935,6 +1004,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     select.addEventListener('change', () => {
       ui.completionKind = select.value as CompletionConfig['kind'];
+      markDirty();
       render();
     });
     return select;
@@ -1000,6 +1070,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       btn.appendChild(el('span', { class: 'layout-thumb-caption' }, LAYOUT_LABELS[layout]));
       btn.addEventListener('click', () => {
         ui.layout = layout;
+        markDirty();
         render();
       });
       gallery.appendChild(btn);
@@ -1155,10 +1226,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
     // Task 2.18 — set by a successful Update session whose reconfigure
     // clamped the running session's value into the new range; see the
-    // `reconfigureWarning` field doc comment above.
+    // `reconfigureWarning` field doc comment above. Fix wave 1 (minor
+    // fold-in): `banner banner-warn` (the same styling live.ts's overlay-
+    // silence banner uses), not `field-error` — this isn't a rejected/
+    // invalid form, the Update itself succeeded; it's a heads-up about a
+    // side effect of that success.
     if (ui.reconfigureWarning) {
       root.appendChild(
-        el('div', { 'data-testid': 'setup-reconfigure-warning', class: 'field-error' }, ui.reconfigureWarning),
+        el('div', { 'data-testid': 'setup-reconfigure-warning', class: 'banner banner-warn' }, ui.reconfigureWarning),
       );
     }
 
@@ -1413,6 +1488,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.conflict = null;
       ui.error = null;
       ui.reconfigureWarning = null;
+      // A freshly-loaded preset is a deliberate reset of the form, same
+      // spirit as prefill/Save/Start/Update — not an unsaved edit in
+      // progress. (The separate `ui.editing !== null` check in `refresh()`
+      // below already protects this load from a session-prefill regardless
+      // of `dirty`, but clearing it here too avoids a stale `dirty: true`
+      // lingering after a deliberate load.)
+      ui.dirty = false;
       render();
     },
     // Task 2.18 — called by main.ts whenever the Setup tab is (re)activated.
@@ -1423,10 +1505,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // from THAT preset, and main.ts calls it immediately before activating
     // this tab (see `onLoadPreset` in main.ts), so re-deriving from the
     // session here would silently clobber the freshly-loaded preset the
-    // instant the tab switch's onActivate callback ran.
+    // instant the tab switch's onActivate callback ran. Fix wave 1
+    // (Important 2): ALSO skipped while `ui.dirty` — an unsaved edit
+    // anywhere in the form (not just a preset load) must survive a round
+    // trip to another tab and back, same reasoning, different cause.
     refresh(): void {
       if (destroyed) return;
-      if (ui.editing === null) {
+      if (ui.editing === null && !ui.dirty) {
         const session = opts.controller.getState().session;
         if (session) prefillFromSession(session);
       }

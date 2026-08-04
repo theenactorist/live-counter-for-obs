@@ -2566,6 +2566,109 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
+    // --- Fix wave 1 (coordinator review, Important 2): refresh() must not
+    // silently discard an operator's unsaved Setup edits on a tab round-trip,
+    // but a genuinely CLEAN (no edits since the last prefill/Save/Start/
+    // Update) round-trip must still pick up the live session's current truth.
+    test('an unsaved edit in Setup survives a round-trip to Live and back (refresh() does not clobber a dirty form)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-finish')).toHaveValue('50');
+        await page.getByTestId('setup-finish').fill('30'); // unsaved edit — form is now dirty
+
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('tab-setup').click();
+
+        await expect(page.getByTestId('setup-finish')).toHaveValue('30'); // survived the round-trip
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('a clean (non-dirty) Setup tab re-activation still refreshes from the live session', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-finish')).toHaveValue('50'); // prefilled; no edits made (not dirty)
+
+        await page.getByTestId('tab-live').click();
+        // A DIFFERENT session replaces the active one, from OUTSIDE this form
+        // (bypassing Setup entirely) — proves refresh() re-derives from the
+        // live session rather than just leaving whatever was there before.
+        await startSessionViaHook(page, { startValue: 5, finishValue: 99, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-start')).toHaveValue('5');
+        await expect(page.getByTestId('setup-finish')).toHaveValue('99');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Fix wave 1 (coordinator review, Important 3): `ui.mode` is
+    // prefilled and editable but was previously silently ignored by Update
+    // (reconfigure has no mode field). Update now dispatches `setMode` first
+    // when the form's mode differs from the session's.
+    test('Update session applies a mode change: manual -> automatic at the chosen interval shows the Live automatic cluster', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('manual');
+        await page.getByTestId('setup-mode').selectOption('automatic');
+        await page.getByTestId('setup-interval').selectOption('2');
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        // The automatic cluster (Task 2.10) only renders for an automatic
+        // session — its presence, at the chosen interval, IS the proof the
+        // mode change actually landed.
+        await expect(page.getByTestId('auto-rate')).toHaveText('1 count every 2s');
+        await expect(page.getByTestId('auto-start')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Update session applies a mode change: automatic (running) -> manual stops the timer', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 100, mode: 'automatic', intervalSeconds: 1 });
+        await page.getByTestId('auto-start').click();
+        await expect(page.getByTestId('auto-pause')).toBeEnabled();
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+        await page.getByTestId('setup-mode').selectOption('manual');
+        await page.getByTestId('setup-update-session').click();
+
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('auto-rate')).toHaveCount(0); // manual: no automatic cluster at all
+
+        // The timer must have actually stopped, not just the UI hiding the
+        // cluster — wait long enough that a still-running 1s timer would
+        // have ticked at least once, and confirm the value never moved.
+        await page.waitForTimeout(1500);
+        await expect(page.getByTestId('current-value')).toHaveText('0');
+      } finally {
+        await mock.close();
+      }
+    });
+
     test('Update session is disabled with no active session; becomes enabled once one starts', async ({ page }) => {
       const mock = await startMockObs();
       try {

@@ -2,11 +2,13 @@
 // reconfigures a RUNNING session's range/interval/completion in place,
 // without resetting currentValue to startValue the way starting a fresh
 // session does. See counter.ts's `reconfigure` handler doc comment for the
-// three binding semantics this suite locks down: never auto-complete, only
-// ever EXIT complete (reusing exitComplete, never a parallel rule), and
-// always clear the undo stack.
+// full binding semantics this suite locks down: never auto-complete, only
+// ever EXIT complete (reusing exitComplete, never a parallel rule), always
+// clear the undo stack (except a true no-op), and preserve `direction`
+// ONLY within the same range orientation (fix wave 1, Important 1).
 import { describe, it, expect } from 'vitest';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
+import { activeBoundary } from '../../src/engine/types.js';
 import type { CompletionConfig } from '../../src/engine/types.js';
 
 const T0 = 1_754_000_000_000;
@@ -270,5 +272,106 @@ describe('reconfigure — does not mutate the input session', () => {
   it('accepted call on a frozen session does not throw', () => {
     const s = Object.freeze(mk());
     expect(() => applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 100 }), T0)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 1 (coordinator review, Important 1) — direction only carries over
+// within the SAME range orientation; a flipped orientation snaps `direction`
+// to the NEW range's own natural direction. Before this fix, reconfiguring
+// 0->50 into 50->0 kept `direction: 'up'`, so `activeBoundary` pointed at the
+// NEW session's start (50) instead of its finish (0) — completion would fire
+// at the wrong end, and under `hide` the overlay would blank on air.
+// ---------------------------------------------------------------------------
+describe('reconfigure — direction only carries over within the same orientation (fix wave 1)', () => {
+  it('reconfiguring 0->50 into 50->0 (orientation flip) sets direction to down and the active boundary to the new finish (0)', () => {
+    let s = mk(); // 0->50, manual, up
+    s = applyCommand(s, { type: 'jump', value: 23, nonce: nonce() }, T0).session;
+    expect(s.direction).toBe('up');
+
+    const r = applyCommand(s, reconfigureCmd({ startValue: 50, finishValue: 0 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.currentValue).toBe(23); // still inside [0,50]; no clamp needed
+    expect(r.session.direction).toBe('down');
+    expect(activeBoundary(r.session)).toBe(0); // the NEW finish, not the stale 'up' boundary (50)
+    expect(r.session.status).not.toBe('complete'); // 23 isn't on the (correct) boundary
+  });
+
+  it('an operator Reverse survives a same-orientation reconfigure: reversed to down, then widened 0->50 into 0->80, stays down', () => {
+    let s = mk(); // 0->50, manual, starts 'up'
+    s = applyCommand(s, { type: 'reverse', nonce: nonce() }, T0).session;
+    expect(s.direction).toBe('down');
+
+    // Both the OLD (0->50) and NEW (0->80) ranges are 'up'-oriented
+    // (start <= finish) — same orientation, so the operator's own reverse
+    // must be preserved, not silently reset back to the range's own default.
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 80 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.direction).toBe('down');
+  });
+
+  it("the review's 40->30 clamp case now yields a coherent state: 0->50 at 40, reconfigured to 30->0, clamps to the new hi (30) with direction down, not complete", () => {
+    let s = mk(); // 0->50, manual, up
+    s = applyCommand(s, { type: 'jump', value: 40, nonce: nonce() }, T0).session;
+    expect(s.direction).toBe('up');
+
+    // orientation flips: initialDirection(0,50) = 'up', initialDirection(30,0) = 'down'.
+    const r = applyCommand(s, reconfigureCmd({ startValue: 30, finishValue: 0 }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.direction).toBe('down');
+    expect(r.session.currentValue).toBe(30); // clamped down from 40 to the new hi
+    // For a 'down' session the ACTIVE boundary is the low end (0), not 30 —
+    // so landing on the new hi is coherent "still counting down toward 0",
+    // never a phantom completion.
+    expect(activeBoundary(r.session)).toBe(0);
+    expect(r.session.status).not.toBe('complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 1 minors: a truly identical reconfigure is a real no-op (matches
+// every other no-change command's own contract); an identical reconfigure
+// with undo history still clears it (that IS a change); completion is
+// shallow-copied, not aliased (createSession's own documented discipline).
+// ---------------------------------------------------------------------------
+describe('reconfigure — true no-op vs. undo-clearing accept (fix wave 1)', () => {
+  it('an identical reconfigure (same start/finish/interval/completion, empty undo stack) is a true no-op', () => {
+    const s = mk(); // 0->50, interval 1 (default), completion hold (default)
+    const r = applyCommand(
+      s,
+      reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 1, completion: { kind: 'hold' } }),
+      T0,
+    );
+    expect(r.accepted).toBe(true);
+    expect(r.session).toBe(s); // same reference: true no-op
+    expect(r.effects).toEqual([]);
+    expect(r.session.revision).toBe(s.revision);
+  });
+
+  it('an identical reconfigure with a non-empty undo stack still clears it (accepted, not a no-op — clearing IS the change)', () => {
+    let s = mk();
+    s = applyCommand(s, { type: 'increment', nonce: nonce() }, T0).session; // pushes an undo entry
+    expect(s.undoStack.length).toBeGreaterThan(0);
+
+    const r = applyCommand(
+      s,
+      reconfigureCmd({ startValue: 0, finishValue: 50, intervalSeconds: 1, completion: { kind: 'hold' } }),
+      T0,
+    );
+    expect(r.accepted).toBe(true);
+    expect(r.session).not.toBe(s);
+    expect(r.session.undoStack).toEqual([]);
+    expect(r.session.revision).toBe(s.revision + 1);
+  });
+});
+
+describe('reconfigure — completion is shallow-copied, not aliased (fix wave 1)', () => {
+  it("stores a copy of the completion config, not the caller's object by reference", () => {
+    const s = mk();
+    const completionInput: CompletionConfig = { kind: 'holdThenHide', seconds: 5 };
+    const r = applyCommand(s, reconfigureCmd({ startValue: 0, finishValue: 50, completion: completionInput }), T0);
+    expect(r.accepted).toBe(true);
+    expect(r.session.completion).toEqual(completionInput);
+    expect(r.session.completion).not.toBe(completionInput);
   });
 });
