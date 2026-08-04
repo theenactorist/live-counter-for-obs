@@ -323,9 +323,41 @@ export class SessionController {
 
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `fix(dock): test animation honours the animation target`
 
+### Task 2.17: Literal whitespace in the label (operator feedback 2026-08-02 — PRD §8.8, AC 28)
+
+**Driver:** "I want to be able to add space bar in the label input which will reflect in the preview as actual space." Typing `Hello x ` renders as `Hello x0` — the trailing space is lost to HTML whitespace collapsing (and possibly to trimming on save).
+
+**Files:** Modify `src/shared/overlay-presentation.ts` (label nodes), `src/dock/views/setup.ts` (no trim on read/save) and `src/shared/template-content.ts` if it trims; tests in `tests/ui/overlay.spec.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:** label text renders literally — leading, trailing and repeated spaces preserved — in BOTH the overlay and the preview, via the shared module (`white-space: pre` on the inline label spans so spaces survive without introducing wrapping; stacked/ghost label nodes use `pre-wrap` so a long label can still wrap but keeps its spaces). Nothing in the save/load/export path trims the label. Verify the Task 2.15 `nowrap` on the preview's content root doesn't fight the new rule.
+
+**Mandatory tests:** overlay renders `Hello x ` before the counter with the gap intact (measure the label's rendered width against `Hello x` without the space — must be wider, and assert the textContent retains the trailing space); same in the preview; a label of `A  B` (two spaces) keeps both; save → reload → the label still has its spaces; export → import round-trip preserves them.
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `fix(overlay): render label whitespace literally`
+
+### Task 2.18: Update session — reconfigure a running session (operator feedback 2026-08-02 — PRD §8.7, AC 27)
+
+**Driver:** "When I start a session, I'd like to go to setup and 'update session' which updates say the size or maximum count etc of the ongoing session." Today Setup can only Start a fresh session, which resets the count.
+
+**Files:** Modify `src/engine/types.ts` (Command union), `src/engine/counter.ts` (handler), `src/dock/controller.ts` (dispatch path + presentation), `src/dock/views/setup.ts` (button + prefill); tests in `tests/engine/*.test.ts`, `tests/protocol/controller.test.ts`, `tests/ui/presets-setup.spec.ts`.
+
+**Contract:**
+1. **Engine command** `{ type: 'reconfigure'; startValue: number; finishValue: number; intervalSeconds: number; completion: CompletionConfig; nonce: string }`:
+   - Validation: integers in `[0, MAX_VALUE]`, `startValue !== finishValue`, `intervalSeconds` in `SPEED_LEVELS`, valid completion → else `invalid-value` (same reference, no change).
+   - Applies the new bounds/interval/completion; **clamps `currentValue`** into the new inclusive range; keeps `direction` as-is; **clears `undoStack`** (earlier entries may point outside the new range — document why).
+   - **Never enters `complete`**: a clamped/unchanged value landing on the new active boundary holds without firing completion or its effects. If the session WAS `complete` and the value is no longer at the new active boundary, exit to `idle` (manual) / `paused` (automatic).
+   - Effects: `[{kind:'animate'}]` only when the value actually changed; no `completed`, no overlay effects.
+   - Excluded from the property-suite/replay command menus with a comment, like `endSession`/`completionHide`.
+2. **Controller**: dispatching `reconfigure` follows the normal accepted-command path (persist → broadcast → notify); when the interval changed and the timer is running, re-arm it at the new interval preserving the running state. Presentation changes ride the existing `adoptPresentation`.
+3. **Setup UI**: when a session is active, Setup pre-fills from it and shows **Update session** next to Start session (Start keeps its existing replace-confirmation semantics). Update applies presentation + `reconfigure` in one action, then switches to the Live tab. If the value was clamped, show a visible warning naming the old and new value. Update is disabled when no session is active.
+
+**Mandatory tests:** engine — accept/clamp/reject cases, undo cleared, no completion on landing at the boundary, exit-from-complete when the boundary moves, same-reference rejection on invalid input; controller — running automatic session keeps running at the new interval, persist-then-broadcast ordering holds; Playwright — session at 23 of 50, edit finish to 30 + label + number size, Update session → Live still shows 23, progress reads against 30, overlay repaints with the new presentation, no restart; clamping case (range → 0–10 at 23) clamps to 10 with the warning; Update disabled with no session; Start session still replaces (existing confirmation intact).
+
+- [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat: update a running session from Setup without restarting it`
+
 ---
 
-## Phase gate checklist (after Task 2.16)
+## Phase gate checklist (after Task 2.18)
 
 - [ ] `npm test`, `npm run test:ui`, `npm run typecheck`, `npm run build` all green
 - [ ] AC coverage: 3, 5, 6, 7, 9, 11, 12, 16 demonstrated by named Playwright/vitest tests (map them in the gate report)
