@@ -51,7 +51,7 @@ import type { SessionConfig } from '../../engine/counter.js';
 import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
-import { createPresentationNodes, applyPresentation, type PresentationNodes } from '../../shared/overlay-presentation.js';
+import { createPresentationNodes, applyPresentation, animationTargets, type PresentationNodes } from '../../shared/overlay-presentation.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -632,9 +632,9 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function playTestAnimation(): void {
     // Isolation contract (Task 2.6 brief): this MUST NOT call
     // controller.dispatch/startSession/adoptPresentation or bus.send — the
-    // animation is local WAAPI on the preview node only. Compositor-friendly
-    // properties only (transform/opacity), matching the PRD §8.10 restriction
-    // the real overlay renderer (Task 2.7) also follows.
+    // animation is local WAAPI on the preview node(s) only. Compositor-
+    // friendly properties only (transform/opacity), matching the PRD §8.10
+    // restriction the real overlay renderer (Task 2.7) also follows.
     //
     // Keyframes come from src/shared/animation-keyframes.ts — the SAME
     // source the real overlay renderer animates from (code-quality:P2-Q-05).
@@ -642,12 +642,25 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // the four non-none types, so the operator previewed one motion and the
     // audience saw another; the loudest was `flip` losing its perspective()
     // and rendering as a flat vertical squash.
-    const target = container.querySelector<HTMLElement>('[data-testid="setup-preview"]');
-    if (!target) return;
+    //
+    // Task 2.16 (operator feedback: with target "Number only", Test
+    // animation popped the label too) — WHICH node(s) get animated now comes
+    // from ../../shared/overlay-presentation.js's `animationTargets()`, the
+    // exact selector the real overlay renderer's triggerAnimation consumes,
+    // instead of always animating the whole `setup-preview` element
+    // regardless of `animTarget` (Task 2.6's shortcut, deferred until the
+    // renderer became shared in Task 2.14 — now due). `previewNodes` is this
+    // view's own stable node set (never recreated — see its declaration
+    // above), so no DOM lookup is needed to find them.
     const keyframes = keyframesFor(ui.animType);
     if (keyframes === null) return;
-    for (const anim of target.getAnimations()) anim.cancel();
-    target.animate(keyframes, { duration: ui.animDurationMs, easing: ANIMATION_EASING });
+    for (const target of animationTargets(previewNodes, ui.layout, ui.animTarget)) {
+      // Cancel any in-flight test animation on THIS node first — mirrors the
+      // overlay's own interrupt rule (at most one Animation per node,
+      // however rapidly the operator clicks Test animation).
+      for (const anim of target.getAnimations()) anim.cancel();
+      target.animate(keyframes, { duration: ui.animDurationMs, easing: ANIMATION_EASING });
+    }
   }
 
   function inputField(

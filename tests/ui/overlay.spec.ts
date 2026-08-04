@@ -1430,6 +1430,53 @@ test.describe('overlay renderer', () => {
       }
     });
 
+    // Task 2.16 (controller clarification, binding): numberOnly has no label
+    // at all — target:'text' must fall back to the counter instead of the
+    // empty, zero-size before/afterEl a token-less/label-less layout would
+    // otherwise hand it (which would visibly animate nothing).
+    test('numberOnly layout + target "text": animates the counter instead of an invisible zero-size label node', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openOverlay(page, mock.port);
+        const { bus, close } = await connectTestBus(mock.port);
+        try {
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 1 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'numberOnly' }),
+            template: null,
+            animation: null,
+            heartbeat: 1,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('1');
+
+          const animation: AnimationConfig = { type: 'pop', target: 'text', durationMs: 300 };
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: 2 }),
+            snapshot: null,
+            style: styleFixture({ layout: 'numberOnly' }),
+            template: null,
+            animation,
+            heartbeat: 2,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText('2');
+
+          const runningOnNumber = await page.getByTestId('overlay-number').evaluate((el) => el.getAnimations().length);
+          expect(runningOnNumber).toBeGreaterThan(0);
+          const runningOnBefore = await page.getByTestId('overlay-text-before').evaluate((el) => el.getAnimations().length);
+          expect(runningOnBefore).toBe(0);
+          const runningOnAfter = await page.getByTestId('overlay-text-after').evaluate((el) => el.getAnimations().length);
+          expect(runningOnAfter).toBe(0);
+        } finally {
+          close();
+        }
+      } finally {
+        await mock.close();
+      }
+    });
+
     test('a live layout switch preserves node identity (same elements, not rebuilt) and does not destroy an in-flight animation', async ({
       page,
     }) => {

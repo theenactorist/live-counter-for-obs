@@ -58,7 +58,7 @@ import type { OverlaySnapshot } from '../protocol/persistence.js';
 import { formatValue } from '../engine/format.js';
 import { interruptAndAnimate } from './animations.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
-import { createPresentationNodes, applyPresentation } from '../shared/overlay-presentation.js';
+import { createPresentationNodes, applyPresentation, animationTargets } from '../shared/overlay-presentation.js';
 
 export interface StatePayload {
   session: Session | null;
@@ -193,15 +193,19 @@ export function mountOverlayRenderer(
   // CachedPresentation/PresentationCacheEntry types for the full contract.
   const presentationCache = new Map<string, PresentationCacheEntry>();
 
-  let numberAnim: Animation | null = null;
-  let beforeAnim: Animation | null = null;
-  let afterAnim: Animation | null = null;
-  let bothAnim: Animation | null = null;
-  // Fix wave — target:'text' animates `behindEl` instead of before/afterEl
-  // when textBehind is the active layout (those two are empty for
-  // textBehind; the ghost IS the "text" for this layout). Tracked via
-  // `currentLayout`, set at the end of every applyLayoutStyle() call.
-  let behindAnim: Animation | null = null;
+  // Task 2.16 — one tracked Animation per targeted node, keyed by node
+  // identity rather than five separately-named variables (numberAnim/
+  // beforeAnim/afterAnim/bothAnim/behindAnim, pre-extraction): the shared
+  // `animationTargets()` selector (../shared/overlay-presentation.js) now
+  // owns deciding WHICH node(s) a given target animates — this renderer just
+  // needs to remember the in-flight Animation for whichever nodes it was
+  // last handed, so a later interrupt cancels the right one regardless of
+  // how many nodes were targeted. `currentLayout` (set at the end of every
+  // applyLayoutStyle() call) is what animationTargets() uses to resolve
+  // target:'text' to the ghost node instead of before/afterEl when
+  // textBehind is the active layout (those two are empty for textBehind —
+  // the ghost IS the "text" for this layout).
+  const animationState = new Map<HTMLElement, Animation | null>();
   let currentLayout: OverlayLayout = DEFAULT_STYLE.layout;
 
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
@@ -244,16 +248,8 @@ export function mountOverlayRenderer(
   // an animation left running on a just-detached (or about-to-be-cleared)
   // element serves no purpose and should not linger.
   function cancelAllAnimations(): void {
-    numberAnim?.cancel();
-    beforeAnim?.cancel();
-    afterAnim?.cancel();
-    bothAnim?.cancel();
-    behindAnim?.cancel();
-    numberAnim = null;
-    beforeAnim = null;
-    afterAnim = null;
-    bothAnim = null;
-    behindAnim = null;
+    for (const anim of animationState.values()) anim?.cancel();
+    animationState.clear();
   }
 
   function hideContent(): void {
@@ -325,21 +321,12 @@ export function mountOverlayRenderer(
 
   function triggerAnimation(animation: AnimationConfig | null): void {
     if (animation === null || animation.type === 'none') return;
-    if (animation.target === 'number') {
-      numberAnim = interruptAndAnimate(numberEl, animation, numberAnim);
-    } else if (animation.target === 'text') {
-      // Fix wave (review Important 1): textBehind's label lives in
-      // `behindEl`, not before/afterEl (both empty for this layout) — a
-      // `target: 'text'` animation must target the node that actually HAS
-      // the text, or it silently animates nothing.
-      if (currentLayout === 'textBehind') {
-        behindAnim = interruptAndAnimate(behindEl, animation, behindAnim);
-      } else {
-        beforeAnim = interruptAndAnimate(beforeEl, animation, beforeAnim);
-        afterAnim = interruptAndAnimate(afterEl, animation, afterAnim);
-      }
-    } else {
-      bothAnim = interruptAndAnimate(contentRoot, animation, bothAnim);
+    // Task 2.16 — target-selection itself now lives in
+    // ../shared/overlay-presentation.js's `animationTargets()`, shared with
+    // Setup's Test-animation preview so the two can never drift apart again.
+    for (const el of animationTargets(presentationNodes, currentLayout, animation.target)) {
+      const prev = animationState.get(el) ?? null;
+      animationState.set(el, interruptAndAnimate(el, animation, prev));
     }
   }
 

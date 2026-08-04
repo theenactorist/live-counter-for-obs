@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import type { Page, Locator } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
@@ -351,8 +351,13 @@ test.describe('dock Setup + Presets views', () => {
       const beforeCount = stateBroadcasts(mock).length;
       await page.getByTestId('setup-test-anim').click();
 
+      // Task 2.16: the default animation target is 'number', so the running
+      // Animation lands on the counter node itself, not the whole
+      // `setup-preview` container (that was the Task 2.6 shortcut this task
+      // closes — see the dedicated "honours the animation target" suite
+      // below for the full per-target/none-on-the-others coverage).
       const animCountDuringWindow = await page
-        .locator('[data-testid="setup-preview"]')
+        .locator('[data-testid="setup-preview-number"]')
         .evaluate((el) => el.getAnimations().length);
       expect(animCountDuringWindow).toBeGreaterThan(0);
 
@@ -1228,7 +1233,10 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('setup-anim-type').selectOption('flip');
       await page.getByTestId('setup-test-anim').click();
 
-      const transforms = await page.getByTestId('setup-preview').evaluate((el) => {
+      // Task 2.16: default target is 'number', so the running Animation is
+      // on the counter node — this test's own concern (keyframe shape) is
+      // orthogonal to targeting, covered separately below.
+      const transforms = await page.getByTestId('setup-preview-number').evaluate((el) => {
         const anim = el.getAnimations()[0];
         if (!anim) return null;
         return (anim.effect as KeyframeEffect).getKeyframes().map((kf) => String(kf.transform));
@@ -1241,6 +1249,147 @@ test.describe('dock Setup + Presets views', () => {
     } finally {
       await mock.close();
     }
+  });
+
+  // --- Task 2.16: Test animation must honour the animation target
+  // (operator feedback 2026-08-02, PRD §8.10) — with target "Number only",
+  // clicking Test animation used to pop the label too, because Setup's
+  // preview always animated the whole `setup-preview` element regardless of
+  // `target` (Task 2.6's shortcut, deferred until the renderer became shared
+  // in Task 2.14). Both Setup's preview and the real overlay now consume the
+  // SAME `animationTargets()` selector (src/shared/overlay-presentation.ts).
+  //
+  // The "none on the others" half of each test below is the important half
+  // — a test that only checked "the expected node animates" would have
+  // passed against the OLD, buggy code too (everything animated together).
+  test.describe('Test animation honours the animation target (Task 2.16)', () => {
+    /** Sums getAnimations().length across every element `locator` matches (0 for a locator matching nothing). */
+    async function runningAnimCount(locator: Locator): Promise<number> {
+      const counts = await locator.evaluateAll((els) => els.map((el) => el.getAnimations().length));
+      return counts.reduce((a, b) => a + b, 0);
+    }
+
+    test('target "number": animates only the counter, none of the others', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('x {count} y'); // non-empty before AND after
+        await page.getByTestId('setup-anim-type').selectOption('pop');
+        await page.getByTestId('setup-anim-target').selectOption('number');
+
+        await page.getByTestId('setup-test-anim').click();
+
+        expect(await runningAnimCount(page.getByTestId('setup-preview-number'))).toBeGreaterThan(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label'))).toBe(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label-after'))).toBe(0);
+        // getAnimations() with no `subtree` option only reports animations
+        // that target the element ITSELF, never a descendant — so this is a
+        // genuine check that 'both' (animating the shared container) was
+        // never ALSO triggered alongside 'number'.
+        expect(await runningAnimCount(page.getByTestId('setup-preview'))).toBe(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('target "text": animates both label spans, none of the others', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('x {count} y');
+        await page.getByTestId('setup-anim-type').selectOption('pop');
+        await page.getByTestId('setup-anim-target').selectOption('text');
+
+        await page.getByTestId('setup-test-anim').click();
+
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label'))).toBeGreaterThan(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label-after'))).toBeGreaterThan(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-number'))).toBe(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview'))).toBe(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('target "both": animates the shared content root, none of the others', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('x {count} y');
+        await page.getByTestId('setup-anim-type').selectOption('pop');
+        await page.getByTestId('setup-anim-target').selectOption('both');
+
+        await page.getByTestId('setup-test-anim').click();
+
+        expect(await runningAnimCount(page.getByTestId('setup-preview'))).toBeGreaterThan(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-number'))).toBe(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label'))).toBe(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-label-after'))).toBe(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('textBehind + target "text": the ghost animates; the empty inline label spans do not', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('Combo');
+        await page.getByTestId('setup-layout-textBehind').click();
+        await page.getByTestId('setup-anim-type').selectOption('pop');
+        await page.getByTestId('setup-anim-target').selectOption('text');
+
+        await page.getByTestId('setup-test-anim').click();
+
+        // The ghost (behindEl) is the only node carrying `setup-preview-label`
+        // in this layout (updatePreviewTestids), tagged with the
+        // '.setup-preview-ghost' class.
+        const ghost = page.getByTestId('setup-preview-label');
+        await expect(ghost).toHaveClass(/setup-preview-ghost/);
+        expect(await runningAnimCount(ghost)).toBeGreaterThan(0);
+
+        // beforeEl/afterEl are empty, untestid'd spans for this layout — the
+        // bug this fix closes previously animated NOTHING for textBehind
+        // (target:'text' fell through to these dead spans, same shape as the
+        // real overlay's own pre-fix-wave bug). Confirm they still carry no
+        // running Animation now either.
+        const emptyInlineSpans = page.locator('[data-testid="setup-preview"] > span:not([data-testid])');
+        expect(await runningAnimCount(emptyInlineSpans)).toBe(0);
+        expect(await runningAnimCount(page.getByTestId('setup-preview-number'))).toBe(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('repeated rapid clicks leave at most one animation in flight per targeted node', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-template').fill('x {count} y');
+        await page.getByTestId('setup-anim-type').selectOption('pop');
+        await page.getByTestId('setup-anim-target').selectOption('text');
+        await page.locator('[data-testid="setup-anim-duration"]').evaluate((el) => {
+          (el as HTMLInputElement).value = '2000';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        for (let i = 0; i < 5; i++) {
+          await page.getByTestId('setup-test-anim').click();
+        }
+
+        const beforeCount = await page.getByTestId('setup-preview-label').evaluate((el) => el.getAnimations().length);
+        const afterCount = await page.getByTestId('setup-preview-label-after').evaluate((el) => el.getAnimations().length);
+        expect(beforeCount).toBeLessThanOrEqual(1);
+        expect(afterCount).toBeLessThanOrEqual(1);
+      } finally {
+        await mock.close();
+      }
+    });
   });
 
   // code-quality:P2-Q-06. A cleared Number-size field yielded Number('') === 0

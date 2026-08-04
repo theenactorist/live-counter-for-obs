@@ -23,7 +23,7 @@
 // within a full-viewport container) stay a renderer-only concern applied to
 // ITS OWN outer container element — `contentRoot` here is only ever the inner
 // box that lays out number/label/ghost relative to EACH OTHER.
-import type { StyleConfig, OverlayLayout } from '../engine/types.js';
+import type { StyleConfig, OverlayLayout, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from './default-style.js';
 import { substituteLabel, inlineContent } from './template-content.js';
 
@@ -219,4 +219,38 @@ export function applyPresentation(nodes: PresentationNodes, input: ApplyPresenta
 
   applyLayoutStyle(nodes, s.layout);
   applyLayoutContent(nodes, s.layout, input.template, input.value);
+}
+
+/**
+ * Task 2.16 — selects which presentation node(s) a value-change animation
+ * with `target` should run on, for the CURRENT `layout`. Extracted from the
+ * overlay renderer's own `triggerAnimation` (originally Task 2.7; the ghost-
+ * targeting branch added by a later fix wave) so Setup's Test-animation
+ * preview can share EXACTLY the same target-selection the real overlay
+ * applies — Setup's preview used to always animate the whole `contentRoot`
+ * regardless of `target` (Task 2.6's shortcut, explicitly deferred until the
+ * renderer became shared; Task 2.14 did that, making this extraction due).
+ *
+ *  - `'number'` -> the counter node, always.
+ *  - `'text'`   -> the before/after label spans for every layout except
+ *    `textBehind`, whose label lives in a separate ghost node (`behindEl`,
+ *    kept apart from its centering wrapper — see `PresentationNodes`'
+ *    `behindWrapEl` doc comment); before/afterEl are both empty for that
+ *    layout, so animating them would be an invisible no-op.
+ *  - `'both'`   -> `contentRoot`, the shared ancestor of every node above —
+ *    animating it moves everything together, regardless of layout.
+ *
+ * `numberOnly` has no label at all: `'text'` falls back to animating the
+ * counter instead of an empty, zero-size before/afterEl that would visibly
+ * do nothing (controller clarification, binding — `'both'` already lands on
+ * `contentRoot`, which is never zero-size, so it needs no special case).
+ */
+export function animationTargets(nodes: PresentationNodes, layout: OverlayLayout, target: AnimationConfig['target']): HTMLElement[] {
+  const { contentRoot, beforeEl, numberEl, afterEl, behindEl } = nodes;
+  if (target === 'number') return [numberEl];
+  if (target === 'both') return [contentRoot];
+  // target === 'text'
+  if (layout === 'textBehind') return [behindEl];
+  if (layout === 'numberOnly') return [numberEl];
+  return [beforeEl, afterEl];
 }
