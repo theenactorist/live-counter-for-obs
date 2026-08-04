@@ -353,6 +353,9 @@ export class SessionController {
 
 **Mandatory tests:** engine — accept/clamp/reject cases, undo cleared, no completion on landing at the boundary, exit-from-complete when the boundary moves, same-reference rejection on invalid input; controller — running automatic session keeps running at the new interval, persist-then-broadcast ordering holds; Playwright — session at 23 of 50, edit finish to 30 + label + number size, Update session → Live still shows 23, progress reads against 30, overlay repaints with the new presentation, no restart; clamping case (range → 0–10 at 23) clamps to 10 with the warning; Update disabled with no session; Start session still replaces (existing confirmation intact).
 
+
+**FINAL CONTRACT SUPERSESSION (2026-08-04, after five review rounds — this block governs where it conflicts with the contract above):** Setup never dispatches `setMode` (mode is Live-view-only; disabled read-out in Setup with a mismatch note for presets). The engine accepts an UNCHANGED `intervalSeconds` even off the speed ladder (validation applies to changed values only). `undoStack` is cleared only when the range changed; an identical payload is a `noop` regardless of undo history. Presentation is per-field dirty-aware end-to-end: `ControllerState.presentation` exposes the live look, `prefillFromSession` fills untouched fields from it, Update applies operator-edited fields and carries clean ones from live, and skips `adoptPresentation` when nothing presentation-related is dirty. A persistent staleness notice covers config AND presentation divergence. See the task 2.18 fix report (five waves) and the ledger for the round-by-round rationale.
+
 - [ ] Specs first (RED) → implement → GREEN (all suites) → commit `feat: update a running session from Setup without restarting it`
 
 ---
