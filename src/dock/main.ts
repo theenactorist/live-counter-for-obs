@@ -7,8 +7,10 @@ import '../styles/fonts.css';
  * Task 2.8), the first-run "not connected" banner (which deep-links to the
  * Diagnostics tab, where Task 2.5's minimal always-visible settings row now
  * lives as the real Settings section — see diagnostics.ts), and — after
- * `init()` restores a session — re-deriving that session's style/template
- * from its preset (see the `adoptPresentation` call in `boot()`).
+ * `init()` restores a session — restoring that session's presentation: the
+ * persisted `lc.presentation.v1` record when there is one, otherwise
+ * re-deriving style/template from its preset (see the `adoptPresentation`
+ * calls in `boot()`).
  */
 import { ObsWsClient, awaitIdentified } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
@@ -472,7 +474,22 @@ function main(): void {
       .init({ identified })
       .then(async () => {
         const session = bootedController.getState().session;
-        if (session === null || session.presetId === null) return;
+        if (session === null) return;
+        // Final gate wave, ruling C — a STORED presentation (written by
+        // startSession/adoptPresentation, see controller.ts's
+        // setPresentation) wins over re-deriving from the preset: it is what
+        // was actually on air when the dock last ran, including any look the
+        // operator applied mid-service with "Update session". The preset
+        // lookup below stays exactly as it was, as the fallback for a lineage
+        // with no stored record (a dock upgraded mid-session, a
+        // localStorage-less recovery from the obs-websocket mirror, or a
+        // record that failed validation).
+        const stored = bootedStorage.loadPresentation();
+        if (stored) {
+          bootedController.adoptPresentation(stored.style, stored.template, stored.animation);
+          return;
+        }
+        if (session.presetId === null) return;
         const outcome = await bootedStorage.loadPresets();
         const preset = (outcome.value ?? []).find((p) => p.id === session.presetId);
         if (preset) bootedController.adoptPresentation(preset.style, preset.template, preset.animation);

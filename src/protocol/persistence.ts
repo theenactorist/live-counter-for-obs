@@ -4,8 +4,8 @@
 // corrupt localStorage records are quarantined (never silently discarded)
 // rather than deleted outright.
 import type { ObsWsClient } from './obsws-client.js';
-import type { Session, SessionTombstone, Preset, StyleConfig } from '../engine/types.js';
-import { isSessionTombstone } from '../engine/types.js';
+import type { Session, SessionTombstone, Preset, StyleConfig, AnimationConfig } from '../engine/types.js';
+import { isSessionTombstone, isStyleConfig, isAnimationConfig } from '../engine/types.js';
 import {
   loadSession as engineLoadSession,
   serializeSession,
@@ -59,11 +59,36 @@ export interface DockSettings {
   schemaVersion: 1;
 }
 
+/**
+ * Final gate wave, ruling C — the presentation (style/template/animation)
+ * that is ACTUALLY on air right now, persisted next to the session.
+ *
+ * Before this, presentation was controller-instance state only: a dock reload
+ * re-derived it solely from `session.presetId`'s STORED preset (main.ts), so a
+ * look the operator changed mid-service with "Update session" reverted to the
+ * preset's saved look on the next reload — while the range/interval/completion
+ * applied by that SAME click survived (those live on `Session`). Recovery
+ * restored half of one operator action.
+ *
+ * Deliberately its own key rather than a new `Session` field: `Session` is the
+ * engine's own persisted record (PRD.md:126 enumerates its fields, and
+ * `isSession` gates every load) and presentation has never been part of it.
+ */
+export const PRESENTATION_SCHEMA_VERSION = 1 as const;
+
+export interface StoredPresentation {
+  style: StyleConfig;
+  template: string | null;
+  animation: AnimationConfig | null;
+  schemaVersion: typeof PRESENTATION_SCHEMA_VERSION;
+}
+
 const KEY_SESSION = 'lc.session.v1';
 const KEY_PRESETS = 'lc.presets.v1';
 const KEY_SNAPSHOT = 'lc.snapshot.v1';
 const KEY_SETTINGS = 'lc.settings.v1';
 const KEY_LOG = 'lc.log.v1';
+const KEY_PRESENTATION = 'lc.presentation.v1';
 
 const MIRROR_REALM = 'OBS_WEBSOCKET_DATA_REALM_GLOBAL';
 const MIRROR_SLOT_SESSION = 'live-counter/session';
@@ -126,6 +151,23 @@ function migrateSnapshotV1(x: unknown): unknown {
   if (schemaVersion !== 1) return x;
   if (!isPlainObject(style)) return { ...x, schemaVersion: SNAPSHOT_SCHEMA_VERSION };
   return { ...x, schemaVersion: SNAPSHOT_SCHEMA_VERSION, style: { ...style, layout: inferLayout(template) } };
+}
+
+// Validated on load exactly the way `isOverlaySnapshot` gates the snapshot
+// slot — except that `style`/`animation` go through the ENGINE's own
+// `isStyleConfig`/`isAnimationConfig` (exported for this) rather than a bare
+// isPlainObject check, since an adopted presentation is broadcast straight to
+// the overlay and a half-shaped style would paint `undefinedpx` on air. An
+// unknown/future schemaVersion is treated as "no record", never migrated
+// silently: this is a pure cache of what is already on screen, so falling
+// back to the preset re-derivation costs nothing.
+function isStoredPresentation(x: unknown): x is StoredPresentation {
+  if (!isPlainObject(x)) return false;
+  const { style, template, animation, schemaVersion } = x;
+  if (schemaVersion !== PRESENTATION_SCHEMA_VERSION) return false;
+  if (!(template === null || typeof template === 'string')) return false;
+  if (!(animation === null || isAnimationConfig(animation))) return false;
+  return isStyleConfig(style);
 }
 
 function isDockSettings(x: unknown): x is DockSettings {
@@ -399,6 +441,41 @@ export class DockStorage {
     } else {
       this.safeSet(KEY_SNAPSHOT, JSON.stringify(s));
     }
+  }
+
+  /**
+   * Final gate wave, ruling C — the presentation actually on air, if this
+   * lineage has recorded one. `null` for "nothing usable stored" (absent,
+   * unparseable, or failing validation), which the caller (main.ts's boot)
+   * treats exactly as it always has: fall back to re-deriving the look from
+   * the session's own preset. Local-only, deliberately NOT mirrored to
+   * obs-websocket persistent data: it is a same-machine cache of what the
+   * overlay is already painting, and the mirror exists for records whose loss
+   * would lose operator DATA (session, presets).
+   */
+  loadPresentation(): StoredPresentation | null {
+    const raw = this.local.getItem(KEY_PRESENTATION);
+    if (raw === null) return null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return isStoredPresentation(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  savePresentation(p: { style: StyleConfig; template: string | null; animation: AnimationConfig | null } | null): void {
+    if (p === null) {
+      this.safeRemove(KEY_PRESENTATION);
+      return;
+    }
+    const record: StoredPresentation = {
+      style: p.style,
+      template: p.template,
+      animation: p.animation,
+      schemaVersion: PRESENTATION_SCHEMA_VERSION,
+    };
+    this.safeSet(KEY_PRESENTATION, JSON.stringify(record));
   }
 
   loadSettings(): DockSettings {

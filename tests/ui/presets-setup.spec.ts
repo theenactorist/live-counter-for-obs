@@ -424,7 +424,20 @@ test.describe('dock Setup + Presets views', () => {
       await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
 
       // Delete the preset behind the session's back (it stays presetId-tagged).
-      await page.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+      //
+      // Final gate wave, ruling C — `lc.presentation.v1` goes with it. The
+      // controller now persists the presentation that is actually on air, and
+      // boot prefers that record over re-deriving from the preset, so a
+      // deleted preset ALONE no longer leaves recovery with nothing to adopt
+      // (that is the point of ruling C, and is covered by its own tests
+      // below). This test is about the remaining no-source-at-all path — a
+      // lineage with neither a preset nor a stored presentation, e.g. a dock
+      // upgraded mid-session or a localStorage-less recovery from the
+      // obs-websocket mirror — which must still stay number-only.
+      await page.evaluate(() => {
+        window.localStorage.setItem('lc.presets.v1', '[]');
+        window.localStorage.removeItem('lc.presentation.v1');
+      });
 
       const beforeReload = mock.broadcasts.length;
       await openDock(page, { port: mock.port, devhook: false });
@@ -1866,10 +1879,58 @@ test.describe('dock Setup + Presets views', () => {
         // it, since the OVERLAY side is built from this import while the
         // SETUP side is read live off the actual rendered page, never
         // hand-typed.
-        const { layout: _defaultLayout, ...commonStyle } = DEFAULT_STYLE;
+        const { layout: _defaultLayout, ...defaultStyle } = DEFAULT_STYLE;
         const session = createSession({ startValue: 0, finishValue: 1000, mode: 'manual' }, Date.now());
 
         const layouts: OverlayLayout[] = ['numberOnly', 'textBefore', 'textAfter', 'textAbove', 'textBelow', 'textBehind'];
+
+        // Which node carries the label on each surface, per layout — so the
+        // computed-style comparison below can cover the LABEL as well as the
+        // number (AC 25 names "label text, sizes, colours and typeface").
+        const labelIds = (layout: OverlayLayout): { overlay: string; setup: string } | null => {
+          if (layout === 'numberOnly') return null;
+          if (layout === 'textAfter') return { overlay: 'overlay-text-after', setup: 'setup-preview-label-after' };
+          if (layout === 'textBehind') return { overlay: 'overlay-text-behind', setup: 'setup-preview-label' };
+          return { overlay: 'overlay-text-before', setup: 'setup-preview-label' };
+        };
+
+        // Final gate wave (AC25-PARITY-ASSERTS-LESS) — the loop used to drive
+        // BOTH surfaces from a single unvaried DEFAULT_STYLE, so the AC's
+        // "sizes, colours and typeface" clause was asserted at a fraction of
+        // its stated strength (only the number's font-size/family, only at
+        // the defaults). A second pass with deliberately non-default sizes,
+        // colours and typeface is what makes those words load-bearing.
+        const passes: Array<{ name: string; style: Omit<typeof DEFAULT_STYLE, 'layout'>; drive: () => Promise<void> }> = [
+          { name: 'DEFAULT_STYLE', style: defaultStyle, drive: async () => {} },
+          {
+            name: 'non-default sizes/colours/typeface',
+            style: {
+              ...defaultStyle,
+              numberSizePx: 150,
+              textSizePx: 40,
+              numberColor: '#ff00ff',
+              textColor: '#00aaff',
+              fontFamily: 'Oswald',
+            },
+            drive: async () => {
+              await page.getByTestId('setup-number-size').fill('150');
+              await page.getByTestId('setup-text-size').fill('40');
+              await page.getByTestId('setup-number-color').evaluate((el) => {
+                (el as HTMLInputElement).value = '#ff00ff';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+              });
+              await page.getByTestId('setup-text-color').evaluate((el) => {
+                (el as HTMLInputElement).value = '#00aaff';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+              });
+              await page.getByTestId('setup-font').selectOption('Oswald');
+            },
+          },
+        ];
+
+        for (const pass of passes) {
+        const commonStyle = pass.style;
+        await pass.drive();
 
         for (const layout of layouts) {
           const template = layout === 'numberOnly' ? null : 'Score';
@@ -1898,16 +1959,30 @@ test.describe('dock Setup + Presets views', () => {
           // may be visually SCALED via a CSS transform to fit the 300 px
           // dock — transform never changes computed style values, only
           // rendered position/size, so this holds regardless of scaling.)
-          const overlayNumberStyle = await overlayPage.getByTestId('overlay-number').evaluate((el) => {
-            const s = getComputedStyle(el);
-            return { fontSize: s.fontSize, fontFamily: s.fontFamily };
-          });
-          const setupNumberStyle = await page.getByTestId('setup-preview-number').evaluate((el) => {
-            const s = getComputedStyle(el);
-            return { fontSize: s.fontSize, fontFamily: s.fontFamily };
-          });
+          const readStyle = (locator: Locator): Promise<{ fontSize: string; fontFamily: string; color: string }> =>
+            locator.evaluate((el) => {
+              const s = getComputedStyle(el);
+              return { fontSize: s.fontSize, fontFamily: s.fontFamily, color: s.color };
+            });
+          const overlayNumberStyle = await readStyle(overlayPage.getByTestId('overlay-number'));
+          const setupNumberStyle = await readStyle(page.getByTestId('setup-preview-number'));
           expect(setupNumberStyle.fontSize).toBe(overlayNumberStyle.fontSize);
           expect(setupNumberStyle.fontFamily).toBe(overlayNumberStyle.fontFamily);
+          // Final gate wave (AC25-PARITY-ASSERTS-LESS) — colours were never
+          // compared on either surface before.
+          expect(setupNumberStyle.color).toBe(overlayNumberStyle.color);
+
+          const ids = labelIds(layout);
+          if (ids !== null) {
+            const overlayLabelStyle = await readStyle(overlayPage.getByTestId(ids.overlay));
+            const setupLabelStyle = await readStyle(page.getByTestId(ids.setup));
+            // The LABEL's own size/colour/typeface, not just the number's.
+            // (The ghost's size is derived from numberSizePx by the shared
+            // module, so textBehind compares that derivation too.)
+            expect(setupLabelStyle.fontSize).toBe(overlayLabelStyle.fontSize);
+            expect(setupLabelStyle.fontFamily).toBe(overlayLabelStyle.fontFamily);
+            expect(setupLabelStyle.color).toBe(overlayLabelStyle.color);
+          }
 
           if (layout === 'numberOnly') {
             // Neither page has a label node showing anything.
@@ -2015,12 +2090,87 @@ test.describe('dock Setup + Presets views', () => {
               .evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
             expect(overlayGhostFontSize).toBeGreaterThan(overlayNumberFontSize);
             expect(setupGhostFontSize).toBeGreaterThan(setupNumberFontSize);
+
+            // Final gate wave, ruling A (F1) — a CLIP-AWARE check, because
+            // boundingBox() reports an element's rect whether or not an
+            // ancestor is hiding it: every assertion above passed happily on
+            // a ghost that was mostly cut off by
+            // `.setup-preview-scale-box { overflow: hidden }`. The real
+            // overlay renders the whole ghost (its container is the full
+            // browser-source viewport with no clipping ancestor), so the
+            // preview must actually SHOW the whole ghost too, not merely
+            // contain a node whose geometry would be right if it were
+            // visible.
+            const scaleBoxRect = await page.locator('.setup-preview-scale-box').boundingBox();
+            expect(scaleBoxRect).not.toBeNull();
+            const tolerance = 1; // sub-pixel rounding on the scale factor
+            expect(setupGhost!.x).toBeGreaterThanOrEqual(scaleBoxRect!.x - tolerance);
+            expect(setupGhost!.y).toBeGreaterThanOrEqual(scaleBoxRect!.y - tolerance);
+            expect(setupGhost!.x + setupGhost!.width).toBeLessThanOrEqual(
+              scaleBoxRect!.x + scaleBoxRect!.width + tolerance,
+            );
+            expect(setupGhost!.y + setupGhost!.height).toBeLessThanOrEqual(
+              scaleBoxRect!.y + scaleBoxRect!.height + tolerance,
+            );
           }
+        }
         }
       } finally {
         close();
         await overlayPage.close();
       }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Final gate wave, ruling A (F1) — the parity test above runs at
+  // Playwright's default 1280px viewport, where nothing is scaled; the
+  // operator's dock is ~300px, where fitPreviewToScale() actually engages.
+  // Both widths clipped before this wave, for the same reason (an overflow
+  // clip applies in the element's own pre-transform space), so both are
+  // asserted.
+  test('preview clipping (ruling A): at the real ~300 px dock width nothing overflows the preview box — ghost or long label', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.setViewportSize({ width: 320, height: 720 });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('5');
+
+      const assertInsideBox = async (testid: string): Promise<void> => {
+        const box = await page.locator('.setup-preview-scale-box').boundingBox();
+        const node = await page.getByTestId(testid).boundingBox();
+        expect(box).not.toBeNull();
+        expect(node).not.toBeNull();
+        const tolerance = 1; // sub-pixel rounding on the scale factor
+        expect(node!.x).toBeGreaterThanOrEqual(box!.x - tolerance);
+        expect(node!.y).toBeGreaterThanOrEqual(box!.y - tolerance);
+        expect(node!.x + node!.width).toBeLessThanOrEqual(box!.x + box!.width + tolerance);
+        expect(node!.y + node!.height).toBeLessThanOrEqual(box!.y + box!.height + tolerance);
+        // ...and it must still be a real, visible rendering, not a
+        // degenerate zero-size node that trivially "fits".
+        expect(node!.width).toBeGreaterThan(0);
+        expect(node!.height).toBeGreaterThan(0);
+      };
+
+      // 'Counter in front': the ghost is ~2.4x the number, centred on a
+      // contentRoot only as wide as the number, so most of it used to sit at
+      // negative coordinates inside an overflow:hidden box.
+      await page.getByTestId('setup-layout-textBehind').click();
+      await page.getByTestId('setup-template').fill('Score');
+      await expect(page.getByTestId('setup-preview-number')).toHaveText('5');
+      await assertInsideBox('setup-preview-label');
+
+      // A long inline label: same clip, different direction (rightward
+      // overflow that the old scale factor shrank but never un-clipped).
+      await page.getByTestId('setup-layout-textBefore').click();
+      await page.getByTestId('setup-template').fill('A very long label indeed for the counter');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('A very long label indeed for the counter');
+      await assertInsideBox('setup-preview-label');
+      await assertInsideBox('setup-preview-number');
     } finally {
       await mock.close();
     }
@@ -2531,6 +2681,88 @@ test.describe('dock Setup + Presets views', () => {
         await expect(warning).toBeVisible();
         await expect(warning).toContainText('23');
         await expect(warning).toContainText('10');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Final gate wave, ruling B (U1 / AC 27): the clamp warning has to be
+    // delivered where the Update click actually PUTS the operator. Setup's
+    // own copy is painted into a pane that `tabs.activate('live')` hides in
+    // the same synchronous task, so the test above had to click back to Setup
+    // to see it — encoding the defect rather than catching it. ------------
+
+    test('a clamped Update warns on LIVE, where the click lands, naming both values — dismissible, and never stale (ruling B / AC 27)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+        const plus = page.getByTestId('btn-plus');
+        for (let i = 0; i < 23; i++) await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('23');
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-finish').fill('10');
+        await page.getByTestId('setup-update-session').click();
+
+        // No manual trip back to Setup: the explanation for the 23 -> 10 jump
+        // is on the pane the operator is now looking at.
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        const banner = page.getByTestId('banner-clamped');
+        await expect(banner).toBeVisible();
+        await expect(banner).toContainText('23'); // the value that disappeared
+        await expect(banner).toContainText('10'); // what it became
+
+        await page.getByTestId('clamped-dismiss').click();
+        await expect(banner).toHaveCount(0);
+
+        // Dismissing on Live is a read-receipt for THIS pane; the session it
+        // describes is still running, so Setup's copy is still there.
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-reconfigure-warning')).toBeVisible();
+
+        // A later Update that clamps nothing leaves no stale copy anywhere.
+        await page.getByTestId('setup-finish').fill('80');
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect(page.getByTestId('banner-clamped')).toHaveCount(0);
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-reconfigure-warning')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // Final gate wave (U5) — Setup is only ever hidden, never unmounted, so a
+    // warning it owned locally outlived the session it described: end that
+    // session, start another, and the operator saw "clamped to 10" above a
+    // session where no clamp ever happened.
+    test('the clamp warning never outlives its session: ending the session clears it from Setup too (U5)', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+        const plus = page.getByTestId('btn-plus');
+        for (let i = 0; i < 23; i++) await plus.click();
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-finish').fill('10');
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('banner-clamped')).toBeVisible();
+
+        // End it from Live — the path that used to leave Setup's banner
+        // painted for the life of the page.
+        await page.getByTestId('btn-end').click();
+        await page.getByTestId('end-hide').click();
+        await expect(page.getByTestId('live-empty')).toBeVisible();
+        await expect(page.getByTestId('banner-clamped')).toHaveCount(0);
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-reconfigure-warning')).toHaveCount(0);
       } finally {
         await mock.close();
       }
@@ -3472,8 +3704,16 @@ test.describe('dock Setup + Presets views', () => {
         await dock.getByTestId('preset-start').click();
         await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
 
-        // Delete the preset behind the session's back.
-        await dock.evaluate(() => window.localStorage.setItem('lc.presets.v1', '[]'));
+        // Delete the preset behind the session's back — and, final gate wave
+        // ruling C, the persisted presentation with it: this test is
+        // specifically about the `presentation === null` branch (nothing on
+        // air is known), which now requires BOTH sources to be gone. Ruling
+        // C's own tests below cover the case where the stored record survives
+        // a deleted preset.
+        await dock.evaluate(() => {
+          window.localStorage.setItem('lc.presets.v1', '[]');
+          window.localStorage.removeItem('lc.presentation.v1');
+        });
 
         await openDock(dock, { port: mock.port, devhook: false }); // reload: recovers the session; presentation stays unknown
         await expect(dock.getByTestId('current-value')).toHaveText('0');
@@ -3496,6 +3736,283 @@ test.describe('dock Setup + Presets views', () => {
         await expect(overlay.getByTestId('overlay-text-before')).toHaveText('Fresh Label ');
         const color = await overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color);
         expect(color).toBe('rgb(0, 255, 0)');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Final gate wave, ruling C (U2): presentation applied by Update must
+    // survive a dock reload. Boot used to re-derive the look SOLELY from the
+    // originating preset, so a mid-service look change reverted on the next
+    // reload — while the range/interval/completion applied by the same click
+    // survived (those live on Session). Recovery restored half of one
+    // operator action. ----------------------------------------------------
+
+    /** The most recent 'state' broadcast carrying a non-null style, from `from` onward. */
+    function lastStyledBroadcast(mock: MockObs, from: number): { style?: { numberColor?: string }; template?: string } | null {
+      const since = mock.broadcasts.slice(from).map((b) => b.eventData as BroadcastEnvelope);
+      const last = [...since].reverse().find((e) => {
+        if (!e || e.kind !== 'state') return false;
+        const payload = e.payload as { style?: unknown } | null;
+        return payload?.style != null;
+      });
+      return (last?.payload as { style?: { numberColor?: string }; template?: string }) ?? null;
+    }
+
+    test('ruling C: a look applied by Update survives a dock reload (must fail without the persisted presentation)', async ({
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        const dock = await context.newPage();
+        const overlay = await context.newPage();
+        await openDock(dock, { port: mock.port, devhook: false });
+        await overlay.goto(`${OVERLAY_URL}?port=${mock.port}`);
+
+        // A preset-backed session whose SAVED look is red.
+        await fillCoreSetupFields(dock, { start: 0, finish: 50, title: 'Red Preset', template: 'Score: {count}' });
+        await dock.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#ff0000';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await dock.getByTestId('setup-save').click();
+        await dock.getByTestId('tab-presets').click();
+        await expect(dock.getByTestId('preset-row')).toContainText('Red Preset');
+        await dock.getByTestId('preset-start').click();
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect
+          .poll(async () => overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color))
+          .toBe('rgb(255, 0, 0)');
+
+        // Mid-service, the operator changes the look to green and Updates.
+        await dock.getByTestId('tab-setup').click();
+        await dock.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#00ff00';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await dock.getByTestId('setup-update-session').click();
+        await expect(dock.getByTestId('tab-live')).toHaveClass(/active/);
+        await expect
+          .poll(async () => overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color))
+          .toBe('rgb(0, 255, 0)');
+
+        // Dock restart. Only broadcasts made AFTER it count — the overlay is
+        // already green, so polling its DOM alone would pass even if the
+        // fresh dock re-derived the preset's red.
+        const beforeReload = mock.broadcasts.length;
+        await openDock(dock, { port: mock.port, devhook: false });
+        await expect(dock.getByTestId('current-value')).toHaveText('0');
+        await expect.poll(() => lastStyledBroadcast(mock, beforeReload)?.style?.numberColor ?? null, { timeout: 3000 })
+          .toBe('#00ff00'); // NOT the preset's saved '#ff0000'
+        expect(lastStyledBroadcast(mock, beforeReload)?.template).toBe('Score: {count}');
+
+        // And the audience sees the Updated look, not the preset's.
+        await expect
+          .poll(async () => overlay.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).color))
+          .toBe('rgb(0, 255, 0)');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('ruling C: with no stored presentation record, recovery still re-derives the look from the session preset', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 50, title: 'Magenta Preset', template: 'Score: {count}' });
+        await page.getByTestId('setup-number-color').evaluate((el) => {
+          (el as HTMLInputElement).value = '#ff00ff';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await page.getByTestId('setup-save').click();
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-start').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        // A lineage with no stored record — a dock upgraded mid-session, or a
+        // localStorage-less recovery from the obs-websocket mirror. The
+        // preset lookup must still be there as the fallback.
+        await page.evaluate(() => window.localStorage.removeItem('lc.presentation.v1'));
+
+        const beforeReload = mock.broadcasts.length;
+        await openDock(page, { port: mock.port, devhook: false });
+        await expect(page.getByTestId('current-value')).toHaveText('0');
+        await expect.poll(() => lastStyledBroadcast(mock, beforeReload)?.style?.numberColor ?? null, { timeout: 3000 })
+          .toBe('#ff00ff');
+        expect(lastStyledBroadcast(mock, beforeReload)?.template).toBe('Score: {count}');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Final gate wave, minors -----------------------------------------
+
+    test('F3: a live off-menu interval renders as a disabled "(current)" option instead of silently reading 0.25s', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.evaluate(() => {
+          const now = new Date().toISOString();
+          window.localStorage.setItem(
+            'lc.session.v1',
+            JSON.stringify({
+              schemaVersion: 1,
+              revision: 0,
+              presetId: null,
+              startValue: 0,
+              finishValue: 1000,
+              currentValue: 0,
+              direction: 'up',
+              mode: 'automatic',
+              status: 'paused',
+              intervalSeconds: 1.3, // off-menu, and legitimate (engine rule 5)
+              overlayVisible: true,
+              hiddenByCompletion: false,
+              undoStack: [],
+              completion: { kind: 'hold' },
+              updatedAt: now,
+            }),
+          );
+        });
+        await openDock(page, { port: mock.port, devhook: false }); // reload: recovers it
+
+        await page.getByTestId('tab-setup').click();
+        // The control reads the LIVE tick rate, not the first menu entry.
+        await expect(page.getByTestId('setup-interval')).toHaveValue('1.3');
+        const current = page.getByTestId('setup-interval-current');
+        await expect(current).toHaveText('1.3s (current)');
+        // A read-out, never a choice. (`toBeDisabled()` doesn't cover
+        // <option>, so read the property directly.)
+        expect(await current.evaluate((el) => (el as HTMLOptionElement).disabled)).toBe(true);
+
+        // Picking a real menu entry retires it.
+        await page.getByTestId('setup-interval').selectOption('2');
+        await expect(page.getByTestId('setup-interval')).toHaveValue('2');
+        await expect(page.getByTestId('setup-interval-current')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('U6: an invalid range/hold field is named inline, and the staleness notice points at it instead of at a disabled button', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-range-error')).toHaveCount(0);
+
+        await page.getByTestId('setup-finish').fill(''); // unparseable
+        await expect(page.getByTestId('setup-range-error')).toBeVisible();
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+        await expect(page.getByTestId('setup-start-session')).toBeDisabled();
+        await expect(page.getByTestId('setup-not-applied-notice')).toContainText('Fix the highlighted field first.');
+
+        // Equal start/finish is invalid too, and says so in its own words.
+        await page.getByTestId('setup-finish').fill('0');
+        await expect(page.getByTestId('setup-range-error')).toContainText('different');
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+
+        // Fixed: the error goes, the notice drops the instruction, Update works.
+        await page.getByTestId('setup-finish').fill('80');
+        await expect(page.getByTestId('setup-range-error')).toHaveCount(0);
+        await expect(page.getByTestId('setup-not-applied-notice')).not.toContainText('Fix the highlighted field first.');
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+
+        // Same treatment for the hold duration, which had no message either.
+        await page.getByTestId('setup-completion').selectOption('holdThenHide');
+        await page.getByTestId('setup-completion-seconds').fill('');
+        await expect(page.getByTestId('setup-completion-seconds-error')).toBeVisible();
+        await expect(page.getByTestId('setup-update-session')).toBeDisabled();
+        await page.getByTestId('setup-completion-seconds').fill('7');
+        await expect(page.getByTestId('setup-completion-seconds-error')).toHaveCount(0);
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('U7: Start session applies the mode the operator can SEE, not a loaded preset\'s hidden one', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        // A MANUAL preset (the form's default mode).
+        await fillCoreSetupFields(page, { start: 3, finish: 40, title: 'Manual Preset' });
+        await page.getByTestId('setup-save').click();
+        await page.getByTestId('tab-presets').click();
+        await expect(page.getByTestId('preset-row')).toContainText('Manual Preset');
+
+        // An AUTOMATIC session, started while Mode was still editable.
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-mode').selectOption('automatic');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        // Load the manual preset over it: Mode is now a disabled read-out of
+        // the RUNNING session ('automatic'), with the mismatch note naming
+        // the preset's own mode.
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('preset-row').filter({ hasText: 'Manual Preset' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('setup-mode')).toHaveValue('automatic');
+        await expect(page.getByTestId('setup-mode')).toBeDisabled();
+        await expect(page.getByTestId('setup-mode-mismatch-note')).toBeVisible();
+
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        // The brand-new session is AUTOMATIC — what the visible control said
+        // — not the preset's hidden 'manual'. (Its range IS the preset's:
+        // those fields are on screen and dirty.)
+        await expect(page.getByTestId('current-value')).toHaveText('3');
+        await expect(page.getByTestId('auto-rate')).toBeVisible();
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { mode: string; startValue: number },
+        );
+        expect(stored.mode).toBe('automatic');
+        expect(stored.startValue).toBe(3);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('PREVIEW-SHOWS-START: with a session live, the preview renders its CURRENT value, not the form\'s start value', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true
+
+        // No session yet: the preview shows the value a future session would
+        // start at — the form's own start field.
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('7');
+        await expect(page.getByTestId('setup-preview-number')).toHaveText('7');
+
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+        await page.getByTestId('tab-live').click();
+        const plus = page.getByTestId('btn-plus');
+        for (let i = 0; i < 12; i++) await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('12');
+
+        await page.getByTestId('tab-setup').click();
+        // Two digits, matching what is on air — the digit count is exactly
+        // what drives how the number sits against the label. The start field
+        // still reads the operator's own untouched 7 (an edit `refresh()`
+        // must not clobber), so this is a genuine disagreement between the
+        // two, resolved in favour of what the audience is actually seeing.
+        await expect(page.getByTestId('setup-start')).toHaveValue('7');
+        await expect(page.getByTestId('setup-preview-number')).toHaveText('12');
       } finally {
         await mock.close();
       }

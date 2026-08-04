@@ -46,7 +46,7 @@
 // content — every dynamic string this view renders goes through
 // `textContent`/`.value`, never `innerHTML`.
 import type { Preset, StyleConfig, AnimationConfig, CompletionConfig, Mode, OverlayLayout, Session } from '../../engine/types.js';
-import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION } from '../../engine/types.js';
+import { SPEED_LEVELS, isValidCountValue, isPreset, PRESET_SCHEMA_VERSION, MAX_VALUE } from '../../engine/types.js';
 import { applyCommand, type SessionConfig } from '../../engine/counter.js';
 import type { SessionController, ControllerState } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
@@ -196,13 +196,6 @@ interface SetupUiState {
   editing: EditingState | null;
   conflict: ConflictKind;
   error: string | null;
-  // Task 2.18 — set after a successful "Update session" whose reconfigure
-  // clamped the running session's currentValue into the (possibly narrowed)
-  // new range; names the pre-clamp and post-clamp values. Persists across
-  // tab switches (this view is only ever hidden, never unmounted) until the
-  // next Update session click, so the operator sees it whether they check
-  // right away or after a moment on Live.
-  reconfigureWarning: string | null;
   // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
   // tracking, replacing fix wave 1's single whole-form boolean. Each control
   // adds its own canonical field name (matching the `SetupUiState` property
@@ -325,7 +318,6 @@ function defaultUiState(): SetupUiState {
     editing: null,
     conflict: null,
     error: null,
-    reconfigureWarning: null,
     dirtyFields: new Set(),
   };
 }
@@ -395,16 +387,39 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // undo Task 2.17's whole fix for this preview specifically.
   previewNodes.contentRoot.style.whiteSpace = 'nowrap';
 
-  // The box `fitPreviewToScale()` (below) scales via CSS transform to keep
-  // that natural, unwrapped preview inside the 300 px dock — assigned by
-  // `renderPreviewBlock()` on every render() call (a fresh element each
-  // time, since render() rebuilds the surrounding form from scratch).
+  // The two elements `fitPreviewToScale()` (below) drives to keep that
+  // natural, unwrapped preview inside the 300 px dock — both assigned by
+  // `renderPreviewBlock()` on every render() call (fresh elements each time,
+  // since render() rebuilds the surrounding form from scratch).
+  //
+  // Final gate wave, ruling A (F1) — these used to be ONE element: the box
+  // carried `width: 100%` + `overflow: hidden` AND the `transform: scale()`.
+  // That cannot work, and hid a real WYSIWYG lie: an element's overflow clip
+  // is applied in its OWN, pre-transform coordinate space, so content wider
+  // (or taller) than the box's own LAYOUT size is clipped no matter how far
+  // the box is then scaled down — scaling shrinks the clip rect and the
+  // content by the same factor, so exactly the same fraction is cut off. The
+  // 'Counter in front' ghost made it unmissable (it is centred on a narrow,
+  // left-aligned contentRoot, so most of it sits at NEGATIVE local
+  // coordinates, which no amount of scaling can bring back into a clip that
+  // starts at 0), but a long enough label clipped in every layout.
+  //
+  // Split in two, each with one job:
+  //  - `previewScaleBox` — the LAYOUT FOOTPRINT. Keeps `width: 100%` +
+  //    `overflow: hidden`, and gets an explicit height equal to the preview's
+  //    SCALED visual height, so the form below it doesn't get pushed down by
+  //    the preview's unscaled size (transform never changes layout).
+  //  - `previewScaleInner` — the SCALED CONTENT. Sized to the preview's true
+  //    visual union (see below) and carrying the `transform: scale()`, so the
+  //    clip that matters is this element's own box, which by construction is
+  //    exactly big enough for everything inside it.
   let previewScaleBox: HTMLElement | null = null;
+  let previewScaleInner: HTMLElement | null = null;
 
-  // Scales `previewScaleBox` down (uniformly, preserving aspect ratio) just
-  // enough that the preview's TRUE, unwrapped width fits the box's own
+  // Scales `previewScaleInner` down (uniformly, preserving aspect ratio) just
+  // enough that the preview's TRUE, unwrapped width fits the footprint box's
   // available width — never up (a short label/number never gets
-  // artificially enlarged). The scale lives on the WRAPPER, never on
+  // artificially enlarged). The scale lives on a WRAPPER, never on
   // `previewNodes.contentRoot` itself (same wrapper-vs-animated-node split
   // already established for the textBehind ghost, above) — Test-animation's
   // WAAPI `.animate()` call targets `contentRoot` directly (`setup-preview`),
@@ -414,26 +429,74 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // unscaled size on every Test-animation click.
   function fitPreviewToScale(): void {
     const scaleBox = previewScaleBox;
-    if (!scaleBox) return;
-    // Reset before measuring — a previous render's own scale/height must
+    const inner = previewScaleInner;
+    if (!scaleBox || !inner) return;
+    const { contentRoot, behindWrapEl, behindEl } = previewNodes;
+    // Reset before measuring — a previous render's own scale/size/offset must
     // never skew THIS render's natural-size read.
-    scaleBox.style.transform = 'none';
+    inner.style.transform = 'none';
+    inner.style.width = '';
+    inner.style.height = '';
+    contentRoot.style.marginLeft = '';
+    contentRoot.style.marginTop = '';
     scaleBox.style.height = '';
-    const naturalWidth = previewNodes.contentRoot.scrollWidth;
-    const naturalHeight = previewNodes.contentRoot.scrollHeight;
-    const available = scaleBox.clientWidth;
-    if (available > 0 && naturalWidth > available) {
-      const factor = available / naturalWidth;
-      scaleBox.style.transformOrigin = 'top left';
-      scaleBox.style.transform = `scale(${factor})`;
-      // Compensates the wrapper's own LAYOUT height to the scaled-down
-      // VISUAL height — transform never changes an element's own layout
-      // footprint, so without this the box would keep its full, unscaled
-      // height and leave a tall empty gap beneath the now-smaller preview.
-      scaleBox.style.height = `${naturalHeight * factor}px`;
-    } else {
-      scaleBox.style.height = `${naturalHeight}px`;
+
+    // Ruling A (F1) — the preview's TRUE visual extent, which
+    // `scrollWidth`/`scrollHeight` alone cannot see. The `textBehind` ghost
+    // lives in `behindWrapEl` (position: absolute, centred via
+    // translate(-50%, -50%) on a contentRoot that is only as wide as the
+    // number), so its LEFT/TOP overhang is not layout overflow at all —
+    // scrollable overflow only ever grows rightward/downward. Measuring the
+    // union of contentRoot's own rect and the ghost's actual, transformed
+    // rect is what finally sees it. `scrollWidth`/`scrollHeight` stay in the
+    // max() because they DO see content overflowing contentRoot's own
+    // shrink-to-fit box, which its bounding rect alone would miss.
+    const rootRect = contentRoot.getBoundingClientRect();
+    let left = rootRect.left;
+    let top = rootRect.top;
+    let right = rootRect.left + Math.max(rootRect.width, contentRoot.scrollWidth);
+    let bottom = rootRect.top + Math.max(rootRect.height, contentRoot.scrollHeight);
+
+    // `behindWrapEl` is `display: none` for every layout except textBehind
+    // (applyPresentation sets it), and a display:none element's rect is all
+    // zeros — which, unioned with a rect at real viewport coordinates, would
+    // invent an enormous box. So this branch only ever widens the one layout
+    // that actually has a ghost.
+    if (behindWrapEl.style.display !== 'none') {
+      const ghostRect = behindEl.getBoundingClientRect();
+      if (ghostRect.width > 0 || ghostRect.height > 0) {
+        left = Math.min(left, ghostRect.left);
+        top = Math.min(top, ghostRect.top);
+        right = Math.max(right, ghostRect.right);
+        bottom = Math.max(bottom, ghostRect.bottom);
+      }
     }
+
+    const unionWidth = right - left;
+    const unionHeight = bottom - top;
+    // How far the union extends ABOVE/LEFT of contentRoot's own origin —
+    // i.e. exactly how far contentRoot has to move down/right inside `inner`
+    // for the whole ghost to sit at non-negative local coordinates, which is
+    // the only place a clip starting at (0, 0) can show it.
+    const overhangLeft = rootRect.left - left;
+    const overhangTop = rootRect.top - top;
+
+    const available = scaleBox.clientWidth;
+    const factor = available > 0 && unionWidth > available ? available / unionWidth : 1;
+
+    if (overhangLeft > 0) contentRoot.style.marginLeft = `${overhangLeft}px`;
+    if (overhangTop > 0) contentRoot.style.marginTop = `${overhangTop}px`;
+    if (unionWidth > 0) inner.style.width = `${unionWidth}px`;
+    if (unionHeight > 0) inner.style.height = `${unionHeight}px`;
+    if (factor < 1) {
+      inner.style.transformOrigin = 'top left';
+      inner.style.transform = `scale(${factor})`;
+    }
+    // Compensates the footprint's own LAYOUT height to the scaled-down VISUAL
+    // height — transform never changes an element's own layout footprint, so
+    // without this the box would keep the full, unscaled height and leave a
+    // tall empty gap beneath the now-smaller preview.
+    scaleBox.style.height = `${unionHeight * factor}px`;
   }
 
   // Task 2.15 review-driven fix — `fitPreviewToScale()` above only ever ran
@@ -566,6 +629,23 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const s = parseIntStrict(ui.startValue);
     const f = parseIntStrict(ui.finishValue);
     return s !== null && f !== null && isValidCountValue(s) && isValidCountValue(f) && s !== f;
+  }
+
+  // Final gate wave (U6) — the operator-facing reason `rangeValid()` is
+  // false, or null when it isn't. Setup used to render inline errors for the
+  // two SIZE fields only, so an empty/garbage/equal Start or Finish disabled
+  // Save, Start AND Update with no message anywhere — while the "not applied
+  // yet" notice went right on telling the operator to click a button that
+  // could not be clicked. Both halves are fixed: this names the field, and
+  // the notice (see render()) points at it.
+  function rangeErrorText(): string | null {
+    const s = parseIntStrict(ui.startValue);
+    const f = parseIntStrict(ui.finishValue);
+    if (s === null || f === null || !isValidCountValue(s) || !isValidCountValue(f)) {
+      return `Enter whole numbers between 0 and ${MAX_VALUE} for Start and Finish`;
+    }
+    if (s === f) return 'Start and Finish must be different';
+    return null;
   }
 
   // Review fix (Critical 1/2): holdThenHide with seconds <= 0 (or non-integer,
@@ -856,7 +936,18 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return a.kind === b.kind && a.seconds === b.seconds;
   }
 
+  // Final gate wave (PREVIEW-SHOWS-START) — PRD §8.8 says the preview
+  // "renders with the current value", and now that this form prefills from
+  // and updates a RUNNING session that has a concrete WYSIWYG consequence:
+  // digit count drives layout width, so previewing a 1-digit start value
+  // while the session sits at 3 digits misrepresents how the number will sit
+  // against the label in exactly the layouts the preview exists to choose
+  // between. The parsed start value remains the answer whenever there is no
+  // session to disagree with (the form is then configuring a FUTURE session,
+  // whose first value IS the start value).
   function previewValue(): number {
+    const session = opts.controller.getState().session;
+    if (session !== null) return session.currentValue;
     const s = parseIntStrict(ui.startValue);
     return s !== null && isValidCountValue(s) ? s : 0;
   }
@@ -864,6 +955,33 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   async function performSave(force: boolean): Promise<void> {
     if (!canSave()) return;
     ui.error = null;
+
+    // Final gate wave (SAVE-READS-FORM-AFTER-AWAIT) — every operator-authored
+    // field this save persists is captured BEFORE the await below, and only
+    // this snapshot is read afterwards. `loadPresets()` is not a microtask:
+    // it routes through loadWithMirror, which issues a real GetPersistentData
+    // request whenever a client is attached — up to the 8s request timeout on
+    // an identified-but-slow OBS. Anything the operator typed inside that
+    // window used to be what got written, under the preset id captured before
+    // it. (Whole-list integrity was never at risk — the map/concat below
+    // works off the freshly-read list — only this one preset's own values.)
+    const form = {
+      title: ui.title.trim(),
+      startValue: parseIntStrict(ui.startValue)!,
+      finishValue: parseIntStrict(ui.finishValue)!,
+      mode: ui.mode,
+      intervalSeconds: ui.intervalSeconds,
+      // Task 2.17 (operator feedback, PRD §8.8 AC 28) — `.trim()` used to be
+      // applied to the STORED value too, silently eating an operator's
+      // leading/trailing label spaces on every Save (and surfacing again on
+      // the next Load/export). `.trim().length > 0` still decides "is this
+      // field empty" (an all-whitespace label still saves as `null`, same as
+      // before) — but the persisted value is the RAW `ui.template`.
+      template: ui.template.trim().length > 0 ? ui.template : null,
+      style: buildStyle(),
+      animation: buildAnimation(),
+      completion: buildCompletion(),
+    };
 
     const outcome = await opts.storage.loadPresets();
     if (destroyed) return;
@@ -887,36 +1005,25 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
 
     const now = new Date().toISOString();
-    const style = buildStyle();
-    const animation = buildAnimation();
-    const completion = buildCompletion();
-    const startValue = parseIntStrict(ui.startValue)!;
-    const finishValue = parseIntStrict(ui.finishValue)!;
 
     const preset: Preset = {
       schemaVersion: PRESET_SCHEMA_VERSION,
       id: ui.editing ? ui.editing.id : crypto.randomUUID(),
-      title: ui.title.trim(),
+      title: form.title,
       // Task 2.14 (operator: "no use for description") — the field stays in
       // the stored schema for compatibility (export/import still carries an
       // OLDER preset's description through untouched — presets.ts never
       // touches this field at all), but Setup no longer has any UI for it,
       // so every preset this view saves (new or edited) always writes null.
       description: null,
-      startValue,
-      finishValue,
-      mode: ui.mode,
-      intervalSeconds: ui.intervalSeconds,
-      // Task 2.17 (operator feedback, PRD §8.8 AC 28) — `.trim()` used to be
-      // applied to the STORED value too, silently eating an operator's
-      // leading/trailing label spaces on every Save (and surfacing again on
-      // the next Load/export). `.trim().length > 0` still decides "is this
-      // field empty" (an all-whitespace label still saves as `null`, same as
-      // before) — but the persisted value is the RAW `ui.template`.
-      template: ui.template.trim().length > 0 ? ui.template : null,
-      style,
-      animation,
-      completion,
+      startValue: form.startValue,
+      finishValue: form.finishValue,
+      mode: form.mode,
+      intervalSeconds: form.intervalSeconds,
+      template: form.template,
+      style: form.style,
+      animation: form.animation,
+      completion: form.completion,
       createdAt: ui.editing ? ui.editing.createdAt : now,
       updatedAt: now,
     };
@@ -971,15 +1078,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   function onStartSession(): void {
     if (!canStart()) return;
     ui.error = null;
-    // A clamp warning from a PREVIOUS session's Update session is stale the
-    // moment a brand new session starts.
-    ui.reconfigureWarning = null;
     const startValue = parseIntStrict(ui.startValue)!;
     const finishValue = parseIntStrict(ui.finishValue)!;
+    // Final gate wave (U7) — the mode Start applies is the mode the operator
+    // can actually SEE. Fix wave 4 made the Mode select a disabled read-out of
+    // the running session's own mode while one is active (correct: Setup never
+    // changes a running session's mode, Live's toggle does), but Start kept
+    // building from `ui.mode` — which `loadPreset()` writes from the preset
+    // without marking dirty. So with an Automatic session running, loading a
+    // Manual preset and clicking "Start session" created a MANUAL session
+    // while the visible Mode control read "Automatic". `renderModeSelect` and
+    // the Interval row's own visibility gate already derive from exactly this
+    // expression, so all three now read from one source.
+    const activeSession = opts.controller.getState().session;
+    const mode: Mode = activeSession ? activeSession.mode : ui.mode;
     const cfg: SessionConfig = {
       startValue,
       finishValue,
-      mode: ui.mode,
+      mode,
       intervalSeconds: ui.intervalSeconds,
       completion: buildCompletion(),
       presetId: ui.editing ? ui.editing.id : null,
@@ -1059,9 +1175,6 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     if (!activeSession) return;
 
     ui.error = null;
-    ui.reconfigureWarning = null;
-
-    const previousValue = activeSession.currentValue;
 
     const cmd = reconfigureCommandFor(activeSession);
     if (!cmd) {
@@ -1084,10 +1197,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       opts.controller.adoptPresentation(presentationCmd.style, presentationCmd.template, presentationCmd.animation);
     }
 
-    if (result.session.currentValue !== previousValue) {
-      ui.reconfigureWarning =
-        `Current value ${previousValue} was outside the new range and was clamped to ${result.session.currentValue}.`;
-    }
+    // Final gate wave, ruling B — the clamp notice is no longer computed (or
+    // owned) here. `SessionController` records it on the accepted
+    // `reconfigure` itself and exposes it as `ControllerState.clamp`, so
+    // BOTH this view and Live can render it — the pane the operator actually
+    // lands on after this click is Live (`opts.onSessionStarted()` below) —
+    // and so it can never outlive the session it describes (U5: ending the
+    // session from Live, or starting a new one from Presets, used to leave a
+    // stale "clamped to 10" banner sitting above an unrelated session, since
+    // this view is only hidden, never unmounted).
 
     // Fix wave 1 (Important 2) — Update is one of the dirty-clearing points:
     // the form now matches the just-applied session, not an unsaved edit.
@@ -1196,9 +1314,35 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   function renderIntervalSelect(): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-interval' }) as HTMLSelectElement;
+    // Final gate wave (F3) — a live session can legitimately run at an
+    // interval that is not a SPEED_LEVELS entry (engine reconfigure rule 5
+    // keeps an unchanged off-menu value valid, e.g. a recovered 1.3s session
+    // later switched to automatic from Live). With no matching <option> the
+    // browser falls back to displaying the FIRST one ('0.25s') while
+    // `ui.intervalSeconds` — and a clean Update — correctly carry 1.3
+    // through: the behaviour is right, the display lies about the running
+    // tick rate. A disabled, selected synthetic option makes the control read
+    // the live truth until the operator picks a real menu entry.
+    //
+    // Only while the field is CLEAN: a dirty off-menu value came from
+    // `loadPreset()` (a preset's own interval), which is a pending choice,
+    // not the session's current rate, so labelling it "(current)" would be
+    // its own small lie.
+    const offMenu =
+      !(SPEED_LEVELS as readonly number[]).includes(ui.intervalSeconds) && !ui.dirtyFields.has('intervalSeconds');
+    if (offMenu) {
+      const current = el(
+        'option',
+        { value: String(ui.intervalSeconds), 'data-testid': 'setup-interval-current' },
+        `${ui.intervalSeconds}s (current)`,
+      ) as HTMLOptionElement;
+      current.disabled = true;
+      current.selected = true;
+      select.appendChild(current);
+    }
     for (const level of SPEED_LEVELS) {
       const opt = el('option', { value: String(level) }, `${level}s`) as HTMLOptionElement;
-      opt.selected = level === ui.intervalSeconds;
+      opt.selected = !offMenu && level === ui.intervalSeconds;
       select.appendChild(opt);
     }
     select.addEventListener('change', () => {
@@ -1433,8 +1577,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     section.appendChild(el('div', { 'data-testid': 'setup-preview-caption', class: 'setup-preview-caption' }, 'Preview'));
 
     const wrap = el('div', { class: 'setup-preview-wrap' });
+    // Ruling A (F1) — footprint box + scaled inner; see the
+    // `previewScaleBox`/`previewScaleInner` declarations above for why this is
+    // two elements and not one.
     const scaleBox = el('div', { class: 'setup-preview-scale-box' });
+    const scaleInner = el('div', { class: 'setup-preview-scale-inner' });
     previewScaleBox = scaleBox;
+    previewScaleInner = scaleInner;
 
     // Task 2.17 (operator feedback, PRD §8.8 AC 28) — `.trim()` used to
     // apply to the STORED/rendered value too, not just this emptiness check,
@@ -1459,7 +1608,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     previewNodes.afterEl.style.whiteSpace = 'pre';
     previewNodes.behindEl.style.whiteSpace = 'pre';
 
-    scaleBox.appendChild(previewNodes.contentRoot);
+    scaleInner.appendChild(previewNodes.contentRoot);
+    scaleBox.appendChild(scaleInner);
     wrap.appendChild(scaleBox);
     section.appendChild(wrap);
     return section;
@@ -1515,16 +1665,27 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     if (ui.conflict !== null) root.appendChild(renderConflict(ui.conflict));
     if (ui.error) root.appendChild(el('div', { 'data-testid': 'setup-error', class: 'field-error' }, ui.error));
-    // Task 2.18 — set by a successful Update session whose reconfigure
-    // clamped the running session's value into the new range; see the
-    // `reconfigureWarning` field doc comment above. Fix wave 1 (minor
-    // fold-in): `banner banner-warn` (the same styling live.ts's overlay-
-    // silence banner uses), not `field-error` — this isn't a rejected/
-    // invalid form, the Update itself succeeded; it's a heads-up about a
-    // side effect of that success.
-    if (ui.reconfigureWarning) {
+    // Task 2.18 — a successful Update session whose reconfigure clamped the
+    // running session's value into the new range. `banner banner-warn` (the
+    // same styling live.ts's overlay-silence banner uses), not `field-error`
+    // — this isn't a rejected/invalid form, the Update itself succeeded; it's
+    // a heads-up about a side effect of that success.
+    //
+    // Final gate wave, ruling B — read from `ControllerState.clamp` rather
+    // than a local `ui.reconfigureWarning` string this view sets and clears
+    // itself. Two things fall out: Live renders the SAME notice (where the
+    // Update click actually lands the operator — this pane is hidden in the
+    // same synchronous task), and the copy here can no longer outlive the
+    // session it describes (U5), since the controller drops it when the
+    // session ends, when a new one starts, and on any later un-clamped
+    // Update.
+    if (renderState.clamp !== null) {
       root.appendChild(
-        el('div', { 'data-testid': 'setup-reconfigure-warning', class: 'banner banner-warn' }, ui.reconfigureWarning),
+        el(
+          'div',
+          { 'data-testid': 'setup-reconfigure-warning', class: 'banner banner-warn' },
+          `Current value ${renderState.clamp.from} was outside the new range and was clamped to ${renderState.clamp.to}.`,
+        ),
       );
     }
 
@@ -1583,7 +1744,14 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // itself renders from, so the two can never disagree about whether
     // Interval belongs on screen.
     const displayMode: Mode = activeSession ? activeSession.mode : ui.mode;
-    const counterChildren = [twoColRow(startField, finishField), formRow('Mode', renderModeSelect(activeSession))];
+    const counterChildren: HTMLElement[] = [twoColRow(startField, finishField)];
+    // Final gate wave (U6) — inline, directly under the row it belongs to,
+    // matching the two size fields' existing treatment.
+    const rangeError = rangeErrorText();
+    if (rangeError !== null) {
+      counterChildren.push(el('div', { 'data-testid': 'setup-range-error', class: 'field-error' }, rangeError));
+    }
+    counterChildren.push(formRow('Mode', renderModeSelect(activeSession)));
     if (displayMode === 'automatic') {
       counterChildren.push(formRow('Interval', renderIntervalSelect()));
     }
@@ -1739,6 +1907,17 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           ),
         ),
       );
+      // Final gate wave (U6) — same treatment as the range/size fields: an
+      // invalid hold duration disabled every button with no message at all.
+      if (!completionValid()) {
+        completionChildren.push(
+          el(
+            'div',
+            { 'data-testid': 'setup-completion-seconds-error', class: 'field-error' },
+            'Enter a whole number of seconds greater than 0',
+          ),
+        );
+      }
     }
     root.appendChild(group('setup-group-completion', 'Completion', completionChildren));
 
@@ -1767,13 +1946,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // persistently, right above the action buttons, rather than let the
     // form look authoritative when it isn't.
     if (activeSession !== null && formDiffersFromSession(activeSession, renderState.presentation)) {
-      root.appendChild(
-        el(
-          'div',
-          { 'data-testid': 'setup-not-applied-notice', class: 'banner banner-warn' },
-          "These settings aren't applied yet — click Update session.",
-        ),
-      );
+      // Final gate wave (U6) — when Update is DISABLED, the bare "click
+      // Update session" was an instruction the operator could not follow:
+      // the button that the notice points at is greyed out, and (before the
+      // range/completion errors added above) nothing on screen said why. The
+      // notice now names the next actual step.
+      const notice = canUpdate()
+        ? "These settings aren't applied yet — click Update session."
+        : "These settings aren't applied yet — click Update session. Fix the highlighted field first.";
+      root.appendChild(el('div', { 'data-testid': 'setup-not-applied-notice', class: 'banner banner-warn' }, notice));
     }
 
     const actions = el('div', { class: 'btn-row' });
@@ -1840,7 +2021,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.editing = { id: preset.id, createdAt: preset.createdAt, editingSince: preset.updatedAt };
       ui.conflict = null;
       ui.error = null;
-      ui.reconfigureWarning = null;
+      // Final gate wave, ruling B — no clamp-warning clear here anymore:
+      // loading a preset doesn't end or reconfigure the session the notice
+      // describes, so the controller (which now owns it) correctly keeps
+      // showing it until that session actually changes.
       // Fix wave 3 (Important) correction: fix wave 1/2 CLEARED
       // `dirtyFields` here, on the theory that a preset load is a
       // deliberate, authoritative reset of the form. That was backwards —

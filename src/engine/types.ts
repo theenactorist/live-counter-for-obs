@@ -192,7 +192,12 @@ function isBackground(x: unknown): x is { color: string; opacity: number } {
   return typeof color === 'string' && isFiniteNumber(opacity);
 }
 
-function isStyleConfig(x: unknown): x is StyleConfig {
+// Exported for the final gate wave's `lc.presentation.v1` record (ruling C):
+// DockStorage.loadPresentation() validates a stored presentation with the
+// EXACT same rules `isPreset` already applies to a preset's own style —
+// re-deriving a second, hand-rolled structural check there is precisely how
+// the two would drift.
+export function isStyleConfig(x: unknown): x is StyleConfig {
   if (!isPlainObject(x)) return false;
   const {
     fontFamily, fontWeight, numberSizePx, textSizePx, numberColor, textColor,
@@ -215,7 +220,8 @@ function isStyleConfig(x: unknown): x is StyleConfig {
   );
 }
 
-function isAnimationConfig(x: unknown): x is AnimationConfig {
+// Exported alongside isStyleConfig above, for the same reason.
+export function isAnimationConfig(x: unknown): x is AnimationConfig {
   if (!isPlainObject(x)) return false;
   const { type, target, durationMs } = x;
   return (

@@ -495,6 +495,90 @@ describe('DockStorage — snapshot', () => {
   });
 });
 
+// Final gate wave, ruling C — `lc.presentation.v1`: the look that is actually
+// on air, so a dock reload restores it instead of re-deriving the originating
+// preset's saved look (which reverted anything applied mid-service by "Update
+// session").
+describe('DockStorage — presentation', () => {
+  const animation = { type: 'pop', target: 'both', durationMs: 250 } as const;
+
+  it('round-trips style/template/animation, including clearing it with null', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+
+    expect(storage.loadPresentation()).toBeNull();
+
+    storage.savePresentation({ style: styleFixture(), template: 'Score: {count}', animation });
+    expect(storage.loadPresentation()).toEqual({
+      style: styleFixture(),
+      template: 'Score: {count}',
+      animation,
+      schemaVersion: 1,
+    });
+
+    storage.savePresentation(null);
+    expect(storage.loadPresentation()).toBeNull();
+    expect(local.keys()).not.toContain('lc.presentation.v1');
+  });
+
+  it('accepts a null template and a null animation (a number-only, un-animated look)', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+
+    storage.savePresentation({ style: styleFixture(), template: null, animation: null });
+
+    expect(storage.loadPresentation()).toEqual({
+      style: styleFixture(),
+      template: null,
+      animation: null,
+      schemaVersion: 1,
+    });
+  });
+
+  it('rejects an unknown schemaVersion, a malformed style, a malformed animation, and unparseable JSON', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const good = { style: styleFixture(), template: null, animation: null, schemaVersion: 1 };
+
+    local.setItem('lc.presentation.v1', JSON.stringify({ ...good, schemaVersion: 2 }));
+    expect(storage.loadPresentation()).toBeNull();
+
+    // A style missing `layout` entirely (the pre-2.11 shape): adopted as-is
+    // it would broadcast a half-shaped style straight to the overlay, so it
+    // is treated as "no record" and the caller falls back to the preset.
+    const { layout: _dropped, ...noLayout } = styleFixture();
+    local.setItem('lc.presentation.v1', JSON.stringify({ ...good, style: noLayout }));
+    expect(storage.loadPresentation()).toBeNull();
+
+    local.setItem('lc.presentation.v1', JSON.stringify({ ...good, animation: { type: 'nope', target: 'both', durationMs: 250 } }));
+    expect(storage.loadPresentation()).toBeNull();
+
+    local.setItem('lc.presentation.v1', '{not json');
+    expect(storage.loadPresentation()).toBeNull();
+  });
+
+  it('never throws when the underlying store rejects the write', () => {
+    const errors: string[] = [];
+    const storage = new DockStorage(new ThrowingStorage(), null, (key) => errors.push(key));
+
+    expect(() => storage.savePresentation({ style: styleFixture(), template: null, animation: null })).not.toThrow();
+    expect(() => storage.savePresentation(null)).not.toThrow();
+    expect(errors).toEqual(['lc.presentation.v1', 'lc.presentation.v1']);
+  });
+
+  it('is cleared by clearAllLocal (Reset everything enumerates every lc.* key)', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    storage.savePresentation({ style: styleFixture(), template: 'X', animation: null });
+    expect(local.keys()).toContain('lc.presentation.v1');
+
+    storage.clearAllLocal();
+
+    expect(local.keys()).not.toContain('lc.presentation.v1');
+    expect(storage.loadPresentation()).toBeNull();
+  });
+});
+
 describe('DockStorage — settings', () => {
   it('defaults to {wsPort: 4455, wsPassword: "", schemaVersion: 1} when nothing saved', () => {
     const local = new MapStorage();

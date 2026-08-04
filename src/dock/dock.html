@@ -460,14 +460,28 @@
         padding: 1rem;
         margin-bottom: 0.75rem;
       }
-      /* Fix wave (review Important 2) — sized by setup.ts's
-         fitPreviewToScale() to exactly the preview's SCALED visual
-         footprint; `overflow: hidden` is a safety net (the computed scale
-         factor already makes the scaled content fit this box's own width),
-         never load-bearing on its own. */
+      /* Final gate wave, ruling A (F1) — the LAYOUT FOOTPRINT only: its
+         height is set by setup.ts's fitPreviewToScale() to the preview's
+         SCALED visual height, so the rest of the form isn't pushed down by
+         the preview's unscaled size. It no longer carries the
+         `transform: scale()` itself: an overflow clip applies in the
+         element's OWN pre-transform coordinate space, so anything wider than
+         this box's layout width was cut off however far the box was then
+         scaled down — most visibly the 'Counter in front' ghost, which is
+         centred on a narrow contentRoot and therefore sits mostly at
+         NEGATIVE local coordinates. The transform now lives on
+         `.setup-preview-scale-inner` below, which is sized to the content's
+         true visual union, so this `overflow: hidden` is once again only the
+         safety net it was always described as. */
       .setup-preview-scale-box {
         width: 100%;
         overflow: hidden;
+      }
+      /* The SCALED CONTENT (ruling A): width/height/transform are all set
+         inline by fitPreviewToScale() from the measured union of the
+         preview's own box and the textBehind ghost's transformed rect. */
+      .setup-preview-scale-inner {
+        transform-origin: top left;
       }
       /* No `word-break`/wrapping rule here on purpose (fix wave, review
          Important 2: the previous `word-break: break-word` let a long
@@ -477,8 +491,15 @@
          `white-space: nowrap` on this element instead and scales the
          SCALE-BOX wrapper above to fit — same wrapping behaviour as the
          stream, just visually shrunk. */
+      /* Final gate wave (F2) — no `font-variant-numeric` here. It was a
+         leftover of the pre-2.14 single-element preview and, on the shared
+         contentRoot, was inherited by the LABEL spans: a digit-bearing label
+         ("24/7 club") rendered tabular in the preview and proportional on the
+         stream, a divergence in exactly the surface the shared module exists
+         to keep byte-identical. The one PRD-locked tabular-nums (AC 9) is set
+         inline on the NUMBER node by applyPresentation(), for both
+         consumers. */
       .setup-preview {
-        font-variant-numeric: tabular-nums;
         display: inline-flex;
       }
       /* Task 2.14 — the preview's own layout (flex-direction/align-items,

@@ -521,6 +521,223 @@ describe('SessionController — reconfigure()', () => {
   });
 });
 
+// Final gate wave (U4) — `reconfigure` emits no `completed` effect, so
+// nothing used to re-derive a PENDING holdThenHide when the operator changed
+// the completion setting while the session was already complete and still
+// sitting on the boundary: the stale schedule kept matching the OLD config.
+describe('SessionController — reconfigure() re-derives a pending hold (final gate wave, U4)', () => {
+  function completeAtBoundary(
+    controller: SessionController,
+    completion: { kind: 'hold' | 'hide' | 'holdThenHide'; seconds?: number },
+  ): void {
+    controller.startSession({ startValue: 0, finishValue: 1, mode: 'manual', completion }, styleFixture(), null, null);
+    controller.dispatch({ type: 'increment', nonce: 'to-boundary' }); // 0 -> 1: completes
+  }
+
+  it('holdThenHide 5s -> 60s re-arms the pending hide at the NEW duration', async () => {
+    const { scheduler, controller } = await setup();
+    completeAtBoundary(controller, { kind: 'holdThenHide', seconds: 5 });
+    expect(scheduler.entries[0]!.ms).toBe(5000);
+
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 1,
+      intervalSeconds: 1,
+      completion: { kind: 'holdThenHide', seconds: 60 },
+      nonce: 'rc-hold-1',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(result.session.status).toBe('complete'); // never left complete: still on the boundary
+    expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.entries[0]!.ms).toBe(60000); // NOT the stale 5000
+  });
+
+  it('holdThenHide -> hide cancels the pending hide outright (no stale completionHide, no spurious rejection)', async () => {
+    const { storage, controller, scheduler } = await setup();
+    completeAtBoundary(controller, { kind: 'holdThenHide', seconds: 5 });
+    expect(scheduler.pendingCount()).toBe(1);
+
+    const logSpy = vi.spyOn(storage, 'log');
+    const result = controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 1,
+      intervalSeconds: 1,
+      completion: { kind: 'hide' },
+      nonce: 'rc-hold-2',
+    });
+
+    expect(result.accepted).toBe(true);
+    expect(scheduler.pendingCount()).toBe(0);
+    // The stale timer used to fire and be rejected `invalid-state` by the
+    // engine (kind is no longer holdThenHide), logging a phantom rejection.
+    scheduler.fireNext();
+    expect(logSpy).not.toHaveBeenCalledWith('rejected', expect.anything());
+    expect(controller.getState().session?.overlayVisible).toBe(true);
+  });
+
+  it('hold -> holdThenHide arms a schedule that never existed, and it really hides', async () => {
+    const { scheduler, controller } = await setup();
+    completeAtBoundary(controller, { kind: 'hold' });
+    expect(scheduler.pendingCount()).toBe(0); // nothing was ever armed
+
+    controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 1,
+      intervalSeconds: 1,
+      completion: { kind: 'holdThenHide', seconds: 5 },
+      nonce: 'rc-hold-3',
+    });
+
+    expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.entries[0]!.ms).toBe(5000);
+    scheduler.fireNext();
+    expect(controller.getState().session?.overlayVisible).toBe(false);
+    expect(controller.getState().session?.hiddenByCompletion).toBe(true);
+  });
+
+  it('never re-arms a hide for an overlay completion already hid', async () => {
+    const { scheduler, controller } = await setup();
+    completeAtBoundary(controller, { kind: 'hide' }); // completes AND hides immediately
+    expect(controller.getState().session?.hiddenByCompletion).toBe(true);
+
+    controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 1,
+      intervalSeconds: 1,
+      completion: { kind: 'holdThenHide', seconds: 5 },
+      nonce: 'rc-hold-4',
+    });
+
+    expect(scheduler.pendingCount()).toBe(0); // nothing left to hide
+  });
+});
+
+// Final gate wave, ruling B — the clamp notice is controller state now, so
+// BOTH Setup and Live can render it (the Update click navigates the operator
+// to Live) and neither can show one that outlived its session.
+describe('SessionController — clamp notice (final gate wave, ruling B)', () => {
+  function narrowTo10(controller: SessionController, nonce: string): void {
+    controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 10,
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce,
+    });
+  }
+
+  async function sessionAt23(): Promise<Harness> {
+    const h = await setup();
+    h.controller.startSession({ startValue: 0, finishValue: 50, mode: 'manual' }, styleFixture(), null, null);
+    h.controller.dispatch({ type: 'jump', value: 23, nonce: 'j1' });
+    return h;
+  }
+
+  it('starts null and records from/to when a reconfigure clamps the current value', async () => {
+    const { controller } = await sessionAt23();
+    expect(controller.getState().clamp).toBeNull();
+
+    narrowTo10(controller, 'rc-clamp-1');
+
+    expect(controller.getState().clamp).toEqual({ from: 23, to: 10 });
+  });
+
+  it('a later reconfigure that does not clamp clears it', async () => {
+    const { controller } = await sessionAt23();
+    narrowTo10(controller, 'rc-clamp-2');
+    expect(controller.getState().clamp).not.toBeNull();
+
+    controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 80, // widening: 10 is comfortably inside, nothing to clamp
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce: 'rc-clamp-3',
+    });
+
+    expect(controller.getState().clamp).toBeNull();
+  });
+
+  it('ending the session clears it', async () => {
+    const { controller } = await sessionAt23();
+    narrowTo10(controller, 'rc-clamp-4');
+
+    controller.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'end-1' });
+
+    expect(controller.getState().clamp).toBeNull();
+  });
+
+  it('starting a fresh session clears it', async () => {
+    const { controller } = await sessionAt23();
+    narrowTo10(controller, 'rc-clamp-5');
+
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
+
+    expect(controller.getState().clamp).toBeNull();
+  });
+});
+
+// Final gate wave, ruling C — presentation is no longer controller-instance
+// state with no home: every write goes to `lc.presentation.v1`, so a dock
+// reload restores the look that was actually on air (including one applied
+// mid-service by "Update session") instead of re-deriving the originating
+// preset's saved look.
+describe('SessionController — presentation persistence (final gate wave, ruling C)', () => {
+  it('startSession persists the style/template/animation it was given', async () => {
+    const { storage, controller } = await setup();
+    const animation: AnimationConfig = { type: 'pop', target: 'both', durationMs: 250 };
+
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), 'Score: {count}', animation);
+
+    expect(storage.loadPresentation()).toEqual({
+      style: styleFixture(),
+      template: 'Score: {count}',
+      animation,
+      schemaVersion: 1,
+    });
+  });
+
+  it('adoptPresentation overwrites the stored record', async () => {
+    const { storage, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
+
+    const updated: StyleConfig = { ...styleFixture(), numberColor: '#ff0000', numberSizePx: 150 };
+    controller.adoptPresentation(updated, 'Updated', null);
+
+    const stored = storage.loadPresentation();
+    expect(stored?.style.numberColor).toBe('#ff0000');
+    expect(stored?.style.numberSizePx).toBe(150);
+    expect(stored?.template).toBe('Updated');
+  });
+
+  it('ending the session removes it (nothing on air for it to describe)', async () => {
+    const { storage, controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
+    expect(storage.loadPresentation()).not.toBeNull();
+
+    controller.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'end-2' });
+
+    expect(storage.loadPresentation()).toBeNull();
+  });
+
+  it('a disposed controller never writes a presentation', async () => {
+    const { storage, controller } = await setup();
+    controller.dispose();
+
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
+    controller.adoptPresentation(styleFixture(), 'nope', null);
+
+    expect(storage.loadPresentation()).toBeNull();
+  });
+});
+
 describe('SessionController — holdThenHide completion', () => {
   it('schedules a completionHide and, once fired, hides the overlay with hiddenByCompletion', async () => {
     const { scheduler, controller } = await setup();

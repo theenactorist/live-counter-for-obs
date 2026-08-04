@@ -106,8 +106,13 @@ export const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually
 // checklist, settings, overlay/dock URLs, event log, reset" per PRD §9).
 // `RESET_ALL_WARNING_TEXT` names EXACTLY what the confirm is about to
 // destroy — every `lc.*` localStorage key (settings, presets, session,
-// snapshot, log, quarantine records, the local-bus transport key) plus the
-// persistent-data mirror when connected — never a vague "are you sure?".
+// snapshot, the session's persisted presentation, log, quarantine records,
+// the local-bus transport key) plus the persistent-data mirror when
+// connected — never a vague "are you sure?". The copy stays operator-facing
+// (the presentation record is the running session's own look, not a separate
+// thing an operator would think to look for), while `clearAllLocal()`
+// enumerates keys rather than listing them, so a new key like
+// `lc.presentation.v1` is covered the day it lands.
 export const RESET_ALL_WARNING_TEXT =
   'This permanently deletes every setting, preset, session, snapshot, and log entry stored on this device — plus the mirrored backup on OBS if connected. This cannot be undone.';
 // Brief's exact confirm text, shown once the reboot (through main.ts's

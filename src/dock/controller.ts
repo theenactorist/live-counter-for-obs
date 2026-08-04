@@ -37,6 +37,20 @@ export interface ControllerState {
   // recovered ad hoc session with no presetId, or one whose preset has
   // since been deleted).
   presentation: { style: StyleConfig; template: string | null; animation: AnimationConfig | null } | null;
+  // Final gate wave, ruling B — set whenever an accepted `reconfigure`
+  // ("Update session") clamped the running session's currentValue into the
+  // new range, naming the pre- and post-clamp values; cleared by the next
+  // reconfigure that DOESN'T clamp, by a fresh startSession, and by the
+  // session ending. Lives here rather than in Setup's own local UI state
+  // because the click that causes it navigates the operator to the LIVE tab
+  // (main.ts wires `onSessionStarted` to `tabs.activate('live')`), so the
+  // pane Setup painted its warning into is hidden in the same synchronous
+  // task — the explanation for a 23 -> 10 jump on air was never actually
+  // delivered anywhere the operator was looking (AC 27 / PRD §8.7's "the
+  // operator is warned"). Both views now read it from here, so Live can show
+  // it where the operator lands AND Setup's copy can never outlive the
+  // session it describes.
+  clamp: { from: number; to: number } | null;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -99,6 +113,8 @@ export class SessionController {
   // but AnimationConfig lives on Preset, not Session, so it rides along next
   // to style/template rather than becoming Session state.
   private animation: AnimationConfig | null = null;
+  // Ruling B — see `ControllerState.clamp`'s own doc comment above.
+  private clamp: { from: number; to: number } | null = null;
 
   private heartbeat = 0;
   private heartbeatHandle: unknown = null;
@@ -136,6 +152,7 @@ export class SessionController {
       lastAction: this.lastAction,
       recovered: this.recovered,
       presentation: this.style !== null ? { style: this.style, template: this.template, animation: this.animation } : null,
+      clamp: this.clamp,
     };
   }
 
@@ -267,11 +284,12 @@ export class SessionController {
     // revision monotonic across sessions; the engine only requires it to be
     // non-decreasing WITHIN one, which this preserves.
     this.session = { ...createSession(cfg, this.nowMs()), revision: this.storage.lastKnownRevision() + 1 };
-    this.style = style;
-    this.template = template;
-    this.animation = animation;
+    this.setPresentation(style, template, animation);
     this.recovered = false;
     this.lastAction = null;
+    // Ruling B — a clamp warning from a PREVIOUS session's Update is stale the
+    // moment a brand new session starts.
+    this.clamp = null;
     // A snapshot left over from a previous session's keepOverlay:true
     // endSession must not keep haunting a brand new session.
     this.snapshot = null;
@@ -293,11 +311,26 @@ export class SessionController {
   // never have an old, torn-down controller instance broadcast again.
   adoptPresentation(style: StyleConfig, template: string | null, animation: AnimationConfig | null): void {
     if (this.disposed) return;
+    this.setPresentation(style, template, animation);
+    void this.broadcast();
+    this.notify();
+  }
+
+  // Final gate wave, ruling C — the ONE place this instance's presentation
+  // fields are written, so persisting them can never be forgotten by a future
+  // third writer. Before this, presentation was instance state with no storage
+  // key at all: the next dock reload / OBS restart re-derived it solely from
+  // `session.presetId`'s STORED preset (main.ts), silently reverting a look
+  // the operator had applied mid-service with "Update session" — while the
+  // range/interval/completion applied by the same click survived, because
+  // those live on `Session`. Writing it here means recovery restores the whole
+  // operator action, not half of it; the preset lookup remains the fallback
+  // for any lineage with no stored record (see main.ts's boot()).
+  private setPresentation(style: StyleConfig, template: string | null, animation: AnimationConfig | null): void {
     this.style = style;
     this.template = template;
     this.animation = animation;
-    void this.broadcast();
-    this.notify();
+    this.storage.savePresentation({ style, template, animation });
   }
 
   dispatch(cmd: Command): ApplyResult {
@@ -338,6 +371,7 @@ export class SessionController {
     }
 
     const prevInterval = this.session.intervalSeconds;
+    const prevValue = this.session.currentValue;
     const result = applyCommand(this.session, cmd, this.nowMs());
 
     if (!result.accepted) {
@@ -351,6 +385,15 @@ export class SessionController {
     this.handleEffects(result.effects);
     this.wireTimer(cmd, result, prevInterval);
     this.maybeCancelHold();
+    if (cmd.type === 'reconfigure') {
+      // Ruling B — a reconfigure that moved the value moved it by CLAMPING it
+      // into the (narrowed) new range; that is the only way `reconfigure` can
+      // change currentValue (engine rule 1: it never counts, never completes).
+      // A reconfigure that didn't clamp clears any previous notice — the
+      // ruling's "a later un-clamped Update leaves no stale copy anywhere".
+      this.clamp = value !== prevValue ? { from: prevValue, to: value } : null;
+      this.rearmHoldAfterReconfigure();
+    }
 
     if (!isSelf) {
       this.lastAction = { label: LABELS[cmd.type], value };
@@ -407,6 +450,27 @@ export class SessionController {
     if (!stillComplete) this.cancelHold();
   }
 
+  // Final gate wave (U4) — `reconfigure` never emits a `completed` effect
+  // (engine rule 1), so handleEffects() never re-arms the hold for it, and
+  // maybeCancelHold() only cancels when the session LEFT `complete`. An
+  // operator who changes the completion setting while the session is already
+  // complete and still sitting on the boundary therefore got a pending
+  // schedule that matched the OLD configuration: holdThenHide 5s -> 60s still
+  // hid at 5s; hold -> holdThenHide never hid at all (no schedule was ever
+  // armed); holdThenHide -> hide never hid either (the stale timer fired
+  // completionHide, which the engine rejected `invalid-state`, also logging a
+  // spurious 'rejected' line). Re-derive the hold from the NEW completion
+  // instead — the same reconciliation init() already does for a recovered
+  // mid-hold session.
+  private rearmHoldAfterReconfigure(): void {
+    const s = this.session;
+    if (s === null || s.status !== 'complete') return;
+    this.cancelHold();
+    if (s.completion.kind === 'holdThenHide' && s.overlayVisible) {
+      this.scheduleHoldThenHide(s.completion.seconds ?? 0);
+    }
+  }
+
   private cancelHold(): void {
     if (this.holdHandle === null) return;
     this.scheduler.cancel(this.holdHandle);
@@ -440,6 +504,16 @@ export class SessionController {
     this.storage.saveSnapshot(snapshot);
     this.snapshot = snapshot;
     this.session = null;
+    // Ruling B — the clamp notice describes a session that no longer exists.
+    this.clamp = null;
+    // Ruling C — the persisted presentation is a cache of what the LIVE
+    // session is painting; with no session it has nothing to describe (the
+    // keep-overlay case is carried by the snapshot just written above, which
+    // embeds its own style). Every path that creates a session writes a fresh
+    // record, so this only ever removes a record that could not be adopted by
+    // anything anyway — but leaving it would be a stale look waiting for a
+    // future recovery to pick up.
+    this.storage.savePresentation(null);
   }
 
   private wireTimer(cmd: Command, result: ApplyResult, prevInterval: number): void {

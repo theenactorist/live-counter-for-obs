@@ -1152,6 +1152,12 @@ test.describe('Diagnostics view', () => {
 
       const keysBefore = await allLcKeys(page);
       expect(keysBefore.length).toBeGreaterThan(0);
+      // Final gate wave, ruling C — `lc.presentation.v1` (written by the
+      // startSession above) is a NEW key since this test was written. Reset
+      // enumerates every `lc.*` key rather than a hardcoded list, so it is
+      // covered automatically — asserted explicitly here so the coverage is
+      // verified, not assumed.
+      expect(keysBefore).toContain('lc.presentation.v1');
 
       // A marker on `window` itself — survives an in-place JS re-boot but is
       // wiped by any real page navigation (location.reload() included). This

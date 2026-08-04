@@ -253,6 +253,14 @@ export function mountLiveView(
     fixConfirmOpen: false,
   };
 
+  // Final gate wave, ruling B — the clamp notice the operator has already
+  // waved off, held by IDENTITY (the controller mints a fresh object per
+  // clamp — see ControllerState.clamp) rather than by value, so dismissing a
+  // "23 -> 10" and then clamping 23 -> 10 again later still shows the second
+  // one. Local to this mount, like `recoveredDismissed`: dismissing is a
+  // read-receipt, not persisted state.
+  let dismissedClamp: ControllerState['clamp'] = null;
+
   // Initialized "now" rather than 0: a freshly-mounted view with a session
   // already present must not immediately claim overlay silence before it has
   // had any chance to hear from the overlay at all.
@@ -307,6 +315,17 @@ export function mountLiveView(
 
     if (state.recovered && !ui.recoveredDismissed) {
       container.appendChild(renderRecoveredBanner());
+    }
+
+    // Ruling B — "Update session" applies the reconfigure and then navigates
+    // the operator HERE (main.ts wires Setup's onSessionStarted to
+    // tabs.activate('live')), so a clamp's explanation has to be delivered
+    // here too: the operator who narrows 0-50 to 0-10 at 23 sees the on-air
+    // number jump 23 -> 10, and Setup's own copy of this warning is painted
+    // into a pane hidden in the very same synchronous task. Same dismissible
+    // pattern as the recovered banner directly above.
+    if (state.clamp !== null && state.clamp !== dismissedClamp) {
+      container.appendChild(renderClampBanner(state.clamp));
     }
 
     const session = state.session;
@@ -697,6 +716,26 @@ export function mountLiveView(
     const dismiss = button('recovered-dismiss', 'Dismiss');
     dismiss.addEventListener('click', () => {
       ui.recoveredDismissed = true;
+      render();
+    });
+    banner.appendChild(dismiss);
+    return banner;
+  }
+
+  // Ruling B — names BOTH values (the pre-clamp one is the whole point: the
+  // new one is already on screen in `current-value`, the old one is the thing
+  // that silently disappeared). `banner-warn`, matching Setup's own copy: the
+  // Update itself succeeded, this is a heads-up about a side effect of that
+  // success, not a rejected form.
+  function renderClampBanner(clamp: { from: number; to: number }): HTMLElement {
+    const dismissTarget = clamp;
+    const banner = el('div', { 'data-testid': 'banner-clamped', class: 'banner banner-warn' });
+    banner.appendChild(
+      el('span', {}, `Value clamped ${clamp.from} → ${clamp.to} — ${clamp.from} was outside the new range.`),
+    );
+    const dismiss = button('clamped-dismiss', 'Dismiss');
+    dismiss.addEventListener('click', () => {
+      dismissedClamp = dismissTarget;
       render();
     });
     banner.appendChild(dismiss);
