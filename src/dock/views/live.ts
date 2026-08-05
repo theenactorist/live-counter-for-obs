@@ -39,7 +39,7 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
-import { chipFrom, type LiveStatusTracker } from '../live-status.js';
+import { chipFrom, liveSafetyArmed, type LiveStatusTracker, type LiveStatusSnapshot } from '../live-status.js';
 import {
   addOverlayButtonState,
   fixOverlayConfirmText,
@@ -87,12 +87,26 @@ const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from
 const CONNECT_CONNECTING_TEXT = 'Connecting…';
 const DEFAULT_CONNECT_PORT = 4455;
 
+// Task 3.3 (AC 14) — the live-safety confirm's two locked variants (brief).
+// Which one shows is entirely a property of the CURRENT liveSafetyArmed
+// snapshot at render time (see `renderSafetyConfirm` below): the primary
+// variant whenever the merged `active` fact is definitely `true` (the source
+// really is live in Program), the Studio-mode-off variant for the OTHER way
+// `liveSafetyArmed` can be true — nothing can say either way AND Studio Mode
+// itself is off, so "no evidence" cannot be treated as safe.
+const SAFETY_TEXT_LIVE = 'The counter source is live in Program — this change is visible to your audience immediately.';
+const SAFETY_TEXT_STUDIO_OFF =
+  "Studio Mode is off and the counter's live state is unknown — this change may be visible immediately.";
+
 interface LiveUiState {
   jumpOpen: boolean;
   jumpValue: string;
   resetConfirmOpen: boolean;
   endConfirmOpen: boolean;
   recoveredDismissed: boolean;
+  // Task 3.3 (AC 14) — the live-safety blocking confirm gating Show/Reset/
+  // Jump while `liveSafetyArmed()` and not yet acknowledged this session.
+  safetyConfirmOpen: boolean;
 }
 
 // Task 2.12 — the Connect card's own local form state (kept separate from
@@ -195,6 +209,19 @@ function button(testid: string, text: string, opts: { disabled?: boolean; extraC
   return b;
 }
 
+// Task 3.3 — deliberately NOT exported from live-status.ts (the brief locks
+// that module's exports as-is): `liveSafetyArmed` only ever answers YES/NO,
+// but choosing WHICH of the two locked confirm texts to show needs to know
+// which of its two arming conditions actually fired. Mirrors the true>false>
+// null merge live-status.ts's own private `mergeBool` already applies to
+// `active`, restricted to just that one fact — this view has no legitimate
+// reason to see `showing` at all.
+function mergedActiveFromSnapshot(s: LiveStatusSnapshot): boolean | null {
+  if (s.relay.active === true || s.ws.active === true) return true;
+  if (s.relay.active === false || s.ws.active === false) return false;
+  return null;
+}
+
 // Gate fix wave (Ruling C): "remembered for the page session only" — module
 // scope, never localStorage, and deliberately OUTSIDE mountLiveView so a
 // settings-save reconnect (main.ts's boot() destroys and remounts this view)
@@ -216,7 +243,26 @@ export function mountLiveView(
     resetConfirmOpen: false,
     endConfirmOpen: false,
     recoveredDismissed: false,
+    safetyConfirmOpen: false,
   };
+
+  // Task 3.3 — "acknowledged this session" state (brief: in-memory, never
+  // persisted; a dock reload re-asking is explicitly acceptable/safe-side).
+  // `safetyAcked` starts false on every mount (a reload IS a fresh mount, so
+  // this needs no separate reset story of its own) and is only ever cleared
+  // back to false again by the null -> non-null session transition tracked
+  // below — i.e. a brand new session starting (Setup's "Start session", or
+  // the devhook), NOT an ordinary dispatch continuing the same one (every
+  // accepted dispatch replaces `session` with a fresh object, so identity
+  // alone can't distinguish "still this session" from "a new one" — Session
+  // itself carries no id to compare instead; see engine/types.ts's own
+  // comment on that). `sessionWasActive` seeds from whatever the CONTROLLER's
+  // session state already is at this exact mount (recovered session and
+  // all), so a mount that starts with a session already live does not
+  // mistake its own first render for a "new session" transition.
+  let safetyAcked = false;
+  let pendingSafetyAction: (() => void) | null = null;
+  let sessionWasActive = controller.getState().session !== null;
 
   // Review fix (Important 2): a settings-save reconnect (main.ts's boot())
   // tears this mount down and immediately mounts a fresh LiveViewHandle into
@@ -312,6 +358,27 @@ export function mountLiveView(
     render();
   }
 
+  // Task 3.3 (AC 14) — the ONE gate every guarded action (Show, Reset, Jump)
+  // routes through. Armed (per the locked `liveSafetyArmed`) and not yet
+  // acknowledged this session: hold `action` as the pending continuation,
+  // open the confirm, and stop — `action` runs only once `safety-proceed`
+  // fires it (see `renderSafetyConfirm`). Anything else (not armed; no
+  // tracker at all; already acknowledged this session) runs `action`
+  // immediately, exactly as if this guard were not here. No tracker
+  // (`opts.liveStatus` omitted) can never be "armed" — the same
+  // fail-safe-as-absent posture every other `opts.liveStatus?.` call site in
+  // this file already takes.
+  function guardLiveSafety(action: () => void): void {
+    const snap = opts.liveStatus?.snapshot();
+    if (snap && liveSafetyArmed(snap) && !safetyAcked) {
+      pendingSafetyAction = action;
+      ui.safetyConfirmOpen = true;
+      render();
+      return;
+    }
+    action();
+  }
+
   function render(): void {
     // Review fix (Important 2) — see the `destroyed` declaration above: a
     // stale async continuation (add-overlay's `.then()`, a clipboard-paste
@@ -323,6 +390,18 @@ export function mountLiveView(
     const focusSnapshot = captureFocus();
 
     const state = controller.getState();
+
+    // Task 3.3 — the ONE place the "new session" transition is detected (see
+    // `sessionWasActive`'s own doc comment above): every full render() reads
+    // controller.getState() here anyway, so this is a free, always-current
+    // check rather than a second subscription. Deliberately fires only on
+    // null -> non-null (a session actually STARTING), never on an ordinary
+    // dispatch continuing the same one — those replace `session` with a new
+    // object too, but never pass through `null` in between.
+    const sessionIsActiveNow = state.session !== null;
+    if (sessionIsActiveNow && !sessionWasActive) safetyAcked = false;
+    sessionWasActive = sessionIsActiveNow;
+
     container.innerHTML = '';
 
     if (state.recovered && !ui.recoveredDismissed) {
@@ -872,6 +951,12 @@ export function mountLiveView(
 
     if (ui.resetConfirmOpen) root.appendChild(renderResetConfirm());
     if (ui.endConfirmOpen) root.appendChild(renderEndConfirm());
+    // Task 3.3 — independent of jumpOpen/resetConfirmOpen/endConfirmOpen: a
+    // guarded Jump keeps the jump box open underneath this (both render
+    // together, the operator sees exactly what they're about to do); a
+    // guarded Reset shows this FIRST, then its own reset-confirm once
+    // acknowledged (see guardLiveSafety's Reset pending action).
+    if (ui.safetyConfirmOpen) root.appendChild(renderSafetyConfirm());
 
     return root;
   }
@@ -920,9 +1005,16 @@ export function mountLiveView(
     const row = el('div', { class: 'btn-row' });
 
     const showHide = button('btn-show-hide', session.overlayVisible ? 'Hide' : 'Show');
-    showHide.addEventListener('click', () =>
-      dispatch({ type: session.overlayVisible ? 'hideOverlay' : 'showOverlay', nonce: generateNonce() }),
-    );
+    showHide.addEventListener('click', () => {
+      // Task 3.3 — only the SHOW side is guarded (brief: "Hide is never
+      // guarded" — hiding the overlay can never surprise the audience with a
+      // NEW visible change).
+      if (session.overlayVisible) {
+        dispatch({ type: 'hideOverlay', nonce: generateNonce() });
+        return;
+      }
+      guardLiveSafety(() => dispatch({ type: 'showOverlay', nonce: generateNonce() }));
+    });
     row.appendChild(showHide);
 
     return row;
@@ -933,8 +1025,14 @@ export function mountLiveView(
 
     const reset = button('btn-reset', 'Reset', { extraClass: 'ctl-small danger' });
     reset.addEventListener('click', () => {
-      ui.resetConfirmOpen = true;
-      render();
+      // Task 3.3 — Reset's guarded flow is two cheap steps in sequence: the
+      // live-safety confirm first (once per session), THEN this exact
+      // pre-existing reset-confirm — guardLiveSafety's pending action IS
+      // "open the reset confirm", never the reset itself.
+      guardLiveSafety(() => {
+        ui.resetConfirmOpen = true;
+        render();
+      });
     });
     row.appendChild(reset);
 
@@ -987,10 +1085,15 @@ export function mountLiveView(
     const apply = button('jump-apply', 'Apply', { disabled: !valid });
     apply.addEventListener('click', () => {
       if (parsed === null || !valid) return;
-      dispatch({ type: 'jump', value: parsed, nonce: generateNonce() });
-      ui.jumpOpen = false;
-      ui.jumpValue = '';
-      render();
+      // Task 3.3 — validity is checked BEFORE the guard (an invalid jump was
+      // never going anywhere regardless); the guard only ever intercepts a
+      // jump that would actually apply.
+      guardLiveSafety(() => {
+        dispatch({ type: 'jump', value: parsed, nonce: generateNonce() });
+        ui.jumpOpen = false;
+        ui.jumpValue = '';
+        render();
+      });
     });
     box.appendChild(apply);
 
@@ -1030,6 +1133,44 @@ export function mountLiveView(
     });
     box.appendChild(keep);
     box.appendChild(hide);
+    return box;
+  }
+
+  // Task 3.3 (AC 14) — text is picked from the CURRENT tracker snapshot at
+  // render time (not one frozen when the guard first opened): both variants
+  // describe "why this is armed right now", and re-deriving it here is one
+  // fewer piece of state to keep in sync for the rare case that the
+  // underlying fact changes while the confirm happens to still be open.
+  function renderSafetyConfirm(): HTMLElement {
+    const snap = opts.liveStatus?.snapshot();
+    const studioModeOffVariant = snap !== undefined && snap.studioMode === false && mergedActiveFromSnapshot(snap) !== true;
+
+    const box = el('div', { 'data-testid': 'live-safety-confirm', class: 'confirm-box' });
+    box.appendChild(el('span', {}, studioModeOffVariant ? SAFETY_TEXT_STUDIO_OFF : SAFETY_TEXT_LIVE));
+
+    const proceed = button('safety-proceed', "Continue — don't ask again this session");
+    proceed.addEventListener('click', () => {
+      safetyAcked = true;
+      ui.safetyConfirmOpen = false;
+      const action = pendingSafetyAction;
+      pendingSafetyAction = null;
+      // The pending action (dispatch(showOverlay/jump), or "open the reset
+      // confirm") always ends in its own render() — directly, or via
+      // dispatch()'s own unconditional one — so no extra render() is needed
+      // here beyond what running it already produces.
+      action?.();
+    });
+    const cancel = button('safety-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      // "Cancel does nothing" (brief) — the pending action is dropped
+      // entirely, never run, and acknowledgment is NOT granted: the very
+      // next guarded action re-opens this same confirm.
+      ui.safetyConfirmOpen = false;
+      pendingSafetyAction = null;
+      render();
+    });
+    box.appendChild(proceed);
+    box.appendChild(cancel);
     return box;
   }
 

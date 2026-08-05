@@ -21,7 +21,7 @@ import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
 import { mountDiagnosticsView, type DiagnosticsViewHandle, overlaySourceNames } from './diagnostics.js';
-import { LiveStatusTracker } from './live-status.js';
+import { LiveStatusTracker, liveSafetyArmed } from './live-status.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
@@ -437,7 +437,23 @@ function main(): void {
     bridgeTeardown = installHotkeyBridge({
       client,
       getSession: () => controller.getState().session,
-      dispatch: (cmd) => controller.dispatch(cmd),
+      // Task 3.3 (AC 14) — PRD ruling: a bridge/hotkey Show NEVER opens the
+      // live-safety confirm (installHotkeyBridge dispatches straight through
+      // this closure, never through live.ts, so there is no modal to
+      // structurally intercept it with) — but it still leaves an audit trail.
+      // hotkey-bridge.ts's own 'showHide' handler has already decided
+      // showOverlay vs. hideOverlay by the time it calls this (from the
+      // CURRENT session's overlayVisible) — checking the command's own type
+      // is exactly "the button would SHOW", the same condition live.ts's own
+      // guard applies, with Hide correctly left alone. `bootedLiveStatus` is
+      // THIS boot's tracker (captured just above), not the outer `liveStatus`
+      // binding a later reconnect reassigns.
+      dispatch: (cmd) => {
+        if (cmd.type === 'showOverlay' && liveSafetyArmed(bootedLiveStatus.snapshot())) {
+          storage.log('bridge-show-while-live');
+        }
+        return controller.dispatch(cmd);
+      },
       log: (event, detail) => storage.log(event, detail),
       onBridgeSeen: () => {
         bridgeLastSeenAt = Date.now();

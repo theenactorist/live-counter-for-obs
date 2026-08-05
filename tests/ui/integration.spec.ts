@@ -164,8 +164,16 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
     }
   });
 
+  // Task 3.3 EDIT (justification: liveSafetyArmed's studio-mode-off branch
+  // arms whenever nothing else is known about activity AND Studio Mode reads
+  // `false` — the mock server's own default; with no ws source seeded and no
+  // relay heartbeat here, mergedActive stays null the whole test. This test
+  // isn't about live-safety, so `setStudioMode(true)` establishes an
+  // explicit not-armed baseline before anything connects, so the jump-apply
+  // click below applies directly as it always did.
   test('3. jump to 37 (range 0-50): dock progress shows 74%, overlay shows 37', async ({ context }) => {
     const mock = await startMockObs();
+    mock.setStudioMode(true);
     try {
       const dock = await context.newPage();
       const overlay = await context.newPage();
@@ -713,6 +721,58 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       await openDock(dock, { port: mock.port });
       await expect.poll(() => mock.lastIdentify !== null).toBe(true);
       expect(mock.lastIdentify?.eventSubscriptions).toBe(394249);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.3 (AC 14) — the live-safety confirm's one structural bypass (PRD
+  // ruling): installHotkeyBridge dispatches straight through main.ts's own
+  // dispatch closure, never through live.ts, so there is no modal in the
+  // bridge's path to intercept a showHide with AT ALL — but the bypass still
+  // has to leave an audit trail rather than silently doing something the
+  // operator can't see coming.
+  test('17. bridge showHide bypasses the live-safety confirm entirely while armed, and logs bridge-show-while-live', async ({
+    context,
+  }) => {
+    const overlayInputName = 'Live Counter Overlay';
+    const mock = await startMockObs({
+      inputs: [{ inputName: overlayInputName, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port, livePollMs: 200 });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      // Overlay starts visible (createSession's default) — hide it first
+      // (unguarded either way) so the bridge's next showHide is a genuine
+      // Show, then arm live-safety via the real ws source.
+      await dock.getByTestId('btn-show-hide').click();
+      await expect(dock.getByTestId('btn-show-hide')).toHaveText('Show');
+      await expect(overlay.getByTestId('overlay-number')).toHaveCount(0); // render-blank while hidden
+
+      mock.setSourceActive(overlayInputName, { active: true });
+      await expect(dock.getByTestId('status-chip')).toHaveText('HIDDEN', { timeout: 3000 });
+      await expect(dock.getByTestId('status-chip')).toHaveAttribute(
+        'data-detail',
+        'Source is live in Program — Show would be visible immediately',
+      );
+
+      // Simulates counter-hotkeys.lua's send('showHide') — installHotkeyBridge
+      // decodes it and dispatches showOverlay DIRECTLY (see
+      // src/dock/hotkey-bridge.ts), bypassing live.ts's guard structurally.
+      injectBridgePayload(mock, 'showHide', 'bridge-show-while-live-1');
+
+      await expect(dock.getByTestId('btn-show-hide')).toHaveText('Hide', { timeout: 3000 }); // the bridge's Show actually ran
+      await expect(dock.getByTestId('live-safety-confirm')).toHaveCount(0); // never opened
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 }); // and the overlay really is showing again
+
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-log')).toContainText('bridge-show-while-live', { timeout: 5000 });
     } finally {
       await mock.close();
     }
