@@ -220,6 +220,22 @@ export class LiveStatusTracker {
           void this.pollStudioMode();
         }),
       );
+      // Fix round 1 (review finding) — `ObsWsClient` reconnects on its own
+      // (backoff + retry), so `client.state` can leave 'identified' and come
+      // BACK to 'identified' with main.ts never tearing this tracker down at
+      // all. Without this, `wsLanded` (and the per-name cache/studioMode it
+      // gates) stayed true/populated straight through the outage — the
+      // INSTANT `state` flipped back to 'identified' on reconnect, `wsTrusted`
+      // read true again from the pre-outage cache, before the fresh
+      // identify-triggered re-poll had any chance to land (and would keep
+      // serving that stale cache for up to a full `pollMs` if that specific
+      // re-poll itself failed). `'disconnected'` (obsws-client.ts) fires on
+      // EVERY path that stops the client being identified — explicit close,
+      // auth failure, AND the ordinary silent-reconnect network blip — so
+      // resetting here means a reconnect always starts from "nothing known"
+      // until its own fresh data lands, regardless of which of those three
+      // caused it.
+      this.unsubs.push(client.on('disconnected', () => this.resetWsTrust()));
     }
 
     // Re-poll every `pollMs` regardless of identify/setSourceNames churn —
@@ -228,6 +244,25 @@ export class LiveStatusTracker {
     this.pollTimer = setInterval(() => {
       void this.pollActive();
     }, this.pollMs);
+  }
+
+  /**
+   * Fix round 1 — clears every ws-layer fact learned while identified:
+   * per-name active/showing cache, the "has anything ever landed" flag, AND
+   * `studioMode`. `studioMode` is reset here too (not just `wsByName`/
+   * `wsLanded`) for the SAME reason: it is likewise only ever learned via
+   * `client.onEvent`/`client.request` while identified (StudioModeStateChanged
+   * / GetStudioModeEnabled), so a stale pre-outage value would be exactly as
+   * misleading — and `liveSafetyArmed` (Task 3.3) reads it directly, with no
+   * trust gate of its own. Idempotent and safe to call from a client that was
+   * never identified in the first place (an explicit `close()` on a
+   * still-'connecting' client, say) — there is simply nothing to clear.
+   */
+  private resetWsTrust(): void {
+    this.wsByName.clear();
+    this.wsLanded = false;
+    this.studioMode = null;
+    this.notify();
   }
 
   private applyWsFact(name: string, key: 'active' | 'showing', raw: unknown): void {

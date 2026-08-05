@@ -400,6 +400,123 @@ describe('LiveStatusTracker — ws layer', () => {
   });
 });
 
+// Fix round 1 (review finding) — `ObsWsClient` reconnects on its own
+// (backoff + retry) without `main.ts` ever tearing this tracker down, so a
+// genuine network blip must not leave the pre-outage ws cache looking
+// "trusted" the instant `client.state` flips back to 'identified', before
+// that identify's OWN re-poll has actually landed.
+describe('LiveStatusTracker — reconnect trust reset (fix round 1)', () => {
+  it('a disconnect/reconnect cycle never serves stale ws data as trusted until fresh data lands', async () => {
+    const mock = await startMockObs({ inputs: [{ inputName: 'Overlay', inputKind: 'browser_source', inputSettings: {} }] });
+    mockServers.push(mock);
+    // Fast custom backoff so the automatic reconnect below doesn't make this
+    // test wait out the real default (min 1000ms).
+    const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0, backoffMs: [50, 100] });
+    wsClients.push(client);
+    const firstIdentified = waitForIdentified(client);
+    client.connect();
+    await firstIdentified;
+
+    const bus = new Bus(client, 'dock');
+    const tracker = makeTracker({ client, bus, nowMs: () => 0 });
+    tracker.setSourceNames(['Overlay']);
+
+    // Establish trust: the initial poll lands, then a real event flips
+    // active to true — this is the "stale" value the fix must not let leak
+    // across the outage below.
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+    mock.setSourceActive('Overlay', { active: true });
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws.active).toBe(true);
+    });
+
+    // Hold back GetSourceActive's response so the window between
+    // "reconnected/identified again" and "this identify's own re-poll
+    // actually landed" is directly observable rather than racing past in a
+    // single microtask.
+    mock.delayResponsesFor('GetSourceActive', 300);
+
+    // A genuine network blip: the SERVER drops the socket out from under the
+    // client (not an explicit client.close() from this test) — ObsWsClient's
+    // own automatic reconnect-with-backoff takes it from here entirely on
+    // its own, exactly the scenario the review finding describes.
+    const secondIdentified = waitForIdentified(client);
+    mock.dropAllClients();
+
+    // While actually disconnected, the ws layer already reads untrusted
+    // (gated on client.state !== 'identified' regardless of this fix).
+    await vi.waitFor(() => {
+      expect(client.state).not.toBe('identified');
+    });
+    expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
+
+    // Flips the SERVER-side truth while still disconnected (the mock's
+    // per-input state is independent of any one client connection): the
+    // eventual value the tracker settles on can only have come from a FRESH
+    // poll landing — not the stale pre-outage `{active:true}` cache — if it
+    // reads false.
+    mock.setSourceActive('Overlay', { active: false });
+
+    await secondIdentified; // reconnected and re-identified
+
+    // THE FIX: even though client.state just became 'identified' again, the
+    // stale pre-outage cache (active: true) must NOT be served — this
+    // identify's own re-poll is still in flight (delayed above). Without the
+    // fix, `wsLanded` would still read true from before the outage and this
+    // would incorrectly read { active: true, showing: false }.
+    expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
+
+    // Once the delayed re-poll actually lands, trust resumes from THAT fresh
+    // data — false, proving it came from the new poll, not the old cache.
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+  });
+
+  it('studioMode is also reset on disconnect (same trust story as the ws-active cache)', async () => {
+    const mock = await startMockObs();
+    mockServers.push(mock);
+    const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0, backoffMs: [50, 100] });
+    wsClients.push(client);
+    const firstIdentified = waitForIdentified(client);
+    client.connect();
+    await firstIdentified;
+
+    const bus = new Bus(client, 'dock');
+    const tracker = makeTracker({ client, bus, nowMs: () => 0 });
+
+    mock.setStudioMode(true);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().studioMode).toBe(true);
+    });
+
+    mock.delayResponsesFor('GetStudioModeEnabled', 300);
+    const secondIdentified = waitForIdentified(client);
+    mock.dropAllClients();
+
+    await vi.waitFor(() => {
+      expect(client.state).not.toBe('identified');
+    });
+    expect(tracker.snapshot().studioMode).toBeNull();
+
+    // Flips the SERVER-side truth while still disconnected: the eventual
+    // value the tracker settles on can only have come from a fresh poll
+    // landing (not the stale pre-outage `true` cache) if it reads `false`.
+    mock.setStudioMode(false);
+
+    await secondIdentified; // reconnected and re-identified
+    // This identify's own re-poll is still in flight (delayed above) — must
+    // not resurrect the stale `true`.
+    expect(tracker.snapshot().studioMode).toBeNull();
+
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().studioMode).toBe(false);
+    });
+  });
+});
+
 describe('LiveStatusTracker — dispose', () => {
   it('unsubscribes from the bus and stops notifying listeners', async () => {
     const mock = await startMockObs();
