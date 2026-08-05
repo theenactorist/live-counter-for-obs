@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ObsWsClient } from '../../src/protocol/obsws-client.js';
+import { ObsWsClient, EventSub } from '../../src/protocol/obsws-client.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
+
+// Task 3.2 — the dock's event mask (src/dock/main.ts) is composed as
+// General|Inputs|Ui|InputActiveStateChanged|InputShowStateChanged, which
+// must sum to exactly 394249 (the brief's locked value) — a drift guard so a
+// future EventSub edit can't silently change the mask the dock actually
+// sends without a test noticing.
+describe('EventSub — dock mask composition', () => {
+  it('General|Inputs|Ui|InputActiveStateChanged|InputShowStateChanged === 394249', () => {
+    expect(EventSub.General | EventSub.Inputs | EventSub.Ui | EventSub.InputActiveStateChanged | EventSub.InputShowStateChanged).toBe(
+      394249,
+    );
+  });
+});
 
 let mock: MockObs | undefined;
 let client: ObsWsClient | undefined;

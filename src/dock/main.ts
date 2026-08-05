@@ -12,7 +12,7 @@ import '../styles/fonts.css';
  * re-deriving style/template from its preset (see the `adoptPresentation`
  * calls in `boot()`).
  */
-import { ObsWsClient, awaitIdentified } from '../protocol/obsws-client.js';
+import { ObsWsClient, awaitIdentified, EventSub } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
 import { DockStorage } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
@@ -20,7 +20,8 @@ import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
-import { mountDiagnosticsView, type DiagnosticsViewHandle } from './diagnostics.js';
+import { mountDiagnosticsView, type DiagnosticsViewHandle, overlaySourceNames } from './diagnostics.js';
+import { LiveStatusTracker } from './live-status.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
@@ -28,7 +29,24 @@ import { CONNECTION_GRACE_MS } from './connection-grace.js';
 import { installClipboardKeyboardHandler } from './clipboard-keys.js';
 import { installHotkeyBridge } from './hotkey-bridge.js';
 
-const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
+// Task 3.2 — General | Inputs | Ui | InputActiveStateChanged |
+// InputShowStateChanged (394249). `Ui` is needed for StudioModeStateChanged
+// (the LIVE-status tracker's passive studioMode signal); the two
+// Input*StateChanged bits are the ws layer's own push events. Composed from
+// EventSub's named bits (src/protocol/obsws-client.ts), not a magic number,
+// so a future addition/removal of a subscribed event category is visible at
+// the call site instead of silently baked into an opaque integer.
+const EVENT_SUBSCRIPTIONS =
+  EventSub.General | EventSub.Inputs | EventSub.Ui | EventSub.InputActiveStateChanged | EventSub.InputShowStateChanged;
+// Task 3.2 — how often main.ts re-derives the mapped overlay input names
+// (diagnostics.ts's overlaySourceNames()) and hands them to the tracker, on
+// top of the identify-triggered refresh below. Overridable via
+// `?livePollMs=`/`?liveFreshnessMs=` (see those params below) only insofar
+// as those seams also shrink the TRACKER's own poll/freshness windows for
+// Playwright — this names-refresh interval itself is not test-seamed since
+// no mandatory test depends on shrinking it specifically (the identify-time
+// refresh already covers every Playwright scenario this task needs).
+const OVERLAY_NAMES_POLL_MS = 30_000;
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
 // monitor, not a one-shot first-run check — a connection that drops well
 // after boot (server restarted, network hiccup) must surface it too, not
@@ -232,6 +250,15 @@ function main(): void {
   // staleness check (see diagnostics.ts's `hotkeyStaleMs` option doc comment).
   const hotkeyStaleMsParam = params.get('hotkeyStaleMs');
   const hotkeyStaleMsOverride = hotkeyStaleMsParam !== null ? Number(hotkeyStaleMsParam) : undefined;
+  // Test seam (Task 3.2): lets Playwright shrink the LIVE-status tracker's
+  // GetSourceActive re-poll interval / relay-freshness window instead of
+  // waiting out the real 30s/10s defaults — same pattern as every other
+  // `?xMs=` seam in this file (see live-status.ts's own `pollMs`/
+  // `freshnessMs` option doc comments).
+  const livePollMsParam = params.get('livePollMs');
+  const livePollMsOverride = livePollMsParam !== null ? Number(livePollMsParam) : undefined;
+  const liveFreshnessMsParam = params.get('liveFreshnessMs');
+  const liveFreshnessMsOverride = liveFreshnessMsParam !== null ? Number(liveFreshnessMsParam) : undefined;
 
   // loadSettings() only ever touches localStorage — reading it before a
   // client exists (to learn what port/password to build the client with) is
@@ -261,6 +288,14 @@ function main(): void {
   // live bridge look freshly "never seen" again.
   let bridgeTeardown: (() => void) | null = null;
   let bridgeLastSeenAt: number | null = null;
+  // Task 3.2 — per-boot LIVE-status tracker (mirrors bridgeTeardown's own
+  // per-boot lifecycle immediately above: constructed after `bus`, disposed
+  // at the top of the NEXT boot() call before it's reassigned) and the
+  // periodic "re-derive the overlay's mapped input names" poll that keeps it
+  // current across an operator adding/removing/renaming a Browser Source
+  // mid-session, on top of the identify-triggered refresh.
+  let liveStatus: LiveStatusTracker | null = null;
+  let overlayNamesPoll: ReturnType<typeof setInterval> | null = null;
   // Task 3.0 (carry-forward fix wave) — true for the whole span of
   // `onResetAll` (below), including the awaited `resetPersistentMirror()`
   // round trip — which can take seconds on a slow/unreachable OBS — during
@@ -316,6 +351,10 @@ function main(): void {
       clearInterval(wsBannerPoll);
       wsBannerPoll = null;
     }
+    if (overlayNamesPoll !== null) {
+      clearInterval(overlayNamesPoll);
+      overlayNamesPoll = null;
+    }
 
     // Task 3.1 — the bridge subscribes to THIS boot's `client.onEvent` and
     // dispatches through THIS boot's `controller`; both are about to be
@@ -325,6 +364,12 @@ function main(): void {
     if (bridgeTeardown) {
       bridgeTeardown();
       bridgeTeardown = null;
+    }
+    // Task 3.2 — same reasoning: the tracker subscribes THIS boot's
+    // `client`/`bus`, both about to be torn down/replaced below.
+    if (liveStatus) {
+      liveStatus.dispose();
+      liveStatus = null;
     }
 
     // Fix round 1 (Task 2.5 review, Critical 1): tear down the PREVIOUS
@@ -352,6 +397,36 @@ function main(): void {
     });
     storage = new DockStorage(window.localStorage, client, onWriteError);
     bus = new Bus(client, 'dock');
+
+    // Task 3.2 — constructed right after Bus, before any view mounts (this
+    // task's brief: the Live view's chip needs a real tracker instance at
+    // its very first render, not one wired in after the fact).
+    liveStatus = new LiveStatusTracker({
+      client,
+      bus,
+      ...(livePollMsOverride !== undefined ? { pollMs: livePollMsOverride } : {}),
+      ...(liveFreshnessMsOverride !== undefined ? { freshnessMs: liveFreshnessMsOverride } : {}),
+    });
+    // Captured immediately (same pattern as `bootedClient` further down):
+    // the outer `liveStatus` binding is reassigned by a later settings-save
+    // reconnect, and every closure below (the identify listener, the names
+    // poll, mountLiveView's own options) must always act against THIS boot's
+    // instance regardless of what happens to the outer variable later.
+    const bootedLiveStatus = liveStatus;
+    // Feeds the tracker's mapped overlay input names from the SAME URL-match
+    // scan diagnostics.ts's add-overlay flow uses — on every (re)identify
+    // (truthful from the first moment the chip can know anything) and every
+    // OVERLAY_NAMES_POLL_MS thereafter (an operator adding/renaming/removing
+    // the Browser Source mid-session), skipped entirely while unidentified
+    // since nothing could resolve then anyway.
+    client.on('identified', () => {
+      void overlaySourceNames(client).then((names) => bootedLiveStatus.setSourceNames(names));
+    });
+    overlayNamesPoll = setInterval(() => {
+      if (client.state !== 'identified') return;
+      void overlaySourceNames(client).then((names) => bootedLiveStatus.setSourceNames(names));
+    }, OVERLAY_NAMES_POLL_MS);
+
     const timer = new AutoTimer(() => performance.now());
     const scheduler = new RealScheduler();
     controller = new SessionController({ storage, bus, timer, scheduler });
@@ -486,6 +561,7 @@ function main(): void {
       client: bootedClient,
       initialSettings: connectSettings,
       onSaveSettings,
+      liveStatus: bootedLiveStatus,
     };
     liveHandle = mountLiveView(shell.panes.live, controller, bus, liveOpts);
 

@@ -42,6 +42,23 @@ const DEFAULT_PORT = 4455;
 // must not silence a heartbeat the local transport is still carrying fine.
 const OVERLAY_STATUS_MS = 2000;
 
+// Task 3.2 — the overlay page's own knowledge of whether ITS Browser Source
+// is actually active/showing in OBS, forwarded over the Bus as the LIVE
+// status tracker's PRIMARY layer (src/dock/live-status.ts's module doc
+// comment): it works over ANY transport (the zero-config direct one
+// included), needs no obs-websocket password, and needs no source name —
+// unlike the secondary ws layer (GetSourceActive polling), which needs all
+// three. `null` until the first signal of each kind arrives; a real CEF
+// Browser Source is expected to fire `window.obsstudio`'s own
+// onActiveChange/onVisibilityChange callbacks (assigned below, belt-and-
+// braces — the exact surface is confirmed at the Task 3.5 smoke) AND/OR
+// dispatch the two window CustomEvents this listens for directly, whichever
+// the actual CEF build exposes.
+interface ObsStudioSurface {
+  onActiveChange?: (active: boolean) => void;
+  onVisibilityChange?: (visible: boolean) => void;
+}
+
 function renderOverlayRoot(): HTMLElement | null {
   const root = document.getElementById('app');
   if (!root) return null;
@@ -110,6 +127,45 @@ function main(): void {
 
   mountOverlayRenderer(overlayRoot, bus, watchdogMs !== undefined ? { watchdogMs } : {});
 
+  // Task 3.2 — the relay's own held state; `null` until the first signal of
+  // each kind arrives (module doc comment above). Sent as part of EVERY
+  // overlay-status heartbeat below, and immediately on any change (kept as
+  // its own function so both call sites stay in sync).
+  let obsActive: boolean | null = null;
+  let obsShowing: boolean | null = null;
+
+  function sendStatusNow(): void {
+    void bus.send('overlay-status', { obsActive, obsShowing }).catch(() => {});
+  }
+
+  window.addEventListener('obsSourceActiveChanged', (e) => {
+    const detail = (e as CustomEvent).detail as { active?: unknown } | undefined;
+    obsActive = typeof detail?.active === 'boolean' ? detail.active : null;
+    sendStatusNow();
+  });
+  window.addEventListener('obsSourceVisibleChanged', (e) => {
+    const detail = (e as CustomEvent).detail as { visible?: unknown } | undefined;
+    obsShowing = typeof detail?.visible === 'boolean' ? detail.visible : null;
+    sendStatusNow();
+  });
+
+  // Belt-and-braces (module doc comment above): a real CEF Browser Source
+  // may expose `window.obsstudio` directly rather than (or in addition to)
+  // dispatching the two CustomEvents above — assign its callbacks too, when
+  // present, so whichever surface the Task 3.5 smoke confirms already works
+  // without a follow-up change here.
+  const obsstudio = (window as unknown as { obsstudio?: ObsStudioSurface }).obsstudio;
+  if (obsstudio) {
+    obsstudio.onActiveChange = (active: boolean): void => {
+      obsActive = active;
+      sendStatusNow();
+    };
+    obsstudio.onVisibilityChange = (visible: boolean): void => {
+      obsShowing = visible;
+      sendStatusNow();
+    };
+  }
+
   // Task 2.13 — see the module doc comment on OVERLAY_STATUS_MS above: armed
   // exactly once, unconditionally, for the whole page lifetime. `bus.send()`
   // fans out to whichever transports are live at each call, so this needs no
@@ -117,7 +173,7 @@ function main(): void {
   // lifecycle.
   void bus.send('hello', {}).catch(() => {});
   setInterval(() => {
-    void bus.send('overlay-status', {}).catch(() => {});
+    sendStatusNow();
   }, statusMs);
 
   // Test seam (Task 2.13): exposes a raw per-nonce delivery count so a

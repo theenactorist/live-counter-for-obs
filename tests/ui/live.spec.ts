@@ -8,6 +8,14 @@ import { serializeSession } from '../../src/engine/migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
+// Task 3.2 — dock.html and overlay.html are sibling files in the same
+// `dist/` (vite.config.ts's shared outDir), so this is exactly the URL
+// diagnostics.ts's overlayBaseUrl() would derive from the dock's own
+// location at runtime — seeding a mock browser_source input with this exact
+// URL is what makes overlaySourceNames() (and therefore the LIVE-status
+// tracker's ws layer) actually find it.
+const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
+const OVERLAY_INPUT_NAME = 'Live Counter Overlay';
 
 const MINUS = '−'; // U+2212 MINUS SIGN — the exact glyph controller.ts's LABELS map uses for decrement.
 
@@ -20,13 +28,35 @@ interface StartCfg {
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number },
+  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; livePollMs?: number; liveFreshnessMs?: number },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
+  if (opts.livePollMs !== undefined) params.set('livePollMs', String(opts.livePollMs));
+  if (opts.liveFreshnessMs !== undefined) params.set('liveFreshnessMs', String(opts.liveFreshnessMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+// Task 3.2 — simulates the overlay page's own bus heartbeat (hello/
+// overlay-status) reaching the dock over obs-websocket's BroadcastCustomEvent,
+// WITHOUT needing a second real overlay.html page open (live.spec.ts only
+// ever drives the dock). Feeds the LIVE-status tracker's `overlaySeen`
+// freshness flag — several existing chip tests below predate the tracker and
+// need this to keep exercising the render-flag-driven SHOWING/HIDDEN path
+// (chipFrom's row 6) rather than falling to UNKNOWN for "no overlay page ever
+// seen", which is the new (and correct) behavior when nothing establishes
+// overlaySeen at all.
+function injectOverlayHeartbeat(mock: MockObs, payload: { obsActive?: boolean | null; obsShowing?: boolean | null } = {}): void {
+  mock.injectEvent('CustomEvent', {
+    app: 'live-counter',
+    v: 1,
+    source: 'overlay',
+    kind: 'overlay-status',
+    nonce: `test-overlay-status-${Math.random().toString(36).slice(2)}`,
+    payload: { obsActive: payload.obsActive ?? null, obsShowing: payload.obsShowing ?? null },
+  });
 }
 
 async function readValue(page: Page): Promise<number> {
@@ -347,11 +377,24 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Task 3.2 EDIT (justification: chipFor's chip logic was replaced wholesale
+  // by the locked `chipFrom` decision table — see live-status.ts. The
+  // SHOWING/HIDDEN-by-overlayVisible legend this test exercises is now row 6
+  // of that table, reached only once `overlaySeen` is true (the tracker has
+  // heard a hello/overlay-status from an actual overlay page within the
+  // freshness window) — this test drives the dock alone, with no real
+  // overlay.html page open, so nothing would ever establish that fact
+  // without help. `injectOverlayHeartbeat` simulates exactly the bus message
+  // a real overlay page sends, with `obsActive`/`obsShowing` left `null` so
+  // the assertions below still exercise the SAME render-flag-driven fallback
+  // this test always meant to cover, not the new OBS-active layer (covered
+  // separately by the new setSourceActive-driven LIVE tests further down).
   test('show/hide flips status-chip between SHOWING and HIDDEN', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      injectOverlayHeartbeat(mock);
 
       const chip = page.getByTestId('status-chip');
       await expect(chip).toHaveText('SHOWING');
@@ -368,28 +411,111 @@ test.describe('dock Live view', () => {
     }
   });
 
-  // Phase 2 final-review fix (contracts:status-chip-no-unknown). SHOWING /
-  // HIDDEN describe the render-level hide flag, which only means anything
-  // while the dock is actually talking to OBS; with the socket down the dock
-  // knows nothing about what the audience sees. The plan's DOM contract locks
-  // UNKNOWN as a Phase 2 chip state and dock.html already carried the (until
-  // now dead) `[data-state='unknown']` styling.
-  test('status-chip flips to UNKNOWN when the ws connection drops, alongside banner-ws', async ({ page }) => {
+  // Phase 2 final-review fix (contracts:status-chip-no-unknown), UPDATED for
+  // Task 3.2 (justification: same as the test immediately above —
+  // SHOWING/HIDDEN now require `overlaySeen`, established here via
+  // `injectOverlayHeartbeat` before the ws connection drops). The chip's
+  // OWN "distrust" story has also changed: dropping the ws connection no
+  // longer means UNKNOWN by itself (Task 2.13's whole point is that the
+  // overlay keeps heartbeating over the direct transport with no OBS at
+  // all — see integration.spec.ts's new dock+overlay coverage of exactly
+  // that) — here, with no real overlay page re-heartbeating after the one
+  // injected message, the chip only reaches UNKNOWN once THAT single
+  // heartbeat's own freshness window elapses, which is why this test now
+  // opens the dock with a shrunk `liveFreshnessMs` to keep that within the
+  // existing timeout instead of waiting out the real 10s default.
+  test('status-chip flips to UNKNOWN once the last-seen overlay heartbeat goes stale, alongside banner-ws on a ws drop', async ({
+    page,
+  }) => {
     const mock = await startMockObs();
     const port = mock.port;
 
-    await openDock(page, { port });
+    await openDock(page, { port, liveFreshnessMs: 500 });
     await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+    injectOverlayHeartbeat(mock);
 
     const chip = page.getByTestId('status-chip');
     await expect(chip).toHaveAttribute('data-state', 'showing');
     await expect(chip).toHaveText('SHOWING');
 
-    await mock.close(); // server goes away mid-session
+    await mock.close(); // server goes away mid-session; no further heartbeats arrive either
 
     await expect(chip).toHaveAttribute('data-state', 'unknown', { timeout: 5000 });
     await expect(chip).toHaveText('UNKNOWN');
     await expect(page.getByTestId('banner-ws')).toBeVisible({ timeout: 5000 });
+  });
+
+  // Task 3.2 — the ws layer end to end: a real obs-websocket source
+  // (matched by overlaySourceNames() via its settings URL) reporting
+  // active:true through GetSourceActive polling + setSourceActive's
+  // InputActiveStateChanged event flips the chip to LIVE, with no overlay
+  // page open at all (the ws layer is entirely self-sufficient here).
+  test('setSourceActive(active:true) on a matched overlay source flips the chip to LIVE', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      // Baseline once the ws layer has landed (poll response false/false,
+      // overlayVisible true by default): HIDDEN with the "not visible" detail
+      // — proves the ws layer alone (no overlay page, no relay) already
+      // drives the chip once a source is matched and polled.
+      await expect(chip).toHaveAttribute('data-state', 'hidden', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-detail', 'Source not visible in OBS');
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-state', 'live');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('render-hide while the OBS source is active shows HIDDEN with the live-in-program detail', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      await page.getByTestId('btn-show-hide').click(); // operator Hide -> overlayVisible false
+      await expect(chip).toHaveText('HIDDEN');
+      await expect(chip).toHaveAttribute('data-state', 'hidden');
+      await expect(chip).toHaveAttribute('data-detail', 'Source is live in Program — Show would be visible immediately');
+      await expect(chip).toHaveAttribute('title', 'Source is live in Program — Show would be visible immediately');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('setSourceActive({showing:true}) only, active still false, shows SHOWING (PREVIEW) while overlayVisible', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      await expect(chip).toHaveAttribute('data-state', 'hidden', { timeout: 3000 }); // baseline: active/showing both false
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: false, showing: true });
+      await expect(chip).toHaveText('SHOWING (PREVIEW)', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-state', 'showing-preview');
+      await expect(chip).toHaveAttribute('data-detail', 'Preview or projector only — not in Program');
+    } finally {
+      await mock.close();
+    }
   });
 
   // Phase 2 final-review fix (code-quality:P2-Q-07): the +/- handler is on
@@ -424,6 +550,12 @@ test.describe('dock Live view', () => {
   // operator-initiated. Warning that "the audience may not see updates" about
   // an overlay the operator deliberately hid — directly above a chip reading
   // HIDDEN — is exactly the noise that teaches them to ignore the real thing.
+  //
+  // Task 3.2 EDIT (justification: same as the two chip tests above — this
+  // test's incidental `status-chip` HIDDEN check now needs `overlaySeen`,
+  // which nothing establishes without a real overlay page or the injected
+  // heartbeat below; the banner-overlay behavior itself, this test's actual
+  // subject, is untouched by Task 3.2).
   test('banner-overlay is suppressed while the overlay is deliberately hidden, and returns on Show', async ({
     page,
   }) => {
@@ -431,6 +563,7 @@ test.describe('dock Live view', () => {
     try {
       await openDock(page, { port: mock.port, overlaySilenceMs: 500 });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      injectOverlayHeartbeat(mock);
 
       await expect(page.getByTestId('banner-overlay')).toBeVisible({ timeout: 3000 });
 

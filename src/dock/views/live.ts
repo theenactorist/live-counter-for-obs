@@ -39,6 +39,7 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
+import { chipFrom, type LiveStatusTracker } from '../live-status.js';
 import {
   addOverlayButtonState,
   fixOverlayConfirmText,
@@ -157,6 +158,15 @@ export interface MountLiveViewOptions {
    * implementation, two entry points" — no second reconnect path).
    */
   onSaveSettings?: (port: number, password: string) => void;
+  /**
+   * Task 3.2 — the per-boot LIVE-status tracker (src/dock/live-status.ts):
+   * merges the overlay's own relay layer with obs-websocket's secondary ws
+   * layer into the real six-row status-chip decision table (`chipFrom`),
+   * replacing the Phase 2 SHOWING/HIDDEN-by-connection-only chip. Omitted =
+   * the chip always reads UNKNOWN (no tracker means no known relay/ws state
+   * at all) — main.ts always passes one in production.
+   */
+  liveStatus?: LiveStatusTracker;
 }
 
 interface FocusSnapshot {
@@ -693,15 +703,46 @@ export function mountLiveView(
     return overlaySilent();
   }
 
-  // SHOWING/HIDDEN describe the RENDER-level hide flag, which is only
-  // meaningful information if the dock is actually talking to OBS. With the
-  // socket down the dock knows nothing about what the audience sees, so it
-  // must say so rather than assert SHOWING (contracts:status-chip-no-unknown;
-  // the plan's DOM contract locks UNKNOWN as a Phase 2 chip state, and PRD
-  // §8.11 calls this chip "the continuous safeguard"). LIVE stays Phase 3.
-  function chipFor(session: Session): { state: string; text: string } {
-    if (!isConnected()) return { state: 'unknown', text: 'UNKNOWN' };
-    return session.overlayVisible ? { state: 'showing', text: 'SHOWING' } : { state: 'hidden', text: 'HIDDEN' };
+  // Task 3.2 — the chip's real six-row decision table (PRD §8.11), fed by
+  // the LIVE-status tracker's merged relay (overlay `window.obsstudio`
+  // relay, over ANY transport) + ws (obs-websocket GetSourceActive/
+  // Input*StateChanged, scoped to the matched overlay source) layers, plus
+  // this session's own `overlayVisible` render flag. Replaces the Phase 2
+  // "unknown iff disconnected, else SHOWING/HIDDEN by overlayVisible" chip —
+  // trust is now entirely the tracker's concern (each layer already reports
+  // `null` when it isn't currently trustworthy; see live-status.ts), so
+  // `isConnected()` no longer factors into the chip at all (it still drives
+  // the Connect card and banner-ws elsewhere in this file). No tracker at
+  // all (a caller that omits `opts.liveStatus`) reads as "nothing known" —
+  // always UNKNOWN — the same as a tracker that has never heard from either
+  // layer.
+  function chipFor(session: Session): { state: string; text: string; detail: string | null } {
+    const snap = opts.liveStatus?.snapshot() ?? {
+      overlaySeen: false,
+      relay: { active: null, showing: null },
+      ws: { active: null, showing: null },
+    };
+    return chipFrom({
+      overlaySeen: snap.overlaySeen,
+      relay: snap.relay,
+      ws: snap.ws,
+      overlayVisible: session.overlayVisible,
+    });
+  }
+
+  // Shared between renderLive() (building the element fresh) and
+  // updateStatusChip() (the surgical poll/tracker-subscription update), so
+  // the data-detail/title pairing can never drift between the two paths.
+  function applyChipToElement(chipEl: HTMLElement, chip: { state: string; text: string; detail: string | null }): void {
+    chipEl.dataset.state = chip.state;
+    chipEl.textContent = chip.text;
+    if (chip.detail !== null) {
+      chipEl.dataset.detail = chip.detail;
+      chipEl.title = chip.detail;
+    } else {
+      delete chipEl.dataset.detail;
+      chipEl.removeAttribute('title');
+    }
   }
 
   // Fix round 1 (Task 2.5 review, Critical 2): the once-a-second poll below
@@ -729,9 +770,7 @@ export function mountLiveView(
     if (session === null) return;
     const chipEl = container.querySelector<HTMLElement>('[data-testid="status-chip"]');
     if (!chipEl) return;
-    const chip = chipFor(session);
-    chipEl.dataset.state = chip.state;
-    chipEl.textContent = chip.text;
+    applyChipToElement(chipEl, chipFor(session));
   }
 
   function renderRecoveredBanner(): HTMLElement {
@@ -785,7 +824,9 @@ export function mountLiveView(
     root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText));
 
     const chip = chipFor(session);
-    root.appendChild(el('div', { 'data-testid': 'status-chip', 'data-state': chip.state, class: 'status-chip' }, chip.text));
+    const chipEl = el('div', { 'data-testid': 'status-chip', class: 'status-chip' });
+    applyChipToElement(chipEl, chip);
+    root.appendChild(chipEl);
 
     root.appendChild(
       el(
@@ -1100,6 +1141,13 @@ export function mountLiveView(
   // (see obsws-client.ts — 'connecting' has none of its own, which is why
   // the poll above exists at all) rather than waiting out up to one full
   // BANNER_POLL_MS tick to notice.
+  // Task 3.2 — the tracker's own subscription is a SEPARATE trigger from the
+  // 1s bannerPoll below: relay/ws facts can change at any moment (a bus
+  // heartbeat, an Input*StateChanged event, a GetSourceActive poll landing),
+  // and reusing the same surgical, focus-safe updateStatusChip() path here
+  // means the chip reflects a change immediately rather than waiting out up
+  // to one full BANNER_POLL_MS tick.
+  const unsubLiveStatus = opts.liveStatus?.subscribe(() => updateStatusChip());
   const unsubIdentified = client?.on('identified', () => {
     // Ruling A item 1: every (re)identify re-seeds the shared scan, so this
     // mirror's verb is truthful from the first moment it is clickable.
@@ -1135,6 +1183,7 @@ export function mountLiveView(
       destroyed = true;
       unsubController();
       unsubBus();
+      unsubLiveStatus?.();
       unsubIdentified?.();
       unsubAuthFailed?.();
       unsubAddOverlayBusyLive();

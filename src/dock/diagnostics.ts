@@ -408,6 +408,56 @@ async function findSceneContaining(client: ObsWsClient, inputName: string, excep
   return null;
 }
 
+/** The one predicate that decides "is this a Live Counter overlay?" (matched by SETTINGS URL, not by name — see performOverlayScan's own doc comment) — reused by both the scan below and overlaySourceNames() (Task 3.2) so the two can never disagree about what counts as an overlay input. */
+function isOverlayUrl(url: string): boolean {
+  return url.includes(OVERLAY_URL_MARKER);
+}
+
+/**
+ * Every `browser_source` input (from a `GetInputList` result already in
+ * hand) whose settings URL matches the overlay. `null` signals a per-input
+ * `GetInputSettings` failure (Gate fix wave F6) — a half-read scene is
+ * inconclusive, not "no matches" — so a genuine empty match list and an
+ * inconclusive scan stay distinguishable to callers.
+ */
+async function matchingOverlayInputs(client: ObsWsClient, inputs: InputListEntry[]): Promise<string[] | null> {
+  const matches: string[] = [];
+  for (const input of inputs) {
+    if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
+    let settingsResp: Record<string, unknown>;
+    try {
+      settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
+    } catch {
+      return null;
+    }
+    const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
+    if (isOverlayUrl(existingUrl)) matches.push(input.inputName);
+  }
+  return matches;
+}
+
+/**
+ * Task 3.2 — every browser_source input in the collection whose settings URL
+ * matches the overlay (the SAME match rule performOverlayScan uses, via
+ * `matchingOverlayInputs`), scene membership aside: this feeds the LIVE
+ * status tracker's ws layer (`LiveStatusTracker.setSourceNames`), which
+ * cares about every matching source regardless of which scene it currently
+ * sits in, not just the current program scene the add-overlay flow itself
+ * only ever writes to. Read-only, and resolves `[]` on ANY failure
+ * (including "not identified") rather than throwing — main.ts calls this
+ * unprompted on identify and on a periodic poll, so it must never produce an
+ * unhandled rejection.
+ */
+export async function overlaySourceNames(client: ObsWsClient): Promise<string[]> {
+  try {
+    const listResp = await client.request('GetInputList');
+    const inputs = (listResp.inputs ?? []) as InputListEntry[];
+    return (await matchingOverlayInputs(client, inputs)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Scene-AWARE detection (Ruling A item 2). obs-websocket v5's `GetInputList`
  * is scene-collection-global — it says nothing about which scene an input is
@@ -428,24 +478,14 @@ async function performOverlayScan(client: ObsWsClient): Promise<OverlayScan> {
     const listResp = await client.request('GetInputList');
     const inputs = (listResp.inputs ?? []) as InputListEntry[];
 
-    const matches: string[] = [];
-    for (const input of inputs) {
-      if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
-      let settingsResp: Record<string, unknown>;
-      try {
-        settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
-      } catch {
-        // Gate fix wave (F6): a per-input failure used to be skipped and the
-        // scan carried on — but if the failing input IS the real overlay,
-        // "carry on" means detection misses it, CreateInput collides on the
-        // name, and the suffix retry puts a genuine duplicate "Live Counter
-        // Overlay 2" into a LIVE scene. A half-read scene is now
-        // inconclusive: the button disables and offers a retry instead.
-        return { status: 'unknown', message: ADD_OVERLAY_SCAN_FAILED_TEXT };
-      }
-      const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
-      if (existingUrl.includes(OVERLAY_URL_MARKER)) matches.push(input.inputName);
-    }
+    // Gate fix wave (F6): a per-input GetInputSettings failure used to be
+    // skipped and the scan carried on — but if the failing input IS the real
+    // overlay, "carry on" means detection misses it, CreateInput collides on
+    // the name, and the suffix retry puts a genuine duplicate "Live Counter
+    // Overlay 2" into a LIVE scene. A half-read scene is now inconclusive:
+    // the button disables and offers a retry instead.
+    const matches = await matchingOverlayInputs(client, inputs);
+    if (matches === null) return { status: 'unknown', message: ADD_OVERLAY_SCAN_FAILED_TEXT };
 
     if (matches.length === 0) return { status: 'none', sceneName, baseWidth, baseHeight };
 

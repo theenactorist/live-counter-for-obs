@@ -2,6 +2,21 @@
 // and the global `WebSocket` — no `node:crypto` / `ws` import — so this file
 // bundles unchanged for both the dock/overlay pages and Node test runs.
 
+// obs-websocket 5.x's EventSubscription bitmask (protocol.md) — named bits
+// this codebase actually composes into a subscription mask, rather than a
+// magic number at each call site. `General|Inputs|Ui|InputActiveStateChanged|
+// InputShowStateChanged` (src/dock/main.ts) sums to 394249 — Task 3.2's
+// dock-side event mask, needed for the LIVE-status ws layer's
+// InputActiveStateChanged/InputShowStateChanged/StudioModeStateChanged
+// events (the last is a `Ui`-category event).
+export const EventSub = {
+  General: 1 << 0,
+  Inputs: 1 << 3,
+  Ui: 1 << 10,
+  InputActiveStateChanged: 1 << 17,
+  InputShowStateChanged: 1 << 18,
+} as const;
+
 export interface ObsWsOptions {
   url: string;
   password?: string;

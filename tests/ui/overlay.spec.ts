@@ -110,6 +110,47 @@ test.describe('overlay renderer', () => {
     }
   });
 
+  // Task 3.2 — the overlay relay: a real CEF Browser Source is expected to
+  // dispatch (or, belt-and-braces, drive window.obsstudio's own callbacks —
+  // src/overlay/main.ts) window CustomEvents when OBS changes this source's
+  // active/visible state. This proves the overlay page forwards that signal
+  // over the bus IMMEDIATELY (not waiting out the next 2s overlay-status
+  // tick) as `{ obsActive: true, obsShowing: null }` — the LIVE-status
+  // tracker's primary layer (live-status.ts).
+  test('relays a synthetic obsSourceActiveChanged window event into an immediate overlay-status with obsActive', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
+
+      const before = mock.broadcasts.length;
+      await page.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('obsSourceActiveChanged', { detail: { active: true } }));
+      });
+
+      await expect
+        .poll(() =>
+          mock.broadcasts.slice(before).some((b) => {
+            const d = b.eventData as { kind?: string; source?: string; payload?: { obsActive?: unknown; obsShowing?: unknown } } | undefined;
+            return d?.kind === 'overlay-status' && d?.source === 'overlay' && d.payload?.obsActive === true;
+          }),
+        )
+        .toBe(true);
+
+      // obsShowing was never signaled — stays null, not coerced to false.
+      const match = mock.broadcasts.slice(before).find((b) => {
+        const d = b.eventData as { kind?: string } | undefined;
+        return d?.kind === 'overlay-status';
+      });
+      const payload = (match?.eventData as { payload?: { obsShowing?: unknown } } | undefined)?.payload;
+      expect(payload?.obsShowing).toBeNull();
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('renders value + template around it; a hostile template renders inert as literal text', async ({ page }) => {
     const mock = await startMockObs();
     try {
