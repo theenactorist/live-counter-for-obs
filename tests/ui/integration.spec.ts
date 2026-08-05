@@ -7,10 +7,11 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { startMockObs } from '../helpers/mock-obsws.js';
+import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import type { CompletionConfig, Mode } from '../../src/engine/types.js';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession } from '../../src/engine/migrate.js';
+import { BRIDGE_CHANNEL_INPUT, BRIDGE_SETTINGS_KEY } from '../../src/shared/bridge-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
@@ -84,6 +85,14 @@ async function startSession(page: Page, cfg: StartCfg, animation?: AnimationCfg)
 
 async function dockValue(page: Page): Promise<number> {
   return Number(await page.getByTestId('current-value').textContent());
+}
+
+/** Injects a raw InputSettingsChanged event carrying a JSON-encoded hotkey-bridge payload (Task 3.1). */
+function injectBridgePayload(mock: MockObs, cmd: string, nonce: string): void {
+  mock.injectEvent('InputSettingsChanged', {
+    inputName: BRIDGE_CHANNEL_INPUT,
+    inputSettings: { [BRIDGE_SETTINGS_KEY]: JSON.stringify({ app: 'live-counter', v: 1, cmd, nonce }) },
+  });
 }
 
 test.describe('Phase 2 integration gate: dock + overlay against one mock server', () => {
@@ -572,6 +581,33 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       }
     } finally {
       if (!closed) await mock.close();
+    }
+  });
+
+  test('13. hotkey bridge end-to-end: an inc event on the settings channel moves the dock and the overlay follows', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+      await expect(dock.getByTestId('current-value')).toHaveText('0');
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      // Simulates counter-hotkeys.lua's send('inc') — a real Lua script would
+      // write this same shape into the channel input's "text" setting from
+      // inside OBS; the mock's injectEvent delivers the resulting
+      // InputSettingsChanged exactly as a real obs-websocket server would.
+      injectBridgePayload(mock, 'inc', 'integration-inc-1');
+
+      await expect(dock.getByTestId('current-value')).toHaveText('1', { timeout: 3000 });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('1', { timeout: 3000 });
+    } finally {
+      await mock.close();
     }
   });
 });

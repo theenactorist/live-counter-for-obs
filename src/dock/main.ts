@@ -26,6 +26,7 @@ import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
 import { CONNECTION_GRACE_MS } from './connection-grace.js';
 import { installClipboardKeyboardHandler } from './clipboard-keys.js';
+import { installHotkeyBridge } from './hotkey-bridge.js';
 
 const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
@@ -225,6 +226,12 @@ function main(): void {
   // see diagnostics.ts's own `refreshMs` option doc comment.
   const diagRefreshMsParam = params.get('diagRefreshMs');
   const diagRefreshMsOverride = diagRefreshMsParam !== null ? Number(diagRefreshMsParam) : undefined;
+  // Test seam (Task 3.1): lets Playwright shrink the hotkeys row's 90s
+  // "silent since" threshold instead of waiting out the real window — same
+  // reasoning as `overlaySilenceMs` above, for the hotkey bridge's own
+  // staleness check (see diagnostics.ts's `hotkeyStaleMs` option doc comment).
+  const hotkeyStaleMsParam = params.get('hotkeyStaleMs');
+  const hotkeyStaleMsOverride = hotkeyStaleMsParam !== null ? Number(hotkeyStaleMsParam) : undefined;
 
   // loadSettings() only ever touches localStorage — reading it before a
   // client exists (to learn what port/password to build the client with) is
@@ -244,6 +251,16 @@ function main(): void {
   // onActivate callback); boot() only assigns it.
   let wsBannerPoll: ReturnType<typeof setInterval> | null = null;
   let disconnectedSince: number | null = null;
+  // Task 3.1 — per-boot hotkey-bridge subscription (installHotkeyBridge's own
+  // teardown), and the "last time ANY valid bridge payload (including a
+  // `hello` heartbeat) arrived" timestamp Diagnostics' hotkeys row reads via
+  // the `bridgeSeenAt` option below. Deliberately NOT reset to null on a
+  // settings-save reconnect: the Lua script keeps sending `hello` every 30s
+  // regardless of the dock's OWN websocket connection lifecycle, and a
+  // reconnect that lands well within that window should not make a genuinely
+  // live bridge look freshly "never seen" again.
+  let bridgeTeardown: (() => void) | null = null;
+  let bridgeLastSeenAt: number | null = null;
   // Task 3.0 (carry-forward fix wave) — true for the whole span of
   // `onResetAll` (below), including the awaited `resetPersistentMirror()`
   // round trip — which can take seconds on a slow/unreachable OBS — during
@@ -300,6 +317,16 @@ function main(): void {
       wsBannerPoll = null;
     }
 
+    // Task 3.1 — the bridge subscribes to THIS boot's `client.onEvent` and
+    // dispatches through THIS boot's `controller`; both are about to be
+    // torn down/replaced below, so the subscription must go first (same
+    // reasoning as controller.dispose()/bus.destroy()/client.close() just
+    // beneath it).
+    if (bridgeTeardown) {
+      bridgeTeardown();
+      bridgeTeardown = null;
+    }
+
     // Fix round 1 (Task 2.5 review, Critical 1): tear down the PREVIOUS
     // stack, if any, before building a new one. `controller`/`client` are
     // `undefined` at runtime on the very first call (neither has been
@@ -328,6 +355,19 @@ function main(): void {
     const timer = new AutoTimer(() => performance.now());
     const scheduler = new RealScheduler();
     controller = new SessionController({ storage, bus, timer, scheduler });
+
+    // Task 3.1 — installed fresh against THIS boot's client/controller (per-
+    // boot, per installHotkeyBridge's own contract); torn down at the top of
+    // this same function on the next boot() call, above.
+    bridgeTeardown = installHotkeyBridge({
+      client,
+      getSession: () => controller.getState().session,
+      dispatch: (cmd) => controller.dispatch(cmd),
+      log: (event, detail) => storage.log(event, detail),
+      onBridgeSeen: () => {
+        bridgeLastSeenAt = Date.now();
+      },
+    });
 
     hideBannerWs();
     disconnectedSince = null;
@@ -471,6 +511,7 @@ function main(): void {
     const diagnosticsOpts = {
       ...(overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {}),
       ...(diagRefreshMsOverride !== undefined ? { refreshMs: diagRefreshMsOverride } : {}),
+      ...(hotkeyStaleMsOverride !== undefined ? { hotkeyStaleMs: hotkeyStaleMsOverride } : {}),
       ...(bootOpts.justReset ? { justReset: true } : {}),
     };
     diagnosticsHandle = mountDiagnosticsView(shell.panes.diagnostics, {
@@ -480,6 +521,11 @@ function main(): void {
       initialSettings: connectSettings,
       onSaveSettings,
       onResetAll,
+      // Task 3.1 — reads THIS boot's `bridgeLastSeenAt` closure on every poll
+      // tick; deliberately a live getter, not a snapshotted value, so the
+      // row's "seen ≤/> 90s ago" check is always evaluated against the
+      // CURRENT time when Diagnostics reads it, not whatever it was at mount.
+      bridgeSeenAt: () => bridgeLastSeenAt,
       ...diagnosticsOpts,
     });
 

@@ -6,20 +6,36 @@ import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { VERSION } from '../../src/shared/version.js';
+import { BRIDGE_CHANNEL_INPUT, BRIDGE_SETTINGS_KEY } from '../../src/shared/bridge-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; diagRefreshMs?: number },
+  opts: {
+    port: number;
+    devhook?: boolean;
+    overlaySilenceMs?: number;
+    diagRefreshMs?: number;
+    hotkeyStaleMs?: number;
+  },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
   if (opts.diagRefreshMs !== undefined) params.set('diagRefreshMs', String(opts.diagRefreshMs));
+  if (opts.hotkeyStaleMs !== undefined) params.set('hotkeyStaleMs', String(opts.hotkeyStaleMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+/** Injects a raw InputSettingsChanged event carrying a JSON-encoded hotkey-bridge payload. */
+function injectBridgePayload(mock: MockObs, cmd: string, nonce: string): void {
+  mock.injectEvent('InputSettingsChanged', {
+    inputName: BRIDGE_CHANNEL_INPUT,
+    inputSettings: { [BRIDGE_SETTINGS_KEY]: JSON.stringify({ app: 'live-counter', v: 1, cmd, nonce }) },
+  });
 }
 
 /**
@@ -147,23 +163,46 @@ test.describe('Diagnostics view', () => {
     }
   });
 
-  test('hotkeys row renders neutrally (never ok/warn/fail)', async ({ page }) => {
+  test('hotkeys row: never seen this boot renders neutral (never ok/warn/fail)', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
       await page.getByTestId('tab-diagnostics').click();
       const row = page.getByTestId('diag-row-hotkeys');
-      // Review fix (Important 1): must be its own distinct 'neutral' state,
-      // never 'ok' — nothing has actually been verified, so a green "ok"
-      // would misrepresent a bridge that doesn't exist yet.
+      // Nothing has actually been verified yet — a green "ok" would
+      // misrepresent a bridge that has never been seen this boot.
       await expect(row).toHaveAttribute('data-state', 'neutral');
-      await expect(row).toContainText('not built yet');
-      await expect(row).toContainText('Phase 3');
+      await expect(row).toContainText('counter-hotkeys.lua');
+      await expect(row).toContainText('Tools → Scripts');
 
       // Distinct gray styling, not the 'ok' row's green.
       const color = await row.locator('.diag-row-text').evaluate((el) => getComputedStyle(el).color);
       expect(color).toBe('rgb(192, 192, 192)'); // #c0c0c0
       expect(color).not.toBe('rgb(123, 228, 149)'); // #7be495, the 'ok' color
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('hotkeys row: flips to ok once a hello arrives, then to warn once it goes stale', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      // Same shrink-both-thresholds pattern as the overlay row test above:
+      // hotkeyStaleMs must stay well ABOVE diagRefreshMs (or the "ok" window
+      // is too narrow for any poll tick to land inside it) and small enough
+      // that the "warn" transition doesn't require a real 90s wait.
+      await openDock(page, { port: mock.port, hotkeyStaleMs: 600, diagRefreshMs: 100, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      const row = page.getByTestId('diag-row-hotkeys');
+      await expect(row).toHaveAttribute('data-state', 'neutral');
+
+      injectBridgePayload(mock, 'hello', 'hb-1');
+      await expect(row).toHaveAttribute('data-state', 'ok', { timeout: 1000 });
+      await expect(row).toContainText('Hotkey bridge connected');
+
+      await expect(row).toHaveAttribute('data-state', 'warn', { timeout: 3000 });
+      await expect(row).toContainText('Hotkey bridge silent');
     } finally {
       await mock.close();
     }
@@ -356,9 +395,10 @@ test.describe('Diagnostics view', () => {
       expect(clipboardText).toContain('Storage: ok');
       expect(clipboardText).toContain('Event log');
 
-      // Review fix (Important 1): the Hotkeys line has its own fixed
-      // wording and must never claim "ok" anywhere in the copied text.
-      expect(clipboardText).toContain('Hotkeys: not built yet (Phase 3)');
+      // Task 3.1 — the Hotkeys line now mirrors its real state, same shape
+      // as every other row; nothing has been sent this test, so it must read
+      // 'neutral', never a false "ok".
+      expect(clipboardText).toContain('Hotkeys: neutral —');
       expect(clipboardText).not.toContain('Hotkeys: ok');
     } finally {
       await mock.close();

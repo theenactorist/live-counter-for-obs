@@ -70,12 +70,29 @@ export interface MountDiagnosticsViewOptions {
   overlaySilenceMs?: number;
   /** Overrides the 2s checklist/log poll interval (test seam — must stay well below `overlaySilenceMs` for the "ok" window to be observable at all). */
   refreshMs?: number;
+  /**
+   * Task 3.1 — the timestamp (`Date.now()` epoch ms) of the last valid
+   * hotkey-bridge payload this boot has seen (including a `hello`
+   * heartbeat), or `null` if none yet. A live getter, not a snapshot: main.ts
+   * hands in a closure over its own `bridgeLastSeenAt`, re-read on every
+   * checklist poll tick.
+   */
+  bridgeSeenAt: () => number | null;
+  /** Overrides the 90s hotkeys-row staleness threshold (test seam, mirrors `overlaySilenceMs`). */
+  hotkeyStaleMs?: number;
 }
 
 export type RowState = 'ok' | 'warn' | 'fail' | 'neutral';
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_OVERLAY_SILENCE_MS = 10_000;
+// Task 3.1 (brief: "the 90s threshold a named constant") — how long the
+// hotkeys row stays 'ok' after the last valid bridge payload before flipping
+// to 'warn'. The Lua script's own hello beat fires every 30s (HELLO_INTERVAL_
+// MS in counter-hotkeys.lua), so 90s tolerates up to two missed beats (a slow
+// OBS tick, a brief script reload) before treating the bridge as genuinely
+// silent.
+const DEFAULT_HOTKEY_STALE_MS = 90_000;
 const COPY_CONFIRM_MS = 1500;
 const PROBE_KEY = 'lc.diag-probe.v1';
 const LOG_TAIL = 100;
@@ -95,13 +112,17 @@ const OVERLAY_NOT_SEEN_TEXT =
 const TRANSPORT_LABEL = 'Panel ↔ overlay';
 const TRANSPORT_HELP_TEXT =
   'Session persistence, LIVE status, and Add overlay to scene still require the OBS WebSocket connection.';
-// Review fix (Important 1): NEVER "ok" — there is no hotkey bridge to check
-// yet, so claiming success would be misleading. `HOTKEYS_COPY_TEXT` is the
-// deliberately terser line "Copy diagnostics" emits (brief: exactly
-// "Hotkeys: not built yet (Phase 3)"), distinct from the row's own longer
-// display text.
-const HOTKEYS_TEXT = 'Hotkey bridge — not built yet (coming in Phase 3)';
-const HOTKEYS_COPY_TEXT = 'Hotkeys: not built yet (Phase 3)';
+// Task 3.1 — the hotkey bridge's three real states, driven by
+// `bridgeSeenAt()` (main.ts's `bridgeLastSeenAt` closure, updated by
+// installHotkeyBridge's `onBridgeSeen` on every valid payload including the
+// Lua script's own 30s `hello` heartbeat — see hotkey-bridge.ts): never seen
+// this boot -> neutral (nothing to report yet, not a failure); seen recently
+// -> ok; seen once but gone quiet -> warn (the script may have been removed,
+// or OBS's Scripts list reloaded without it).
+const HOTKEYS_NEVER_SEEN_TEXT =
+  'Hotkey bridge — add counter-hotkeys.lua in OBS Tools → Scripts, then assign keys in Settings → Hotkeys';
+const HOTKEYS_OK_TEXT = 'Hotkey bridge connected';
+const HOTKEYS_WARN_TEXT = 'Hotkey bridge silent — was the script removed or OBS Scripts reloaded?';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
   'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
@@ -687,6 +708,17 @@ function overlayRowState(lastSeenAt: number, silenceMs: number): { state: RowSta
     : { state: 'warn', text: OVERLAY_NOT_SEEN_TEXT };
 }
 
+// Task 3.1 — the three locked hotkeys-row states (brief): never seen this
+// boot -> neutral (nothing verified yet, not a failure — distinct from
+// `overlayRowState`'s two-state ok/warn, which always has a real elapsed time
+// to compare against); seen <= staleMs ago -> ok; seen > staleMs ago -> warn.
+function hotkeysRowState(seenAt: number | null, staleMs: number): { state: RowState; text: string } {
+  if (seenAt === null) return { state: 'neutral', text: HOTKEYS_NEVER_SEEN_TEXT };
+  return Date.now() - seenAt <= staleMs
+    ? { state: 'ok', text: HOTKEYS_OK_TEXT }
+    : { state: 'warn', text: HOTKEYS_WARN_TEXT };
+}
+
 // Task 2.13 — reflects Bus.activeTransports(). 'direct only' is 'ok' (not a
 // warning): it's the headline scenario this task exists for — counting,
 // presets, and the overlay are all fully functional with zero OBS setup.
@@ -738,6 +770,7 @@ function setRow(handle: RowHandle, state: RowState, text: string): void {
 export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnosticsViewOptions): DiagnosticsViewHandle {
   const silenceMs = opts.overlaySilenceMs ?? DEFAULT_OVERLAY_SILENCE_MS;
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
+  const hotkeyStaleMs = opts.hotkeyStaleMs ?? DEFAULT_HOTKEY_STALE_MS;
 
   // Initialized "now" rather than 0 — same reasoning as live.ts's own
   // `lastOverlaySeenAt`: a freshly-mounted panel must not immediately claim
@@ -765,12 +798,6 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const checklist = el('div', { 'data-testid': 'diagnostics-checklist', class: 'diag-checklist' });
   checklist.append(rowStorage.row, rowWs.row, rowTransport.row, rowOverlay.row, rowHotkeys.row);
   root.appendChild(checklist);
-  // Static placeholder — Phase 3 gives this row a real check. Deliberately
-  // 'neutral', never 'ok' (review fix, Important 1): nothing has actually
-  // been verified yet, so a green "ok" would misrepresent a bridge that
-  // doesn't exist. Set once here and excluded from both updateChecklist()
-  // and the periodic poll — it never transitions on its own.
-  setRow(rowHotkeys, 'neutral', HOTKEYS_TEXT);
 
   // --- Settings (moved here from Task 2.5's always-visible minimal row) ----
   root.appendChild(el('div', { class: 'diag-section-title' }, 'Settings'));
@@ -1134,14 +1161,11 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       ['OBS WebSocket', rowWs],
       ['Transport', rowTransport],
       ['Overlay', rowOverlay],
+      // Task 3.1 — now a real, checked row: mirrors its actual state like
+      // every other line instead of a fixed "not built yet" placeholder.
+      ['Hotkeys', rowHotkeys],
     ];
-    const checklistText = [
-      ...rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`),
-      // Deliberately NOT the generic "label: state — text" shape (review
-      // fix, Important 1) — Hotkeys must never read "ok", and the brief
-      // locks its exact copy-diagnostics line.
-      HOTKEYS_COPY_TEXT,
-    ].join('\n');
+    const checklistText = rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`).join('\n');
     const lines = opts.storage.readLog().slice(-LOG_TAIL).reverse();
     return [
       `Live Counter diagnostics — v${VERSION}`,
@@ -1218,6 +1242,9 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
 
     const overlayResult = overlayRowState(lastOverlaySeenAt, silenceMs);
     setRow(rowOverlay, overlayResult.state, overlayResult.text);
+
+    const hotkeysResult = hotkeysRowState(opts.bridgeSeenAt(), hotkeyStaleMs);
+    setRow(rowHotkeys, hotkeysResult.state, hotkeysResult.text);
 
     updateAddOverlayUi();
   }
