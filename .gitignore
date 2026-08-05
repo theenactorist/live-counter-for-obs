@@ -6,3 +6,4 @@ feasibility/lua-results.json
 coverage/
 test-results/
 playwright-report/
+release/
