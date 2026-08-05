@@ -48,6 +48,7 @@ import {
   onOverlayScanChange,
   refreshOverlayScan,
   runAddOverlay,
+  OVERLAY_EYE_OFF_TEXT,
   type AddOverlayResult,
   type OverlayIntent,
 } from '../diagnostics.js';
@@ -529,6 +530,27 @@ export function mountLiveView(
 
       if (state.note !== null) {
         wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-note', class: 'diag-note' }, state.note));
+      }
+      // Task 3.4 (AC 29/30) — mirrors Diagnostics' own three note slots
+      // (settings-issues/eye-off/multi-source), driven by the SAME shared
+      // `addOverlayButtonState` this whole block already reads `state` from,
+      // so the two views can never disagree about what they show.
+      if (state.settingsIssues.length > 0) {
+        wrap.appendChild(
+          el(
+            'div',
+            { 'data-testid': 'live-add-overlay-settings-issues', class: 'diag-note' },
+            state.settingsIssues.join(' · '),
+          ),
+        );
+      }
+      if (state.eyeOff) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-eye-off', class: 'diag-note' }, OVERLAY_EYE_OFF_TEXT));
+      }
+      if (state.multiSourceWarning !== null) {
+        wrap.appendChild(
+          el('div', { 'data-testid': 'live-add-overlay-multi-source', class: 'diag-note' }, state.multiSourceWarning),
+        );
       }
       if (state.retry) {
         if (state.retryMessage !== null) {

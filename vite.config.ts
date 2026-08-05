@@ -3,15 +3,23 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 import path from 'node:path';
 
 /**
- * Two self-contained singlefile bundles (dock + overlay), built as two
+ * Three self-contained singlefile bundles (dock + overlay + setup), built as
  * sequential `vite build` invocations from one npm script, switched by
  * `--mode`. vite-plugin-singlefile only supports one entry per build, so
- * a single multi-input config can't produce both — see the plugin's own
+ * a single multi-input config can't produce all three — see the plugin's own
  * "wontfix" on multiple entry points.
+ *
+ * Task 3.4 — `setup` is `dist/setup.html`, a static helper page (source URLs
+ * only, no websocket) opened by double-clicking it in any browser; unlike
+ * dock/overlay it deliberately does NOT import `../styles/fonts.css` (system
+ * font stack only), so its build must still route through the SAME
+ * assetsInlineLimit/emptyOutDir config as the other two — it just never asks
+ * for anything that limit would apply to.
  */
 const ENTRIES = {
   dock: { root: path.resolve(__dirname, 'src/dock'), html: 'dock.html' },
   overlay: { root: path.resolve(__dirname, 'src/overlay'), html: 'overlay.html' },
+  setup: { root: path.resolve(__dirname, 'src/setup'), html: 'setup.html' },
 } as const;
 
 export default defineConfig(({ mode }) => {

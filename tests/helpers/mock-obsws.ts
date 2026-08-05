@@ -29,6 +29,12 @@ export interface MockInputSeed {
    * pre-existing single-scene test assumes.
    */
   scenes?: string[];
+  /**
+   * Task 3.4 — this scene item's "eye" toggle (obs-websocket's
+   * `sceneItemEnabled`), applied to every scene item this seed creates.
+   * Omitted = true (visible), matching a freshly-added source in real OBS.
+   */
+  sceneItemEnabled?: boolean;
 }
 
 export interface MockObsOptions {
@@ -47,6 +53,8 @@ export interface MockObsOptions {
 export interface MockSceneItem {
   sceneItemId: number;
   sourceName: string;
+  /** Task 3.4 — the eye toggle (`sceneItemEnabled`); defaults to true (visible) wherever a caller doesn't specify it. */
+  sceneItemEnabled?: boolean;
 }
 
 export interface MockObs {
@@ -174,7 +182,11 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   for (const seed of opts.inputs ?? []) {
     inputs.set(seed.inputName, { inputKind: seed.inputKind, inputSettings: { ...seed.inputSettings } });
     for (const sceneName of seed.scenes ?? [programScene]) {
-      ensureScene(sceneName).push({ sceneItemId: nextSceneItemId++, sourceName: seed.inputName });
+      ensureScene(sceneName).push({
+        sceneItemId: nextSceneItemId++,
+        sourceName: seed.inputName,
+        sceneItemEnabled: seed.sceneItemEnabled ?? true,
+      });
     }
   }
 
@@ -272,6 +284,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
                 sourceName: item.sourceName,
                 inputKind: inputs.get(item.sourceName)?.inputKind ?? null,
                 isGroup: false,
+                sceneItemEnabled: item.sceneItemEnabled ?? true,
               })),
             };
           }

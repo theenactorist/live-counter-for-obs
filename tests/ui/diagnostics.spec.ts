@@ -1547,4 +1547,326 @@ test.describe('Diagnostics view', () => {
       await mock.close();
     }
   });
+
+  // --- Task 3.4 (AC 29): source-settings mismatch diagnostic -------------
+  // Exactly five checks against the in-scene source: width/height must match
+  // the base canvas, shutdown/restart_when_active must be false, and a
+  // custom fps below 30 warns. Each issue names its expected value.
+
+  test('add-overlay: a mismatched width/height + shutdown:true on a 1920x1080 project names both issues with expected values', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      videoSettings: { baseWidth: 1920, baseHeight: 1080 },
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720, shutdown: true },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('width 1280 — expected 1920');
+      await expect(issues).toContainText('height 720 — expected 1080');
+      await expect(issues).toContainText('Shutdown source when not visible');
+
+      // restart_when_active was never set (absent means false) — not named.
+      await expect(issues).not.toContainText('Refresh browser when scene becomes active');
+
+      // Copy diagnostics includes the same issues.
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+      await page.getByTestId('diag-copy-log').click();
+      const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+      expect(clipboardText).toContain('width 1280 — expected 1920');
+      expect(clipboardText).toContain('height 720 — expected 1080');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: restart_when_active:true is named as its own issue', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            restart_when_active: true,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('Refresh browser when scene becomes active');
+      await expect(issues).not.toContainText('width');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: a source matching every recommended setting shows no issues (all-clear)', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-settings-issues')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: fps_custom + fps below 30 warns; fps_custom + fps 30 does not', async ({ page }) => {
+    const mockLow = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            fps_custom: true,
+            fps: 15,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockLow.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('fps 15 — expected 30 or higher');
+    } finally {
+      await mockLow.close();
+    }
+
+    const mockOk = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            fps_custom: true,
+            fps: 30,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockOk.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-settings-issues')).toBeHidden();
+    } finally {
+      await mockOk.close();
+    }
+  });
+
+  test('add-overlay: the Live tab mirror shows the same settings issues', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay-settings-issues')).toContainText('width 1280 — expected 1920');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.4: eye-off note ----------------------------------------------
+
+  test("add-overlay: the in-scene source's eye being off in this scene shows a note", async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          sceneItemEnabled: false,
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-eye-off')).toBeVisible();
+      await expect(page.getByTestId('add-overlay-eye-off')).toContainText("eye is off in this scene");
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: an eye that is ON shows no eye-off note', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-eye-off')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.4 (AC 30): multi-source warning ------------------------------
+
+  test('add-overlay: two browser_source inputs matching the overlay URL warn, naming both; one input shows no warning', async ({
+    page,
+  }) => {
+    const mockTwo = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+        {
+          inputName: 'Duplicate Overlay Source',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html?port=4455', width: 1920, height: 1080 },
+          // A second scene item so it doesn't collide with the program
+          // scene's own item list ordering — membership doesn't matter for
+          // this warning (it counts every match in the collection).
+          scenes: ['Scene'],
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockTwo.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const warning = page.getByTestId('add-overlay-multi-source');
+      await expect(warning).toBeVisible();
+      await expect(warning).toContainText('Overlay URL found in 2 sources');
+      await expect(warning).toContainText('Live Counter Overlay');
+      await expect(warning).toContainText('Duplicate Overlay Source');
+      await expect(warning).toContainText('remove duplicates');
+    } finally {
+      await mockTwo.close();
+    }
+
+    const mockOne = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockOne.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-multi-source')).toBeHidden();
+    } finally {
+      await mockOne.close();
+    }
+  });
+
+  // --- Task 3.4 (Phase 2 deferred): Fix-confirm credential note ------------
+
+  test('add-overlay: Fix confirmation over a pw=-carrying URL appends the password sentence; a clean URL does not', async ({
+    page,
+  }) => {
+    const mockWithPw = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html?port=4455&pw=super-secret',
+            width: 1280,
+            height: 720,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockWithPw.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
+      await expect(fixConfirm).toBeVisible();
+      await expect(fixConfirm).toContainText('websocket password');
+      await expect(fixConfirm).toContainText('password-free');
+    } finally {
+      await mockWithPw.close();
+    }
+
+    const mockClean = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockClean.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
+      await expect(fixConfirm).toBeVisible();
+      await expect(fixConfirm).not.toContainText('websocket password');
+    } finally {
+      await mockClean.close();
+    }
+  });
 });

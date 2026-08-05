@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Counter — Setup</title>
+    <style>
+      /* Task 3.4 (AC 32) — deliberately the system font stack, not the
+         Inter/Oswald webfonts the dock/overlay bundles inline: this page
+         must stay tiny and open with ZERO network access (including no font
+         fetch) when double-clicked in any browser, on any machine, before
+         anything else in the project has even been configured. */
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #121212;
+        color: #e8e8e8;
+        font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      }
+      body {
+        padding: 1.5rem;
+        max-width: 42rem;
+        margin: 0 auto;
+        line-height: 1.5;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 0.25rem;
+      }
+      .setup-intro {
+        color: #a0a0a0;
+        margin-bottom: 1.5rem;
+      }
+      section {
+        margin-bottom: 1.5rem;
+      }
+      h2 {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #a0a0a0;
+        margin: 0 0 0.5rem;
+      }
+      .setup-url-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        margin-bottom: 0.35rem;
+      }
+      .setup-url-row input {
+        flex: 1;
+        min-width: 14rem;
+        background: #0f0f0f;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 4px;
+        padding: 0.5rem 0.6rem;
+        min-height: 40px;
+        font-size: 0.85rem;
+      }
+      button {
+        min-height: 40px;
+        min-width: 44px;
+        padding: 0.5rem 0.9rem;
+        font-size: 0.95rem;
+        background: #2a2a2a;
+        color: #e8e8e8;
+        border: 1px solid #3a3a3a;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .setup-copy-status {
+        font-size: 0.85rem;
+        margin-bottom: 0.5rem;
+      }
+      .setup-copy-status.setup-copy-confirm {
+        color: #7be495;
+      }
+      .setup-copy-status.setup-copy-fallback {
+        color: #ff9a9a;
+      }
+      .setup-url-help {
+        color: #b0b0b0;
+        font-size: 0.9rem;
+        margin: 0 0 0.5rem;
+      }
+      ol {
+        padding-left: 1.25rem;
+        margin: 0;
+      }
+      li {
+        margin-bottom: 0.7rem;
+      }
+      .setup-recommended {
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 6px;
+        padding: 0.6rem 1rem 0.75rem;
+        margin-top: 0.5rem;
+        font-size: 0.9rem;
+      }
+      .setup-recommended ul {
+        margin: 0.35rem 0 0;
+        padding-left: 1.1rem;
+      }
+      .setup-recommended li {
+        margin-bottom: 0.25rem;
+      }
+      code {
+        font-family: ui-monospace, monospace;
+        background: #0f0f0f;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 0.05rem 0.3rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Live Counter — Setup</h1>
+    <p class="setup-intro">
+      This page shows the exact addresses for the Live Counter files on THIS computer, so you can add them to OBS
+      without typing anything by hand. It makes no network connection of its own — it just reads its own address and
+      shows the two sibling files next to it.
+    </p>
+
+    <section>
+      <h2>Dock URL</h2>
+      <p class="setup-url-help">Add this in OBS: Docks → Custom Browser Docks.</p>
+      <div class="setup-url-row">
+        <input data-testid="setup-dock-url" type="text" readonly />
+        <button data-testid="setup-copy-dock" type="button">Copy</button>
+      </div>
+      <div data-testid="setup-copy-dock-status" class="setup-copy-status" hidden></div>
+    </section>
+
+    <section>
+      <h2>Overlay URL</h2>
+      <p class="setup-url-help">
+        Add this in OBS as a Browser Source. This link never carries your websocket password.
+      </p>
+      <div class="setup-url-row">
+        <input data-testid="setup-overlay-url" type="text" readonly />
+        <button data-testid="setup-copy-overlay" type="button">Copy</button>
+      </div>
+      <div data-testid="setup-copy-overlay-status" class="setup-copy-status" hidden></div>
+    </section>
+
+    <section data-testid="setup-steps">
+      <h2>Setup steps</h2>
+      <ol>
+        <li>
+          In OBS: Tools → WebSocket Server Settings → enable the server. Note the port and password — leave
+          authentication ON.
+        </li>
+        <li>In OBS: Docks → Custom Browser Docks → add a dock using the Dock URL above.</li>
+        <li>In the dock: open the Diagnostics tab and paste the websocket password there.</li>
+        <li>
+          In OBS: add a Browser Source pointing at the Overlay URL above — or open the dock's Diagnostics tab and
+          click "Add overlay to my scene" to do this automatically, with the recommended settings already applied.
+          <div class="setup-recommended">
+            Recommended Browser Source settings:
+            <ul>
+              <li>Width / Height = your canvas (base) resolution</li>
+              <li>FPS: 30 (or 60 to match your project)</li>
+              <li>"Shutdown source when not visible": unchecked</li>
+              <li>"Refresh browser when scene becomes active": unchecked</li>
+            </ul>
+          </div>
+        </li>
+        <li>
+          In OBS: Tools → Scripts → add <code>counter-hotkeys.lua</code>, then assign keys in Settings → Hotkeys.
+        </li>
+      </ol>
+    </section>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
