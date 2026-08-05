@@ -1251,14 +1251,20 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     expect(controller.getState().session).toBeNull();
     expect(controller.getState().recovered).toBe(false);
 
-    // Wait past the real identify (~3s mark) for the retry's own
-    // GetPersistentData round trip to land.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    const state = controller.getState();
-    expect(state.session?.currentValue).toBe(42);
-    expect(state.session?.finishValue).toBe(100);
-    expect(state.recovered).toBe(true);
+    // Gate fix wave (M-12) — was a fixed 1200ms real-time sleep past the
+    // ~3s identify mark; converted to the file's own vi.waitFor idiom (no
+    // behavior change) so this test settles the instant the retry's
+    // GetPersistentData round trip actually lands instead of always paying
+    // the full fixed wait, and never flakes on a slower CI box.
+    await vi.waitFor(
+      () => {
+        const state = controller.getState();
+        expect(state.session?.currentValue).toBe(42);
+        expect(state.session?.finishValue).toBe(100);
+        expect(state.recovered).toBe(true);
+      },
+      { timeout: 5000 },
+    );
   }, 10000);
 
   it('never clobbers an operator-started session with the delayed mirror re-read', async () => {
@@ -1298,12 +1304,75 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     const operatorSession = controller.getState().session;
     expect(operatorSession).not.toBeNull();
 
-    // Wait past the real identify (~3s mark) — the retry must see
-    // `session !== null` and skip adopting the mirrored one.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    // Gate fix wave (M-12) — was a fixed 1200ms real-time sleep past the
+    // ~3s identify mark; converted to the file's own vi.waitFor idiom (no
+    // behavior change). Waiting on `client.state` itself (rather than a
+    // guessed delay) is the deterministic signal that the real identify —
+    // and therefore the retry's own synchronous `session !== null` bail-out
+    // — has actually happened by the time the assertion below runs.
+    await vi.waitFor(() => {
+      expect(client.state).toBe('identified');
+    });
 
     expect(controller.getState().session).toEqual(operatorSession);
   }, 10000);
+});
+
+// Gate fix wave (M-3) — init()'s cold-start retry wiring subscribed to a
+// FUTURE 'identified' event even when the client had, in fact, ALREADY
+// identified by the time execution reached that line (a real race: the
+// storage load and broadcast()/notify() calls in between all take genuine
+// awaited time). A plain event emitter never replays a past emission to a
+// listener added after the fact, so the retry's one shot was silently lost
+// whenever this race actually landed. `opts.isIdentifiedNow` closes it: when
+// wiring finds the client already identified, the retry runs immediately
+// instead of subscribing to an event that has already happened.
+describe('SessionController — cold-start retry: already-identified-at-wiring race (gate fix M-3)', () => {
+  it('runs the retry immediately when isIdentifiedNow() is already true at wiring time, instead of missing the one shot', async () => {
+    const local = new MapStorage();
+    // client: null — this test isolates the wiring race itself (via directly
+    // controlled `identified`/`onIdentified`/`isIdentifiedNow` fakes) from
+    // any real ws/mirror timing, which the other two tests in this describe
+    // block above already cover end-to-end against a real mock server.
+    const storage = new DockStorage(local, null);
+    // Spied rather than given differing content to read on each call: the
+    // whole point of this test is proving the retry ACTUALLY RUNS when
+    // `isIdentifiedNow()` says the client is already identified at wiring
+    // time — not re-proving the retry's own adopt-on-success behavior, which
+    // the two real-mock-server tests above this describe block already
+    // cover. A call-count assertion sidesteps any need to race this test's
+    // own storage writes against the retry's internal timing.
+    const loadSessionSpy = vi.spyOn(storage, 'loadSession');
+    const bus = new Bus(null, 'dock');
+    const rt = new FakeRuntime();
+    const timer = new AutoTimer(rt.clock, rt.schedule, rt.cancel);
+    const scheduler = new FakeScheduler();
+    const controller = new SessionController({ storage, bus, timer, scheduler });
+
+    let onIdentifiedSubscriptions = 0;
+    const identified = Promise.resolve(false); // the caller's own window "elapsed" unresolved
+    const isIdentifiedNow = (): boolean => true; // ...but the client has, in fact, already identified by wiring time
+    const onIdentified = (_fn: () => void): (() => void) => {
+      onIdentifiedSubscriptions++;
+      // A real event-emitter-style subscribe added AFTER the event already
+      // fired never calls back — deliberately never invokes `_fn`, mirroring
+      // the exact bug this test targets: subscribing here would be too late.
+      return () => {};
+    };
+
+    await controller.init({ identified, onIdentified, isIdentifiedNow });
+
+    // `loadSession()` is called once by init()'s own primary (clobber-
+    // guarded) load, unconditionally. Without the isIdentifiedNow fix,
+    // `onIdentified`'s subscription above never fires (by design, mirroring
+    // the real bug) and the retry would never run at all — a permanent
+    // call count of 1. With the fix, init() itself triggers the retry
+    // immediately inline, for a second call.
+    await vi.waitFor(() => {
+      expect(loadSessionSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(onIdentifiedSubscriptions).toBe(0); // the fix took the immediate-retry path, never wired a subscription
+  });
 });
 
 // F5, fix round 2. `revision` restarted at 0 for every new session, so the
@@ -1637,6 +1706,62 @@ describe('SessionController — getState().presentation', () => {
     controller.adoptPresentation(newStyle, 'new', newAnimation);
 
     expect(controller.getState().presentation).toEqual({ style: newStyle, template: 'new', animation: newAnimation });
+  });
+});
+
+// Gate fix wave (I-1/I-2) — `sessionEpoch` is the session-identity
+// discriminator views/live.ts's safety-ack reset now keys off of, since
+// `Session` itself carries no id and every accepted dispatch (reconfigure
+// included) replaces the `Session` object wholesale regardless of whether
+// it's genuinely a new session or not. Only `startSession()` may ever bump
+// it — these tests are the contract every other reset path relies on.
+describe('SessionController — getState().sessionEpoch (gate fix I-1/I-2)', () => {
+  it('starts at 0 and increments by exactly one on each startSession() call, including over an already-active session', async () => {
+    const { controller } = await setup();
+    expect(controller.getState().sessionEpoch).toBe(0);
+
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
+    expect(controller.getState().sessionEpoch).toBe(1);
+
+    // A SECOND startSession() over the still-active session from the first
+    // (Presets' Restart, Setup's always-replaces Start session, and the
+    // devhook all call this same method unconditionally) — the exact real
+    // path the gate finding names: it must bump again, never treated as a
+    // continuation just because a session was already running.
+    controller.startSession({ startValue: 0, finishValue: 20, mode: 'manual' }, styleFixture(), null, null);
+    expect(controller.getState().sessionEpoch).toBe(2);
+  });
+
+  it('is left UNCHANGED by dispatch() (including reconfigure/"Update session") and adoptPresentation()', async () => {
+    const { controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
+    expect(controller.getState().sessionEpoch).toBe(1);
+
+    controller.dispatch({ type: 'increment', nonce: 'n1' });
+    controller.dispatch({
+      type: 'reconfigure',
+      startValue: 0,
+      finishValue: 20,
+      intervalSeconds: 1,
+      completion: { kind: 'hold' },
+      nonce: 'n2',
+    });
+    controller.adoptPresentation(styleFixture(), 'new template', null);
+
+    expect(controller.getState().sessionEpoch).toBe(1); // still the SAME session
+  });
+
+  it('is left unchanged by ending a session (endSession) — only the NEXT startSession() bumps it', async () => {
+    const { controller } = await setup();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
+    expect(controller.getState().sessionEpoch).toBe(1);
+
+    controller.dispatch({ type: 'endSession', keepOverlay: false, nonce: 'n1' });
+    expect(controller.getState().session).toBeNull();
+    expect(controller.getState().sessionEpoch).toBe(1); // ending alone doesn't bump it
+
+    controller.startSession({ startValue: 0, finishValue: 5, mode: 'manual' }, styleFixture(), null, null);
+    expect(controller.getState().sessionEpoch).toBe(2);
   });
 });
 

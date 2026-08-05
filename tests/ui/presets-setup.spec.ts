@@ -304,6 +304,124 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
+  // Gate fix wave (I-1) — `SessionController.startSession()` replaces
+  // `this.session` directly, whether or not a session was already active; it
+  // never passes through `null`. The OLD once-per-session safety-ack reset
+  // only fired on a null -> non-null transition, so an ack from a PRIOR
+  // session silently carried into the NEXT one whenever Presets' Restart (or
+  // Setup's always-replaces "Start session") replaced an ALREADY-active
+  // session without ending it first — this test drives that exact real path.
+  // Fixed by resetting on the session's IDENTITY changing
+  // (`ControllerState.sessionEpoch`, bumped only inside `startSession()`),
+  // not merely on null -> non-null (see controller.ts/views/live.ts).
+  test('safety ack does not survive a Presets Start-Restart over an active session (gate fix I-1)', async ({ page }) => {
+    // studioModeEnabled defaults false and no browser_source input is seeded
+    // — merged `active` stays null for the whole test, so the guard arms via
+    // the Studio-Mode-off secondary branch (same technique as live.spec.ts's
+    // "studio-mode-off secondary case" test) with no ws-activity setup
+    // needed.
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Restart Target' });
+      await page.getByTestId('setup-save').click();
+
+      // Session A.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('50');
+      await page.getByTestId('setup-start-session').click();
+
+      await expect.poll(() => mock.requestLog.filter((t) => t === 'GetStudioModeEnabled').length).toBeGreaterThanOrEqual(1);
+      await page.waitForTimeout(100);
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await showHide.click(); // Hide (unguarded)
+      await showHide.click(); // Show — armed: acknowledge for session A
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+
+      // Acknowledged within session A: no confirm on a second guarded action.
+      await showHide.click(); // Hide
+      await showHide.click(); // Show
+      await expect(confirm).toHaveCount(0);
+
+      // Restart OVER the still-active session A via Presets, WITHOUT ending
+      // it first — the exact real path the finding names.
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-start').click();
+      await expect(page.getByTestId('preset-replace-confirm')).toBeVisible();
+      await page.getByTestId('preset-restart').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      // Session B's first guarded action must confirm again — the ack from
+      // session A must not have carried over.
+      await expect(showHide).toHaveText('Hide'); // fresh session default (overlayVisible true)
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — must re-arm
+      await expect(confirm).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Gate fix wave (I-1) — the other half of the same fix: "Update session"
+  // (reconfigure) continues the SAME session on purpose and must NOT re-arm
+  // the ack, while Setup's own "Start session" — which always immediately
+  // replaces any active session, per this file's own doc comment at the top
+  // — genuinely starts a new one and MUST re-arm it, even with no End in
+  // between.
+  test('Update session (reconfigure) keeps the safety ack; Setup Start session over an active session re-arms it (gate fix I-1)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('50');
+      await page.getByTestId('setup-start-session').click();
+
+      await expect.poll(() => mock.requestLog.filter((t) => t === 'GetStudioModeEnabled').length).toBeGreaterThanOrEqual(1);
+      await page.waitForTimeout(100);
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — armed
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+
+      // Update session (reconfigure) on the SAME session — must NOT re-arm.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-finish').fill('60');
+      await page.getByTestId('setup-update-session').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — still acknowledged, no confirm
+      await expect(confirm).toHaveCount(0);
+
+      // Setup "Start session" ALWAYS replaces, even over this still-active
+      // session — a genuinely new session, must re-arm.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('20');
+      await page.getByTestId('setup-start-session').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — must re-arm
+      await expect(confirm).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('preset-keep-value with an out-of-range current value clamps into the new range and shows a warning', async ({
     page,
   }) => {

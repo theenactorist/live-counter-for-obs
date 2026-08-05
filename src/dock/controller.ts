@@ -62,6 +62,25 @@ export interface ControllerState {
   // existing one) can keep ignoring this; Live's empty state is the one place
   // that now checks it (see views/live.ts's `renderLiveRestoring`).
   initializing: boolean;
+  // Gate fix wave (I-1/I-2, additive to this already-locked interface, same
+  // precedent as `presentation`/`clamp` above) — increments by exactly one
+  // every time `startSession()` mints a genuinely NEW session (Presets'
+  // Restart-over-an-active-session, Setup's always-replaces "Start session",
+  // the devhook). Deliberately left UNCHANGED by `dispatch()` (including
+  // `reconfigure` — "Update session" continues the SAME session on purpose),
+  // `adoptPresentation()`, and a recovered/retried session load at boot (a
+  // restore is a continuation of a PRIOR session, not a new one) — only
+  // `startSession()` itself bumps it. `Session` carries no id of its own to
+  // compare (engine/types.ts), and every accepted dispatch replaces the
+  // Session object wholesale, so neither object identity nor a bare
+  // null-transition check can tell "still this session" from "a new one" —
+  // this field is the one that can. Live's own once-per-session safety-ack
+  // state resets on a CHANGE here, or on a non-null -> null transition
+  // (session end) — see views/live.ts's `resetSafetyState` for the full
+  // story (I-1: an ack from a prior session silently carrying into the next
+  // one; I-2: a pending guarded action + its open confirm surviving past the
+  // session that opened them, ready to replay into whatever starts next).
+  sessionEpoch: number;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -133,6 +152,9 @@ export class SessionController {
   private animation: AnimationConfig | null = null;
   // Ruling B — see `ControllerState.clamp`'s own doc comment above.
   private clamp: { from: number; to: number } | null = null;
+  // Gate fix wave (I-1/I-2) — see `ControllerState.sessionEpoch`'s own doc
+  // comment above. The ONLY writer is `startSession()`, below.
+  private sessionEpoch = 0;
 
   private heartbeat = 0;
   private heartbeatHandle: unknown = null;
@@ -172,6 +194,7 @@ export class SessionController {
       presentation: this.style !== null ? { style: this.style, template: this.template, animation: this.animation } : null,
       clamp: this.clamp,
       initializing: this.initializing,
+      sessionEpoch: this.sessionEpoch,
     };
   }
 
@@ -230,8 +253,29 @@ export class SessionController {
    *   "init-window re-stamp") — see the clobber-guarded call below. Omitted
    *   (every existing caller/test) = no retry is ever wired, identical to
    *   before this task.
+   * @param opts.isIdentifiedNow Gate fix wave (M-3) — an optional "is the
+   *   client identified RIGHT NOW" check, consulted only at the exact moment
+   *   this method is about to wire `opts.onIdentified`'s subscription. Closes
+   *   a real race the subscription alone misses: `identifiedInTime` reflects
+   *   whatever `opts.identified` resolved to, which can go stale by the time
+   *   execution actually reaches this line (the storage load and the
+   *   broadcast/notify calls above all take real, awaited time) — if the
+   *   client's own 'identified' event already fired during that gap, a
+   *   plain subscribe-to-the-future-event call here would wait forever (an
+   *   event emitter never replays a past emission to a listener added after
+   *   the fact), permanently missing this retry's one shot. When this
+   *   returns `true` at wiring time, the retry runs immediately instead of
+   *   subscribing to an event that has already happened. Omitted (every
+   *   caller that predates this fix) = the original subscribe-only behavior,
+   *   unchanged.
    */
-  async init(opts: { identified?: Promise<boolean>; onIdentified?: (fn: () => void) => () => void } = {}): Promise<void> {
+  async init(
+    opts: {
+      identified?: Promise<boolean>;
+      onIdentified?: (fn: () => void) => () => void;
+      isIdentifiedNow?: () => boolean;
+    } = {},
+  ): Promise<void> {
     const identifiedInTime = opts.identified ? await opts.identified : true;
     // A settings-save reconnect can dispose this instance while the await
     // above is still pending (the operator fixing a wrong port is exactly the
@@ -270,10 +314,18 @@ export class SessionController {
     // the retry itself re-checks `this.session === null` right before
     // adopting anything (see retryColdStartLoad below).
     if (!identifiedInTime && this.session === null && opts.onIdentified) {
-      const unsubscribe = opts.onIdentified(() => {
-        unsubscribe();
+      if (opts.isIdentifiedNow?.()) {
+        // Gate fix wave (M-3) — already identified for real by the time
+        // wiring was reached (see `opts.isIdentifiedNow`'s own doc comment
+        // above): subscribing to the future event now would miss it
+        // permanently, so run the retry directly instead.
         void this.retryColdStartLoad();
-      });
+      } else {
+        const unsubscribe = opts.onIdentified(() => {
+          unsubscribe();
+          void this.retryColdStartLoad();
+        });
+      }
     }
   }
 
@@ -350,6 +402,13 @@ export class SessionController {
     // revision monotonic across sessions; the engine only requires it to be
     // non-decreasing WITHIN one, which this preserves.
     this.session = { ...createSession(cfg, this.nowMs()), revision: this.storage.lastKnownRevision() + 1 };
+    // Gate fix wave (I-1/I-2) — this line, and ONLY this line, is what makes
+    // this a genuinely NEW session identity (see `ControllerState.sessionEpoch`'s
+    // doc comment). Bumped unconditionally, whether or not a previous session
+    // was active — Presets' Restart and Setup's Start session both replace an
+    // already-active session without ever passing through `null`, which is
+    // exactly the real path the old null -> non-null-only reset missed.
+    this.sessionEpoch++;
     this.setPresentation(style, template, animation);
     this.recovered = false;
     this.lastAction = null;

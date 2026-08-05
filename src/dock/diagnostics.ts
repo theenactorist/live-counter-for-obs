@@ -514,19 +514,34 @@ async function matchingOverlayInputs(client: ObsWsClient, inputs: InputListEntry
  * status tracker's ws layer (`LiveStatusTracker.setSourceNames`), which
  * cares about every matching source regardless of which scene it currently
  * sits in, not just the current program scene the add-overlay flow itself
- * only ever writes to. Read-only, and resolves `[]` on ANY failure
- * (including "not identified") rather than throwing — main.ts calls this
+ * only ever writes to. Read-only, and never throws — main.ts calls this
  * unprompted on identify and on a periodic poll, so it must never produce an
  * unhandled rejection.
+ *
+ * Gate fix wave (M-1) — resolves `null` on a genuine request FAILURE
+ * (`GetInputList` rejecting, or `matchingOverlayInputs` itself returning
+ * `null` for a half-read scene — see its own doc comment: a per-input
+ * `GetInputSettings` failure is inconclusive, not "no matches"), distinct
+ * from `[]` (a real, successful "nothing matched" answer — e.g. no
+ * browser_source inputs exist at all). Before this, both cases collapsed
+ * into the same `[]`, and main.ts fed that straight into
+ * `LiveStatusTracker.setSourceNames([])` — a transient failure (a single
+ * dropped request during OBS's own connection scene-collection load, say)
+ * wiped the tracker's ws-layer name list for up to this poll's own interval
+ * (~30 s), even though the overlay source never actually stopped existing.
+ * Callers that only care about the final name list on success (main.ts) skip
+ * the `setSourceNames` call entirely on `null`, keeping whatever names were
+ * already known instead of silently blanking them.
  */
-export async function overlaySourceNames(client: ObsWsClient): Promise<string[]> {
+export async function overlaySourceNames(client: ObsWsClient): Promise<string[] | null> {
   try {
     const listResp = await client.request('GetInputList');
     const inputs = (listResp.inputs ?? []) as InputListEntry[];
     const matches = await matchingOverlayInputs(client, inputs);
-    return (matches ?? []).map((m) => m.inputName);
+    if (matches === null) return null;
+    return matches.map((m) => m.inputName);
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -695,7 +710,11 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
 // using the password-free add-overlay write) is about to lose that password
 // from the scene collection — worth a heads-up, since the replacement is
 // otherwise silent about it.
-export const FIX_CONFIRM_PASSWORD_SENTENCE =
+// Gate fix wave (M-8) — unexported: nothing outside this module reads it
+// (fixOverlayConfirmText, right below, is the only consumer, and no test
+// imports it directly) — kept as the module-private constant it always
+// should have been, rather than a public export with no external reader.
+const FIX_CONFIRM_PASSWORD_SENTENCE =
   'This replaces the existing URL, which contained the websocket password — the saved one is password-free.';
 
 /** Names EXACTLY what the Fix action will change, shown BEFORE any request goes out (Ruling A item 3). */

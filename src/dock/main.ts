@@ -419,12 +419,21 @@ function main(): void {
     // OVERLAY_NAMES_POLL_MS thereafter (an operator adding/renaming/removing
     // the Browser Source mid-session), skipped entirely while unidentified
     // since nothing could resolve then anyway.
+    // Gate fix wave (M-1) — `overlaySourceNames` now returns `null` on a
+    // transient request failure, distinct from a genuine `[]` ("really no
+    // matching source"). `null` is skipped entirely here: the tracker keeps
+    // whatever names it already knew rather than having them wiped for up to
+    // this poll's own interval by a one-off dropped request.
     client.on('identified', () => {
-      void overlaySourceNames(client).then((names) => bootedLiveStatus.setSourceNames(names));
+      void overlaySourceNames(client).then((names) => {
+        if (names !== null) bootedLiveStatus.setSourceNames(names);
+      });
     });
     overlayNamesPoll = setInterval(() => {
       if (client.state !== 'identified') return;
-      void overlaySourceNames(client).then((names) => bootedLiveStatus.setSourceNames(names));
+      void overlaySourceNames(client).then((names) => {
+        if (names !== null) bootedLiveStatus.setSourceNames(names);
+      });
     }, OVERLAY_NAMES_POLL_MS);
 
     const timer = new AutoTimer(() => performance.now());

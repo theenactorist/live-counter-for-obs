@@ -1506,4 +1506,65 @@ test.describe('dock Live view', () => {
       await mock.close();
     }
   });
+
+  // Gate fix wave (I-2) — a pending guarded action (here, Jump) leaves the
+  // safety confirm open and a captured dispatch closure sitting in
+  // `pendingSafetyAction`. Ending the session (End is unguarded — it never
+  // routes through the confirm) used to leave both untouched: the NEXT
+  // session's first render re-appended the stale confirm unprompted, and
+  // Continuing it would both replay session A's captured jump into session B
+  // and silently grant session B's own ack. Fixed by resetting the whole
+  // safety-guard state (ack + open confirm + pending action) on the
+  // non-null -> null session-end transition, same seam as I-1's
+  // session-identity reset.
+  test('End while a safety confirm is pending clears it — no stale confirm or replayed action lands on the next session (gate fix I-2)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      // Open the safety confirm via Jump, but never resolve it — End the
+      // session (the unguarded action) while it's still pending.
+      await page.getByTestId('btn-jump').click();
+      await page.getByTestId('jump-input').fill('7');
+      await page.getByTestId('jump-apply').click();
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      await expect(confirm).toBeVisible();
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // not applied yet
+
+      await page.getByTestId('btn-end').click();
+      await page.getByTestId('end-keep').click();
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+      await expect(confirm).toHaveCount(0); // gone the moment the session ended
+
+      // Start a brand-new session — the still-active ws source keeps this
+      // armed, but session B must get its OWN fresh confirm on its OWN first
+      // guarded action, never an unprompted stale one, and session A's
+      // pending jump must never land on it.
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+      await expect(confirm).toHaveCount(0); // no unprompted re-appearance
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // session A's jump never replayed
+
+      // The ack was not silently granted either — a guarded action in
+      // session B still requires its own confirmation.
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide
+      await showHide.click(); // Show
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
 });

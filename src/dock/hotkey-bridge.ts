@@ -35,6 +35,15 @@ export function installHotkeyBridge(deps: HotkeyBridgeDeps): () => void {
   // with a repeat entry on every settings write, but a DIFFERENT malformed
   // string is still worth its own line. Scoped to this installation (a fresh
   // boot gets a fresh, empty set), never persisted.
+  //
+  // Gate fix wave (M-4) — capped at MAX_LOGGED_INVALID entries: a source
+  // that churns out a genuinely DIFFERENT malformed string every time (a
+  // flaky external write to the channel input, say, rather than the
+  // steady-state "one bad script" case this Set exists for) would otherwise
+  // grow unboundedly for the lifetime of this boot. Cleared wholesale once
+  // full rather than evicting one entry at a time — simpler, and the whole
+  // point is bounding memory, not preserving a particular dedup history.
+  const MAX_LOGGED_INVALID = 100;
   const loggedInvalid = new Set<string>();
 
   return deps.client.onEvent((eventType, eventData) => {
@@ -48,6 +57,7 @@ export function installHotkeyBridge(deps: HotkeyBridgeDeps): () => void {
     if (payload === null) {
       const rawKey = typeof raw === 'string' ? raw : JSON.stringify(raw ?? null);
       if (!loggedInvalid.has(rawKey)) {
+        if (loggedInvalid.size >= MAX_LOGGED_INVALID) loggedInvalid.clear();
         loggedInvalid.add(rawKey);
         deps.log('bridge-payload-invalid', rawKey);
       }

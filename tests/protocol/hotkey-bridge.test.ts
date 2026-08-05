@@ -343,6 +343,42 @@ describe('installHotkeyBridge — malformed payloads', () => {
       [notJson, wrongApp, unknownCmd, missingNonce].sort(),
     );
   });
+
+  // Gate fix wave (M-4) — the dedup Set was unbounded per boot; a source that
+  // churns out a genuinely different malformed string every time (rather
+  // than the steady-state "one bad script" case the dedup exists for) could
+  // grow it forever for the lifetime of this boot. Capped at 100 entries,
+  // clear-when-full.
+  it('caps the invalid-payload dedup memory at 100 distinct strings: once full, a previously-seen string logs again', async () => {
+    const { mock, log } = await setup();
+
+    // Fill the dedup memory to exactly its cap with 100 distinct strings.
+    const strings = Array.from({ length: 100 }, (_, i) => `{"bad":${i}`);
+    for (const s of strings) injectRaw(mock, BRIDGE_CHANNEL_INPUT, s);
+
+    await vi.waitFor(() => {
+      const invalidLogCalls = log.mock.calls.filter(([event]) => event === 'bridge-payload-invalid');
+      expect(invalidLogCalls).toHaveLength(100);
+    });
+
+    // One more, distinct, string pushes past the cap — clears the remembered
+    // set (the fix's "clear-when-full" policy) before remembering this one.
+    injectRaw(mock, BRIDGE_CHANNEL_INPUT, '{"overflow":true');
+    await vi.waitFor(() => {
+      const invalidLogCalls = log.mock.calls.filter(([event]) => event === 'bridge-payload-invalid');
+      expect(invalidLogCalls).toHaveLength(101);
+    });
+
+    // The dedup memory was just cleared by the overflow above — re-sending
+    // the VERY FIRST string from the original fill logs AGAIN. Without the
+    // cap, the (unbounded) Set would still remember it from the original
+    // fill and this would NOT log a second time.
+    injectRaw(mock, BRIDGE_CHANNEL_INPUT, strings[0]!);
+    await vi.waitFor(() => {
+      const invalidLogCalls = log.mock.calls.filter(([event]) => event === 'bridge-payload-invalid');
+      expect(invalidLogCalls).toHaveLength(102);
+    });
+  });
 });
 
 describe('installHotkeyBridge — other inputName', () => {

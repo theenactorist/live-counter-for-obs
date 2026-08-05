@@ -21,15 +21,15 @@ const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.ht
 // first three are the protocol itself; the add-overlay group is the gate fix
 // wave's READ-ONLY detection scan (Ruling A: it now runs unprompted at
 // mount/identify/tab-activation so the button's label is truthful before the
-// first click); the last two (Task 3.2 EDIT — see task-3.2-report.md: this is
-// an additive allowlist update, not a behavior-assertion change; the test's
-// own purpose — no MUTATING request ever fires unprompted — is untouched)
-// are the LIVE-status tracker's own unprompted READ-ONLY polling
+// first click); the last two were added when Task 3.2 introduced the
+// LIVE-status tracker — its own unprompted READ-ONLY polling
 // (GetStudioModeEnabled on every identify; GetSourceActive once a matched
 // overlay source exists — this test seeds none, so it never actually fires
-// here, but stays allowed for any test that does). Every one of them is a
-// GET — see MUTATING_REQUEST_TYPES below, which is the assertion that
-// actually carries this test's meaning.
+// here, but stays allowed for any test that does). Adding them was purely an
+// additive allowlist update: this test's own purpose — no MUTATING request
+// ever fires unprompted — is unchanged. Every one of them is a GET — see
+// MUTATING_REQUEST_TYPES below, which is the assertion that actually carries
+// this test's meaning.
 const ALLOWED_REQUEST_TYPES = [
   'BroadcastCustomEvent',
   'SetPersistentData',

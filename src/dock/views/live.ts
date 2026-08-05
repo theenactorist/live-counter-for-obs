@@ -39,7 +39,7 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
-import { chipFrom, liveSafetyArmed, type LiveStatusTracker, type LiveStatusSnapshot } from '../live-status.js';
+import { chipFrom, liveSafetyArmed, type LiveStatusTracker, type LiveStatusSnapshot, type ChipState } from '../live-status.js';
 import {
   addOverlayButtonState,
   fixOverlayConfirmText,
@@ -250,20 +250,46 @@ export function mountLiveView(
   // Task 3.3 — "acknowledged this session" state (brief: in-memory, never
   // persisted; a dock reload re-asking is explicitly acceptable/safe-side).
   // `safetyAcked` starts false on every mount (a reload IS a fresh mount, so
-  // this needs no separate reset story of its own) and is only ever cleared
-  // back to false again by the null -> non-null session transition tracked
-  // below — i.e. a brand new session starting (Setup's "Start session", or
-  // the devhook), NOT an ordinary dispatch continuing the same one (every
-  // accepted dispatch replaces `session` with a fresh object, so identity
-  // alone can't distinguish "still this session" from "a new one" — Session
-  // itself carries no id to compare instead; see engine/types.ts's own
-  // comment on that). `sessionWasActive` seeds from whatever the CONTROLLER's
-  // session state already is at this exact mount (recovered session and
+  // this needs no separate reset story of its own).
+  //
+  // Gate fix wave (I-1/I-2) — reset (along with `ui.safetyConfirmOpen` and
+  // `pendingSafetyAction` just below) by `resetSafetyState()`, called from
+  // render() on either of two transitions: the session IDENTITY changing
+  // (`state.sessionEpoch` — see controller.ts's own doc comment on that
+  // field — ticks up only inside `startSession()`, i.e. a genuinely NEW
+  // session: Presets' Restart-over-an-active-session, Setup's
+  // always-replaces "Start session", the devhook) or the session ENDING
+  // (non-null -> null). Neither a plain null -> non-null check (the OLD
+  // rule, I-1) nor object identity can tell "still this session" from "a new
+  // one" on their own: Presets' Restart and Setup's Start both replace an
+  // ALREADY-active session without ever passing through null, and every
+  // accepted dispatch (reconfigure included) replaces the `Session` object
+  // wholesale regardless of whether it's the same session or not — Session
+  // itself carries no id to compare (engine/types.ts). The session-END half
+  // additionally clears `ui.safetyConfirmOpen`/`pendingSafetyAction` (I-2):
+  // without it, a guarded action opened but never resolved (Continue/Cancel)
+  // before an unguarded End stayed pending — the NEXT session's first render
+  // would re-open that stale confirm unprompted, and Continuing it would
+  // both replay the PRIOR session's captured dispatch closure into the new
+  // one and silently grant the new session's own ack.
+  //
+  // `sessionWasActive`/`lastSeenSessionEpoch` both seed from whatever the
+  // CONTROLLER's state already is at this exact mount (recovered session and
   // all), so a mount that starts with a session already live does not
-  // mistake its own first render for a "new session" transition.
+  // mistake its own first render for either transition.
   let safetyAcked = false;
   let pendingSafetyAction: (() => void) | null = null;
   let sessionWasActive = controller.getState().session !== null;
+  let lastSeenSessionEpoch = controller.getState().sessionEpoch;
+
+  // Gate fix wave (I-1/I-2) — the one place every guard-state field resets;
+  // see the doc comment on `safetyAcked` just above for exactly which two
+  // transitions call this and why both fixes live in the same seam.
+  function resetSafetyState(): void {
+    safetyAcked = false;
+    ui.safetyConfirmOpen = false;
+    pendingSafetyAction = null;
+  }
 
   // Review fix (Important 2): a settings-save reconnect (main.ts's boot())
   // tears this mount down and immediately mounts a fresh LiveViewHandle into
@@ -392,15 +418,22 @@ export function mountLiveView(
 
     const state = controller.getState();
 
-    // Task 3.3 — the ONE place the "new session" transition is detected (see
-    // `sessionWasActive`'s own doc comment above): every full render() reads
-    // controller.getState() here anyway, so this is a free, always-current
-    // check rather than a second subscription. Deliberately fires only on
-    // null -> non-null (a session actually STARTING), never on an ordinary
-    // dispatch continuing the same one — those replace `session` with a new
-    // object too, but never pass through `null` in between.
+    // Gate fix wave (I-1/I-2) — the ONE place both safety-guard-reset
+    // transitions are detected (see `safetyAcked`'s own doc comment above):
+    // every full render() reads controller.getState() here anyway, so this
+    // is a free, always-current check rather than a second subscription.
+    // `sessionIdentityChanged` fires on a genuinely NEW session (Presets
+    // Restart, Setup Start, the devhook — anything that bumps
+    // `sessionEpoch`), NOT on an ordinary dispatch continuing the same one
+    // (reconfigure included — those replace `session` with a new object too,
+    // but never bump the epoch). `sessionEnded` fires on the non-null ->
+    // null transition (End) — the I-2 half, clearing a still-pending guarded
+    // action/confirm before it can leak into whatever session starts next.
     const sessionIsActiveNow = state.session !== null;
-    if (sessionIsActiveNow && !sessionWasActive) safetyAcked = false;
+    const sessionIdentityChanged = state.sessionEpoch !== lastSeenSessionEpoch;
+    const sessionEnded = sessionWasActive && !sessionIsActiveNow;
+    if (sessionIdentityChanged || sessionEnded) resetSafetyState();
+    lastSeenSessionEpoch = state.sessionEpoch;
     sessionWasActive = sessionIsActiveNow;
 
     container.innerHTML = '';
@@ -817,7 +850,13 @@ export function mountLiveView(
   // all (a caller that omits `opts.liveStatus`) reads as "nothing known" —
   // always UNKNOWN — the same as a tracker that has never heard from either
   // layer.
-  function chipFor(session: Session): { state: string; text: string; detail: string | null } {
+  // Gate fix wave (M-7) — `state` is typed `ChipState` (chipFrom's own return
+  // type), not the widened plain `string` this signature used to declare:
+  // `chipFrom` already returns the narrow union, and re-widening it here (and
+  // in `applyChipToElement` below) threw away that precision through both
+  // call paths for no reason — `chipEl.dataset.state` only ever holds one of
+  // the five real values regardless, so the type should say so too.
+  function chipFor(session: Session): { state: ChipState; text: string; detail: string | null } {
     const snap = opts.liveStatus?.snapshot() ?? {
       overlaySeen: false,
       relay: { active: null, showing: null },
@@ -834,7 +873,7 @@ export function mountLiveView(
   // Shared between renderLive() (building the element fresh) and
   // updateStatusChip() (the surgical poll/tracker-subscription update), so
   // the data-detail/title pairing can never drift between the two paths.
-  function applyChipToElement(chipEl: HTMLElement, chip: { state: string; text: string; detail: string | null }): void {
+  function applyChipToElement(chipEl: HTMLElement, chip: { state: ChipState; text: string; detail: string | null }): void {
     chipEl.dataset.state = chip.state;
     chipEl.textContent = chip.text;
     if (chip.detail !== null) {

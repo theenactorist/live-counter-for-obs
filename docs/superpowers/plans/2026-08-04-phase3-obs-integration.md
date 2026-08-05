@@ -101,9 +101,10 @@ export const EventSub = {
 initializing: boolean;   // true from construction until init() resolves
 
 // src/dock/diagnostics.ts — additions
-export function overlaySourceNames(client: ObsWsClient): Promise<string[]>;
-// browser_source inputs whose url matches overlayBaseUrl() (same match rule the scan uses)
-// mountDiagnosticsView opts gains: bridgeSeenAt?: () => number | null
+export function overlaySourceNames(client: ObsWsClient): Promise<string[] | null>;
+// browser_source inputs whose url matches overlayBaseUrl() (same match rule the scan uses);
+// null on a genuine request failure (distinct from [] "really no matches") — gate fix wave M-1
+// mountDiagnosticsView opts gains: bridgeSeenAt: () => number | null (required — synced to shipped, gate fix wave M-11; this doc originally had it optional)
 
 // tests/helpers/mock-obsws.ts — additions
 setSourceActive(inputName: string, s: { active?: boolean; showing?: boolean }): void;
@@ -120,6 +121,8 @@ setStudioMode(enabled: boolean): void;  // fires StudioModeStateChanged{studioMo
 4. `active !== true && showing === true && !overlayVisible` → `hidden`, text `HIDDEN`, detail `Source in Preview`.
 5. `active === false && showing === false` → `hidden`, text `HIDDEN`, detail: `Source not visible in OBS` when `overlayVisible`, else null.
 6. both null: `overlaySeen` → (`overlayVisible` ? `showing`/`SHOWING` : `hidden`/`HIDDEN`), detail null — Phase 2 semantics preserved; `!overlaySeen` → `unknown`, text `UNKNOWN`, detail `No overlay page seen yet`.
+
+Gate fix wave (M-11) — the table above lists only the both-null case for row 6, but "in order" evaluation of rows 1-5 also funnels TWO other combinations there, as shipped: `{active:false, showing:null}` (row 5 needs BOTH `false`, so this never matches it) and `{active:null, showing:false}` (same reason) both fall through every row above and land on row 6's ordinary `overlaySeen` branch, exactly like the both-null case — there is no seventh/eighth row for them. Documented here (not a code change) to match `live-status.ts`'s own comment on `chipFrom` and its `tests/protocol/live-status.test.ts` coverage ("leftover combo" tests).
 
 Row 6 also closes the Phase 2 deferred ruling "chip SHOWING vs no-overlay-page contradiction": with no websocket AND no overlay page, the chip is UNKNOWN, not SHOWING. Freshness: relay trusted while last overlay bus message (hello/overlay-status, any transport) is within `freshnessMs`; ws trusted while `client.state === 'identified'` and at least one poll/event has landed. Multi-source: OR across all names (any active → LIVE).
 

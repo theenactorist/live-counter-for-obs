@@ -398,6 +398,43 @@ describe('LiveStatusTracker — ws layer', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
   });
+
+  // Gate fix wave (M-2) — a renamed/deleted source's last-known ws fact must
+  // not keep contributing to the merged result once main.ts's next
+  // `overlaySourceNames()` scan (identify, or the periodic poll) reports the
+  // rename and calls `setSourceNames()` with the new name list.
+  // `setSourceNames()` already prunes `wsByName` for any key no longer in the
+  // fresh list — this test is the regression coverage that behavior was
+  // missing.
+  it('active source renamed away: merged active falls back promptly on the next names feed, not up to ~30s later', async () => {
+    const mock = await startMockObs({ inputs: [{ inputName: 'Overlay', inputKind: 'browser_source', inputSettings: {} }] });
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const tracker = makeTracker({ client, bus, nowMs: () => 0, pollMs: 10_000_000 }); // no background re-poll racing this test
+
+    tracker.setSourceNames(['Overlay']);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+    mock.setSourceActive('Overlay', { active: true });
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws.active).toBe(true);
+    });
+
+    // The operator renames the Browser Source in OBS; matching is by
+    // settings URL (diagnostics.ts), so the NEXT scan reports the new name
+    // instead of the old one — simulated here as the tracker's own next
+    // `setSourceNames()` call, exactly as main.ts feeds it.
+    tracker.setSourceNames(['Overlay Renamed']);
+
+    // The stale 'Overlay' fact (active: true) must be gone IMMEDIATELY —
+    // pruned by setSourceNames() itself — not merely superseded once the
+    // renamed input's own poll eventually lands (which the mock hasn't even
+    // been told about yet: 'Overlay Renamed' isn't a real input, so that poll
+    // will fail and never populate anything).
+    expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
+  });
 });
 
 // Fix round 1 (review finding) — `ObsWsClient` reconnects on its own
