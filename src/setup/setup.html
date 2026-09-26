@@ -126,9 +126,8 @@
   <body>
     <h1>Live Counter — Setup</h1>
     <p class="setup-intro">
-      This page shows the exact addresses for the Live Counter files on THIS computer, so you can add them to OBS
-      without typing anything by hand. It makes no network connection of its own — it just reads its own address and
-      shows the two sibling files next to it.
+      This page shows the addresses of the Live Counter files on this computer, so you can add them to OBS without
+      typing them. It makes no network connection: it reads its own location and shows the two files next to it.
     </p>
 
     <section>
@@ -157,14 +156,18 @@
       <h2>Setup steps</h2>
       <ol>
         <li>
-          In OBS: Tools → WebSocket Server Settings → enable the server. Note the port and password — leave
-          authentication ON.
+          In OBS: Tools → WebSocket Server Settings → tick Enable WebSocket server and leave Enable Authentication
+          ticked. Note the port (usually 4455), then click Show Connect Info and copy the Server Password.
         </li>
         <li>In OBS: Docks → Custom Browser Docks → add a dock using the Dock URL above.</li>
-        <li>In the dock: open the Diagnostics tab and paste the websocket password there.</li>
         <li>
-          In OBS: add a Browser Source pointing at the Overlay URL above — or open the dock's Diagnostics tab and
-          click "Add overlay to my scene" to do this automatically, with the recommended settings already applied.
+          In the dock: it opens on the Live tab with a Connect to OBS card. Check the port, click Paste next to
+          Password, then click Connect. The Diagnostics tab has the same Port and Password fields (Paste, then Save)
+          if you prefer to connect there.
+        </li>
+        <li>
+          In OBS: add a Browser Source pointing at the Overlay URL above. Or open the dock's Diagnostics tab and
+          click "Add overlay to my scene" to create it with the recommended settings.
           <div class="setup-recommended">
             Recommended Browser Source settings:
             <ul>

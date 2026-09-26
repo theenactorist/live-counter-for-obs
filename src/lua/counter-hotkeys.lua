@@ -24,13 +24,15 @@
 -- FALLBACK NOTE (Task 3.5)
 -- -------------------------
 -- The command channel is created as a SCENE-LESS input (via obs_source_create,
--- never added to any scene). Phase 0's feasibility probe confirmed OBS still
--- delivers InputSettingsChanged for a scene-less input's settings write. If
--- real-world testing in Task 3.5 ever finds an OBS build/configuration where
--- that does not hold, the fix is to add this same input to a hidden
--- "utility" scene (or any existing scene) instead -- the source itself, its
--- settings shape, and the dock's receiving code all stay identical; only its
--- scene membership would change.
+-- never added to any scene). OBS delivering InputSettingsChanged for a
+-- scene-less input's settings write is expected; verified at C3 of the
+-- real-OBS checklist (docs/phase3-obs-checklist.md). Phase 0's probe did not
+-- prove it, because its input was in a scene. If real-world testing in
+-- Task 3.5 ever finds an OBS build/configuration where that does not hold,
+-- the fix is to add this same input to a hidden "utility" scene (or any
+-- existing scene) instead -- the source itself, its settings shape, and the
+-- dock's receiving code all stay identical; only its scene membership would
+-- change.
 
 local obs = obslua
 

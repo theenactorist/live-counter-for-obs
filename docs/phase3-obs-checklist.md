@@ -29,6 +29,7 @@ The automated suites cannot prove real-OBS behavior: CEF permissions, `window.ob
 - [ ] C6. **AC 2:** run the counter to its finish boundary; +1 hotkey → value stays at the boundary (engine rejection), no error spam; the event log records the rejection.
 - [ ] C7. Pause/Resume hotkey: toggles a running automatic session; in a manual session does nothing (rejection logged, no mode switch). Show/Hide hotkey toggles overlay content.
 - [ ] C8. Hotkey assignments **survive an OBS restart** (script_save persistence).
+- [ ] C8b. **Scene collection switch:** OBS keeps the script list, the script's key bindings and the overlay source per scene collection. Scene Collection → switch to a second collection → the "Live Counter:" hotkeys and the overlay source are absent there (as the README says); switch back → both return with the same key assignments, and the Hotkeys row recovers on the next hello.
 - [ ] C9. Tools → Scripts → reload the script → Hotkeys row may warn about silence, then recovers on the next hello; no duplicate channel inputs pile up (check the input list).
 
 ## D. LIVE detection + chip (Task 3.2)

@@ -2,74 +2,91 @@
 
 ## What this is
 
-Live Counter is a big, easy-to-read number you can control from inside OBS and show on screen — for counting things up or down live, like "Hallelujah" shouted 50 times, or any other running count during a service or stream.
+Live Counter puts a large number on screen that you control from inside OBS. Use it to count up or down live, for example "Hallelujah" shouted 50 times, or any other running count during a service or stream.
 
-Everything lives inside OBS itself:
+It has three parts, all inside OBS:
 
-- A **control panel** (a dock you add inside OBS) with big +1 / −1 buttons, Undo, Jump to a number, Show/Hide, and more.
+- A **control panel** (a dock you add inside OBS) with +1 / −1, Undo, Jump to a number, Show/Hide and more.
 - A **transparent overlay** (a Browser Source) that shows the number on screen.
-- A small **script** that lets you use real keyboard shortcuts (or a Stream Deck) for +1, −1, Undo, Pause/Resume, and Show/Hide.
+- A small **script** that adds keyboard shortcuts (or Stream Deck buttons) for +1, −1, Undo, Pause/Resume and Show/Hide.
 
-There is nothing to install and no separate program to run — it's a folder of files plus a few clicks inside OBS, done once.
+There is no program to install. It is a folder of files plus a one-time setup inside OBS.
+
+For the same steps with pictures, open `install-guide/index.html` in the Live Counter folder.
 
 ## Requirements
 
-- OBS Studio 31 or newer (developed and tested against OBS 32).
+- OBS Studio 31 or newer (developed and tested on OBS 32).
 - Windows or macOS.
-- No internet connection is needed at any point — everything runs locally, inside OBS.
+- No internet connection is needed. Everything runs on this computer, inside OBS.
 
 ## One-time setup
 
-First, copy the whole `live-counter` folder onto the streaming computer, anywhere you like (an external drive works too, as long as it stays connected). Then:
+Copy the Live Counter folder (`live-counter-for-obs`) onto the streaming computer and put it somewhere permanent, such as Documents. An external drive works if it stays connected. OBS remembers the folder's exact location, so read "If you move or rename the folder" below before moving it later. Then:
 
-1. Double-click `dist/setup.html` — it opens in your normal web browser and shows the exact addresses for the two OBS pages on THIS computer, each with a Copy button. Keep this page open; you'll copy from it in the steps below.
-2. In OBS: **Tools → WebSocket Server Settings** → turn the server **on**. Leave "Enable Authentication" checked. Note the port (usually 4455) and the password.
-3. In OBS: **Docks → Custom Browser Docks** → add a new dock, pasting in the **Dock URL** from `setup.html`. Give it a name like "Live Counter".
-4. In the new dock, open the **Diagnostics** tab and paste the websocket password from step 2 into the Password field, then click Save. The checklist should turn green once connected.
-5. In OBS: add a **Browser Source** to your scene using the **Overlay URL** from `setup.html` — or, easier, go back to the dock's Diagnostics tab and click **"Add overlay to my scene"**, which creates it for you with the right settings already applied.
-6. In OBS: **Tools → Scripts** → click the "+" → choose `counter-hotkeys.lua` from the folder you copied above. Then go to **Settings → Hotkeys**, scroll down to the five "Live Counter" entries, and assign whichever keys you'd like (see the Hotkeys section below for suggestions).
+1. Double-click `setup.html` in the Live Counter folder. It opens in your web browser and shows the two addresses OBS needs on this computer, each with a Copy button. Keep it open for the next steps.
+2. In OBS: **Tools → WebSocket Server Settings**. Tick **Enable WebSocket server** and leave **Enable Authentication** ticked. Note the Server Port (usually 4455). Click **Show Connect Info** and copy the Server Password. Click Apply, then OK.
+3. In OBS: **Docks → Custom Browser Docks**. In an empty row, type a name such as "Live Counter" and paste the **Dock URL** from `setup.html`. Click Apply.
+4. The new dock opens on the **Live tab** with a **Connect to OBS** card. Check that the Port matches step 2, click **Paste** next to Password, then click **Connect**. You can also connect from the dock's **Diagnostics** tab: click Paste next to Password, then Save. The Diagnostics checklist turns green once the dock is connected.
+5. Add the overlay. The easy way: put the scene for the counter in Program, open the dock's **Diagnostics** tab and click **Add overlay to my scene**. It creates the Browser Source with the right settings. The manual way: add a **Browser Source** to your scene using the **Overlay URL** from `setup.html`.
+6. In OBS: **Tools → Scripts**, click **+** and choose `counter-hotkeys.lua` from the Live Counter folder. Then assign keys in **Settings → Hotkeys** (see Hotkeys below).
 
-That's it. The dock's Diagnostics tab shows a running checklist confirming each piece is connected, and names the exact fix if anything isn't.
+The dock's Diagnostics tab shows a checklist for each part and names the fix for anything that is not green.
 
 ## Hotkeys
 
 Hotkeys are set up in two places:
 
-1. **Install the script once**: OBS → **Tools → Scripts** → "+" → select `counter-hotkeys.lua` from the project folder.
-2. **Assign keys**: OBS → **Settings → Hotkeys** → scroll to the five entries starting with "Live Counter:" and click into each field, then press the key combination you want.
+1. **Install the script once**: OBS → **Tools → Scripts** → **+** → choose `counter-hotkeys.lua` from the Live Counter folder.
+2. **Assign keys**: OBS → **Settings → Hotkeys** → scroll to the five entries starting with "Live Counter:", click into each field and press the keys you want.
 
-Bare keys (like plain `+` or `-`) can accidentally trigger while typing into an unrelated text field elsewhere in OBS, so a modifier combination is recommended for every one:
+Keyboard shortcuts need the OBS connection from step 4 (the password step). Without it, key presses do nothing.
 
-| Action | Suggested combo |
-| --- | --- |
-| +1 | ⌘/Ctrl + = |
-| −1 | ⌘/Ctrl + − |
-| Undo | ⌘/Ctrl + Z |
-| Pause / Resume | ⌘/Ctrl + P |
-| Show / Hide overlay | ⌘/Ctrl + H |
+Include a modifier key in every shortcut. A bare key such as `+` or `-` can fire while you type in another text field in OBS. Suggested combinations:
 
-You don't have to use these exact combos — any modifier combination that isn't already used elsewhere in OBS works fine. Each hotkey is independent and optional; only bind the ones you actually plan to use.
+| Action | Windows | Mac |
+| --- | --- | --- |
+| +1 | Ctrl + Alt + = | Ctrl + Option + = |
+| −1 | Ctrl + Alt + − | Ctrl + Option + − |
+| Undo | Ctrl + Alt + Z | Ctrl + Option + Z |
+| Pause / Resume | Ctrl + Alt + P | Ctrl + Option + P |
+| Show / Hide overlay | Ctrl + Alt + H | Ctrl + Option + H |
 
-Once assigned, these hotkeys work exactly like any other OBS hotkey — including through a Stream Deck's OBS integration.
+On a Mac, avoid Cmd + H (it hides OBS) and Cmd + Z (OBS's own Undo). You don't have to use these combinations: any modifier combination that OBS isn't already using works. Each hotkey is optional, so bind only the ones you plan to use.
+
+Once assigned, these work like any other OBS hotkey, including through a Stream Deck's OBS integration.
+
+The script, its key assignments and the overlay source are saved in the OBS scene collection you set them up in. If you switch to another scene collection (the **Scene Collection** menu), add the overlay and `counter-hotkeys.lua` there too and assign the keys again.
 
 ## Daily use
 
-1. Open (or load) a preset in the **Presets** tab, or configure a one-off count in **Setup**, then click **Start session**.
-2. Click **Show** to make the overlay visible on screen (bring the scene to Program in OBS as usual).
-3. Use **+1 / −1 / Undo / Jump to** as needed. At either end of the range, the count simply won't go further — nothing breaks.
-4. If you're using Automatic mode, use **Pause / Resume / Faster / Slower / Reverse** as needed.
-5. When you're done, **Hide** the overlay or **End session**.
+1. Load or start a preset in the **Presets** tab, or set up a one-off count in **Setup**, then click **Start session**.
+2. Click **Show** to put the number on the overlay, then bring the scene to Program in OBS as usual.
+3. Count with **+1 / −1 / Undo / Jump to**. At either end of the range the count stops. Nothing breaks.
+4. In Automatic mode, use **Pause / Resume / Faster / Slower / Reverse**.
+5. When you're done, **Hide** the overlay or **End** the session.
 
 ## If something breaks
 
-- **The dock looks stuck or frozen:** reload the dock (right-click it → Reload, or close and reopen it from Docks). It reads the current count back from storage and keeps going — nothing is lost.
-- **OBS crashes or you have to restart it:** on reopening OBS, the dock restores your last session, paused, so you can check the number is right before continuing. Nothing is lost.
-- **OBS asks "Are you sure you want to exit?" when quitting:** that's OBS's own normal exit-confirmation dialog, not a Live Counter warning — it's safe to confirm, your session is already saved.
-- **Something looks properly wrong (wrong numbers, stuck settings, etc.):** open the dock's **Diagnostics** tab and use **"Reset everything"**. This is guarded by a confirmation naming exactly what it deletes (settings, presets, sessions, and logs on this device) — it cannot be undone, so only use it as a last resort.
-- **Still stuck:** the Diagnostics tab has a **"Copy diagnostics"** button — copy it and share it with whoever's helping you troubleshoot.
+- **The dock looks stuck or frozen:** reload it (right-click the dock → Reload, or close and reopen it from Docks). It reads the current count back from storage and carries on. Nothing is lost.
+- **OBS crashes or you have to restart it:** when OBS reopens, the dock restores your last session, paused, so you can check the number before continuing. Nothing is lost.
+- **OBS asks "Are you sure you want to exit?" when quitting:** that is OBS's own exit confirmation, not a Live Counter warning. Your session is already saved, so it is safe to confirm.
+- **Something looks wrong (wrong numbers, stuck settings):** open the dock's **Diagnostics** tab and use **Reset everything**. It asks you to confirm and names what it deletes (settings, presets, sessions and logs on this computer). It cannot be undone, so use it only as a last resort.
+- **Still stuck:** click **Copy diagnostics** on the Diagnostics tab and send the result to whoever is helping you.
+
+## If you move or rename the folder
+
+OBS remembers the folder's exact location. After a move or rename, the dock shows a "File not found" page, the overlay goes blank and the hotkeys stop. To fix it:
+
+1. Double-click `setup.html` in the folder's new location.
+2. In OBS: **Docks → Custom Browser Docks**. Replace the Live Counter URL with the new **Dock URL** and click Apply.
+3. Point the overlay at the new address. With the overlay's scene in Program, open the dock's **Diagnostics** tab and click **Fix overlay settings**. Or right-click the overlay in Sources, choose **Properties** and paste the new **Overlay URL**.
+4. In OBS: **Tools → Scripts**. Remove `counter-hotkeys.lua` with **−**, then add it again from the new folder with **+**. Check **Settings → Hotkeys** and reassign any keys that are missing.
+
+To be safe, Export your presets from the **Presets** tab before you move the folder.
 
 ## Moving to another computer
 
-Just copy the whole project folder to the new computer and repeat **One-time setup** above — the dock/overlay addresses are different on every computer, which is exactly why `setup.html` exists (it always shows the correct addresses for wherever it's opened).
+Copy the Live Counter folder to a permanent place on the new computer and repeat **One-time setup** above. The dock and overlay addresses are different on every computer, and `setup.html` always shows the right ones for wherever it is opened.
 
-Your presets don't automatically come along, though — use the **Presets** tab's **Export** button on the old computer to copy them to your clipboard, then **Import** on the new one to bring them across.
+Presets do not come along with the folder. On the old computer, click **Export** in the **Presets** tab and paste the result into a text file you can carry across. On the new computer, copy that text, then use **Import** in the Presets tab to bring the presets in.

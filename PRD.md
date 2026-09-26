@@ -78,9 +78,9 @@ Three artifacts, all loaded by OBS itself:
 
 ### 7.1 One-time setup
 
-1. Copy the `live-counter` folder to the streaming machine (any stable path).
+1. Copy the Live Counter release folder (`live-counter-for-obs`, a flat folder holding `setup.html`, `dock.html`, `overlay.html`, `counter-hotkeys.lua`, the README and the install guide) to the streaming machine (any stable path).
 2. In OBS: Tools → WebSocket Server Settings → enable the server, note the port (4455) and password. Authentication stays **on**.
-3. In OBS: Docks → Custom Browser Docks → add the dock URL (a `file://` URL shown in the README and copyable from `setup.html` — a static helper page built into `dist/` beside the dock and overlay pages; opened by double-clicking it in any browser, it derives the correct absolute dock URL and the password-free overlay source URL from its own location).
+3. In OBS: Docks → Custom Browser Docks → add the dock URL (a `file://` URL shown in the README and copyable from `setup.html` — a static helper page that sits beside the dock and overlay pages, in `dist/` for the repo build and at the top of the release folder; opened by double-clicking it in any browser, it derives the correct absolute dock URL and the password-free overlay source URL from its own location).
 4. In the dock's first-run screen: paste the websocket password (stored in the dock's local storage; shown as ●●●, editable in Settings).
 5. In OBS: add a Browser Source pointing at `overlay.html` — the dock's Diagnostics view and `setup.html` state the exact recommended settings: width/height = canvas resolution, FPS 30 (or 60 to match the project), **"Shutdown source when not visible" unchecked**, **"Refresh browser when scene becomes active" unchecked**. When connected, the diagnostic compares the actual Browser Source settings against these recommendations and names each mismatch with its expected value.
 6. In OBS: Tools → Scripts → add `counter-hotkeys.lua`; assign keys in Settings → Hotkeys (modifier combinations recommended, e.g. ⌘/Ctrl+=, so bare keys typed into input fields never collide).
@@ -311,7 +311,7 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 29. With the overlay Browser Source configured at the wrong size, FPS, or with "Shutdown source when not visible" checked, the connected diagnostic names each mismatched setting with its expected value; with matching settings it reads ok. The source's eye state is shown read-only when available: a disabled (off) eye shows a note explaining the source is hidden in OBS; an enabled eye, or an eye state that isn't known, shows nothing — there is no separate affirmative "eye is on" line, matching the settings-mismatch check's own silence when everything already matches.
 30. With the overlay URL present in two sources, the diagnostic shows the multiple-source warning naming both; with one source, no warning.
 31. Typing a label character outside the bundled fonts' Latin repertoire (e.g. `→` or `あ`) shows a non-blocking glyph-coverage warning in Setup naming the character; plain Latin text shows none; the warning never blocks Save or Start.
-32. Opening `dist/setup.html` by double-clicking it in a normal browser shows the correct absolute `file://` dock URL and password-free overlay URL for its location, each with a working copy control, plus the recommended Browser Source settings — with no network access.
+32. Opening `setup.html` (at the top of the release folder; `dist/setup.html` in the repo build) by double-clicking it in a normal browser shows the correct absolute `file://` dock URL and password-free overlay URL for its location, each with a working copy control, plus the recommended Browser Source settings — with no network access.
 
 ## 12. Test plan
 

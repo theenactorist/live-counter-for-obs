@@ -56,6 +56,11 @@ test.describe('setup.html', () => {
     await expect(steps).toContainText('WebSocket Server Settings');
     await expect(steps).toContainText('Custom Browser Docks');
     await expect(steps).toContainText('Diagnostics');
+    // INSTALL-3: the password comes from OBS's Show Connect Info, and the
+    // dock opens on the Live tab with its Connect to OBS card (main.ts
+    // activates Live by default), so that is where the steps send it.
+    await expect(steps).toContainText('Show Connect Info');
+    await expect(steps).toContainText('Connect to OBS');
     await expect(steps).toContainText('counter-hotkeys.lua');
     await expect(steps).toContainText('Hotkeys');
 

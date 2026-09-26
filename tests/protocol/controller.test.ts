@@ -1212,7 +1212,7 @@ describe('SessionController — initializing flag (Task 3.0)', () => {
 // so an operator who starts their own session during the wait is never
 // overwritten by whatever the mirror re-read finds later.
 describe('SessionController — cold-start identify retry (Task 3.0)', () => {
-  it('a mirror-only session missed by the identify window is adopted once the client actually identifies (delayIdentify(3000) vs. a 2.5s window)', async () => {
+  it('a mirror-only session missed by the identify window is adopted once the client actually identifies (delayIdentify(1200) vs. a 1s window)', async () => {
     const mock = await startMockObs();
     mockServers.push(mock);
 
@@ -1227,10 +1227,11 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
       slotValue: mirrored,
     });
 
-    // Identify arrives well past the 2.5s wait window this test uses — the
+    // Identify arrives well past the 1s wait window this test uses — the
     // OLD one-shot wait would give up for the rest of the boot; localStorage
-    // is empty too, so there is nothing else to fall back to.
-    mock.delayIdentify(3000);
+    // is empty too, so there is nothing else to fall back to. (DEVFLOW-5:
+    // was 3000 vs. 2500; shrunk at the same 1.2 ratio to cut real waiting.)
+    mock.delayIdentify(1200);
 
     const local = new MapStorage(); // localStorage lost: CEF profile cleared / OBS reinstall
     const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
@@ -1242,7 +1243,7 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     const scheduler = new FakeScheduler();
     const controller = new SessionController({ storage, bus, timer, scheduler });
 
-    const identified = awaitIdentified(client, 2500);
+    const identified = awaitIdentified(client, 1000);
     const initPromise = controller.init({ identified, onIdentified: (fn) => client.on('identified', fn) });
     client.connect();
     await initPromise;
@@ -1252,7 +1253,7 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     expect(controller.getState().recovered).toBe(false);
 
     // Gate fix wave (M-12) — was a fixed 1200ms real-time sleep past the
-    // ~3s identify mark; converted to the file's own vi.waitFor idiom (no
+    // delayed identify mark; converted to the file's own vi.waitFor idiom (no
     // behavior change) so this test settles the instant the retry's
     // GetPersistentData round trip actually lands instead of always paying
     // the full fixed wait, and never flakes on a slower CI box.
@@ -1279,7 +1280,7 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
       slotValue: mirrored,
     });
 
-    mock.delayIdentify(3000);
+    mock.delayIdentify(1200); // DEVFLOW-5: was 3000 vs. a 2500 window; same 1.2 ratio
 
     const local = new MapStorage();
     const client = new ObsWsClient({ url: mock.url, eventSubscriptions: 0 });
@@ -1291,7 +1292,7 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     const scheduler = new FakeScheduler();
     const controller = new SessionController({ storage, bus, timer, scheduler });
 
-    const identified = awaitIdentified(client, 2500);
+    const identified = awaitIdentified(client, 1000);
     const initPromise = controller.init({ identified, onIdentified: (fn) => client.on('identified', fn) });
     client.connect();
     await initPromise;
@@ -1305,7 +1306,7 @@ describe('SessionController — cold-start identify retry (Task 3.0)', () => {
     expect(operatorSession).not.toBeNull();
 
     // Gate fix wave (M-12) — was a fixed 1200ms real-time sleep past the
-    // ~3s identify mark; converted to the file's own vi.waitFor idiom (no
+    // delayed identify mark; converted to the file's own vi.waitFor idiom (no
     // behavior change). Waiting on `client.state` itself (rather than a
     // guessed delay) is the deterministic signal that the real identify —
     // and therefore the retry's own synchronous `session !== null` bail-out

@@ -3,6 +3,10 @@
 // modifier combos are recommended for hotkeys). This is a plain `fs` read —
 // no rendering, no markdown parsing — so it belongs in vitest, not
 // Playwright.
+//
+// 2026-09-26 (review item 3, INSTALL-3/5, OBSINT-7): the README ships inside
+// the flat release folder (scripts/package-release.mjs), so it names files
+// at the top of that folder, never `dist/`.
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -19,8 +23,13 @@ const LOCKED_HEADINGS = [
   '## Hotkeys',
   '## Daily use',
   '## If something breaks',
+  '## If you move or rename the folder',
   '## Moving to another computer',
 ];
+
+function sectionOf(text: string, heading: string): string {
+  return text.split(heading)[1]?.split('\n## ')[0] ?? '';
+}
 
 describe('README.md', () => {
   it('exists at the repo root', () => {
@@ -34,7 +43,7 @@ describe('README.md', () => {
     }
   });
 
-  it('One-time setup\'s numbered list starts with "double-click dist/setup.html"', () => {
+  it('One-time setup\'s numbered list starts with "double-click setup.html"', () => {
     const text = readFileSync(README_PATH, 'utf8');
     const section = text.split('## One-time setup')[1]?.split('\n## ')[0] ?? '';
     const firstStep = section
@@ -42,7 +51,20 @@ describe('README.md', () => {
       .map((line) => line.trim())
       .find((line) => /^1\./.test(line));
     expect(firstStep).toBeDefined();
-    expect((firstStep ?? '').toLowerCase()).toContain('double-click `dist/setup.html`');
+    expect((firstStep ?? '').toLowerCase()).toContain('double-click `setup.html`');
+  });
+
+  it('never points at dist/ (the release folder is flat: setup.html, dock.html, overlay.html, counter-hotkeys.lua)', () => {
+    const text = readFileSync(README_PATH, 'utf8');
+    expect(text).not.toContain('dist/');
+  });
+
+  it('password step names Show Connect Info, the Live tab\'s Connect card, and Diagnostics as the alternative', () => {
+    const section = sectionOf(readFileSync(README_PATH, 'utf8'), '## One-time setup');
+    expect(section).toContain('Show Connect Info');
+    expect(section).toContain('Live tab');
+    expect(section).toContain('Connect to OBS');
+    expect(section).toContain('Diagnostics');
   });
 
   it('mentions counter-hotkeys.lua (the script an operator must actually install)', () => {
@@ -63,6 +85,29 @@ describe('README.md', () => {
     const tableRows = section.split('\n').filter((line) => line.trim().startsWith('|') && !line.includes('---'));
     // First row is the header, so 5 data rows means 6 total pipe-rows.
     expect(tableRows.length).toBe(6);
+  });
+
+  it('suggested combos avoid macOS clashes (Cmd+H hides OBS, Cmd+Z is OBS Undo)', () => {
+    const section = sectionOf(readFileSync(README_PATH, 'utf8'), '## Hotkeys');
+    const tableRows = section.split('\n').filter((line) => line.trim().startsWith('|') && !line.includes('---'));
+    for (const row of tableRows) {
+      expect(row).not.toMatch(/⌘|Cmd|Command/);
+    }
+    expect(section).toContain('Ctrl + Alt + Z');
+    expect(section).toContain('Ctrl + Option + Z');
+  });
+
+  it('Hotkeys says shortcuts need the OBS connection and belong to the scene collection', () => {
+    const section = sectionOf(readFileSync(README_PATH, 'utf8'), '## Hotkeys');
+    expect(section).toContain('OBS connection');
+    expect(section).toContain('scene collection');
+  });
+
+  it('If you move or rename the folder re-adds the dock, fixes the overlay address, and re-adds the script', () => {
+    const section = sectionOf(readFileSync(README_PATH, 'utf8'), '## If you move or rename the folder');
+    expect(section).toContain('Custom Browser Docks');
+    expect(section).toContain('Fix overlay settings');
+    expect(section).toContain('counter-hotkeys.lua');
   });
 
   it('If something breaks names the OBS exit-confirmation dialog and Reset everything', () => {
