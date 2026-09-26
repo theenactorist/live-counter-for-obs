@@ -30,6 +30,12 @@
 //     GetSourceActive response or Input*StateChanged event has actually
 //     landed (so a fresh boot that hasn't polled yet doesn't assert `false`
 //     out of thin air).
+//   - a tracked source that no longer EXISTS (InputRemoved, or
+//     GetSourceActive answering code 600 "No source was found") is dropped
+//     from the ws layer outright: no ws knowledge, never "hidden". Real OBS
+//     sends the removed source's deactivate/hide events AFTER InputRemoved,
+//     so keeping its name would re-store a false/false reading that then
+//     beats the "no overlay page seen" fallback (real-OBS walkthrough D4).
 //
 // `chipFrom` (the Live view's decision table, PRD §8.11) and
 // `liveSafetyArmed` (future automatic-mode safety gating) both consume the
@@ -152,6 +158,15 @@ export interface LiveStatusTrackerDeps {
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_FRESHNESS_MS = 10_000;
 
+// obs-websocket's ResourceNotFound (600), as ObsWsClient.request() formats a
+// failed response (`request failed with code <n>: <comment>`). Anchored to
+// that prefix so a comment that merely contains "600" can't match.
+const SOURCE_NOT_FOUND = /^request failed with code 600(?::|$)/;
+
+function isSourceNotFound(err: unknown): boolean {
+  return err instanceof Error && SOURCE_NOT_FOUND.test(err.message);
+}
+
 export class LiveStatusTracker {
   private readonly client: ObsWsClient | null;
   private readonly nowMs: () => number;
@@ -208,6 +223,9 @@ export class LiveStatusTracker {
             this.applyWsFact(String(eventData.inputName), 'active', eventData.videoActive);
           } else if (eventType === 'InputShowStateChanged') {
             this.applyWsFact(String(eventData.inputName), 'showing', eventData.videoShowing);
+          } else if (eventType === 'InputRemoved') {
+            const name = String(eventData.inputName);
+            if (this.names.includes(name)) this.forgetSource(name);
           } else if (eventType === 'StudioModeStateChanged') {
             this.studioMode = asBoolOrNull(eventData.studioModeEnabled);
             this.notify();
@@ -265,6 +283,19 @@ export class LiveStatusTracker {
     this.notify();
   }
 
+  /**
+   * D4 — the tracked source no longer exists: drop its name as well as its
+   * last reading, so the deactivate/hide events OBS sends after InputRemoved
+   * (and every later poll) are ignored instead of re-storing false/false.
+   * main.ts's next overlaySourceNames() scan adds the name back if a source
+   * by that name comes back (an undo, say).
+   */
+  private forgetSource(name: string): void {
+    this.names = this.names.filter((n) => n !== name);
+    this.wsByName.delete(name);
+    this.notify();
+  }
+
   private applyWsFact(name: string, key: 'active' | 'showing', raw: unknown): void {
     if (!this.names.includes(name)) return; // unmapped inputName — ignored, per the brief
     const entry = this.wsByName.get(name) ?? { active: null, showing: null };
@@ -292,12 +323,13 @@ export class LiveStatusTracker {
         this.wsByName.set(name, { active: asBoolOrNull(resp.videoActive), showing: asBoolOrNull(resp.videoShowing) });
         this.wsLanded = true;
         this.notify();
-      } catch {
-        // A name that no longer resolves (source deleted mid-session, or a
-        // transient request failure) simply stops updating until the next
-        // setSourceNames() drops it or a later poll succeeds — never throws
-        // into the caller (the identify listener / poll timer / a fresh
-        // setSourceNames call).
+      } catch (err) {
+        // 600 "No source was found": the source is gone, so the ws layer
+        // stops knowing anything about it (D4). Any other failure is treated
+        // as transient: the last reading stands until a later poll succeeds.
+        // Never throws into the caller (the identify listener / poll timer /
+        // a fresh setSourceNames call).
+        if (isSourceNotFound(err)) this.forgetSource(name);
       }
     }
   }

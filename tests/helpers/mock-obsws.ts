@@ -96,6 +96,18 @@ export interface MockObs {
    * with code 600, mirroring real obs-websocket.
    */
   setSourceActive(inputName: string, s: { active?: boolean; showing?: boolean }): void;
+  /**
+   * D4 (real-OBS walkthrough) — what obs-websocket's `RemoveInput` does in
+   * real OBS: the input and its scene items are gone (so `GetInputList` no
+   * longer lists it and `GetSourceActive` rejects with code 600), and the
+   * events arrive in real OBS order: `InputRemoved{inputName}` first
+   * (libobs's "source_remove" signal fires inside obs_source_remove), THEN
+   * `InputActiveStateChanged{videoActive:false}` / `InputShowStateChanged
+   * {videoShowing:false}` for the same name if it was active/showing (libobs
+   * only prunes the removed source's scene items on the next video tick,
+   * which deactivates/hides it after the removal was already announced).
+   */
+  removeInput(inputName: string): void;
   /** Task 3.2 — sets Studio Mode and fires `StudioModeStateChanged{studioModeEnabled}` to every identified client; also becomes GetStudioModeEnabled's response. */
   setStudioMode(enabled: boolean): void;
   /** Task 3.2 — the most recent Identify (op 1) message's full `d` payload, or `null` before any client has identified — lets a test assert the exact `eventSubscriptions` mask a real dock/overlay boot sent. */
@@ -494,6 +506,23 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
         }
         if (s.showing !== undefined) {
           send(c, OP_EVENT, { eventType: 'InputShowStateChanged', eventData: { inputName, videoShowing: next.showing } });
+        }
+      }
+    },
+    removeInput(inputName) {
+      const prev = sourceActiveState.get(inputName) ?? { active: false, showing: false };
+      inputs.delete(inputName);
+      sourceActiveState.delete(inputName);
+      for (const [sceneName, items] of sceneItems) {
+        sceneItems.set(sceneName, items.filter((item) => item.sourceName !== inputName));
+      }
+      for (const c of identifiedClients) {
+        send(c, OP_EVENT, { eventType: 'InputRemoved', eventData: { inputName } });
+        if (prev.active) {
+          send(c, OP_EVENT, { eventType: 'InputActiveStateChanged', eventData: { inputName, videoActive: false } });
+        }
+        if (prev.showing) {
+          send(c, OP_EVENT, { eventType: 'InputShowStateChanged', eventData: { inputName, videoShowing: false } });
         }
       }
     },

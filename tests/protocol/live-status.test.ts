@@ -437,6 +437,101 @@ describe('LiveStatusTracker — ws layer', () => {
   });
 });
 
+// Real-OBS walkthrough D4 (OBS 32.2.2) — the overlay Browser Source removed
+// entirely while LIVE. OBS announces the removal (InputRemoved) and THEN sends
+// the removed source's deactivate/hide events, so the ws layer used to keep a
+// last reading of { active: false, showing: false } for a source that no
+// longer existed. Once the overlay page went silent, that stale reading won
+// row 5 of the chip table (HIDDEN, "Source not visible in OBS") indefinitely,
+// instead of the table's "no overlay page seen" fallback.
+describe('LiveStatusTracker — overlay source removed entirely (D4)', () => {
+  function chipOf(tracker: LiveStatusTracker): ReturnType<typeof chipFrom> {
+    const s = tracker.snapshot();
+    return chipFrom({ overlaySeen: s.overlaySeen, relay: s.relay, ws: s.ws, overlayVisible: true });
+  }
+
+  it('RemoveInput while LIVE, overlay then silent past the window -> chip UNKNOWN, not HIDDEN', async () => {
+    const mock = await startMockObs({ inputs: [{ inputName: 'Browser', inputKind: 'browser_source', inputSettings: {} }] });
+    mockServers.push(mock);
+    const dockClient = await connectedClient(mock.url);
+    const dockBus = new Bus(dockClient, 'dock');
+    const overlayClient = await connectedClient(mock.url);
+    const overlayBus = new Bus(overlayClient, 'overlay');
+
+    let now = 0;
+    const tracker = makeTracker({ client: dockClient, bus: dockBus, nowMs: () => now, freshnessMs: 10_000, pollMs: 10_000_000 });
+    tracker.setSourceNames(['Browser']);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+
+    // LIVE: the source is in Program and its overlay page is heartbeating.
+    mock.setSourceActive('Browser', { active: true, showing: true });
+    await overlayBus.send('overlay-status', { obsActive: true, obsShowing: true });
+    await vi.waitFor(() => {
+      expect(chipOf(tracker).state).toBe('live');
+    });
+
+    // The operator removes the source (obs-websocket RemoveInput); the
+    // overlay page dies with it, so no heartbeat follows. Events and request
+    // responses share one socket in order, so once this round trip returns
+    // every event the removal produced has been handled.
+    mock.removeInput('Browser');
+    await dockClient.request('GetStudioModeEnabled');
+
+    now += 10_001; // the last heartbeat ages past the silence window
+    expect(chipOf(tracker)).toEqual({ state: 'unknown', text: 'UNKNOWN', detail: 'No overlay page seen yet' });
+    expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
+  });
+
+  it('GetSourceActive answering 600 ("No source was found") drops that reading: no ws knowledge, not hidden', async () => {
+    const mock = await startMockObs({ inputs: [{ inputName: 'Browser', inputKind: 'browser_source', inputSettings: {} }] });
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const tracker = makeTracker({ client, bus, nowMs: () => 0, pollMs: 10_000_000 });
+
+    tracker.setSourceNames(['Browser']);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+    expect(chipOf(tracker).state).toBe('hidden'); // ws alone, source present: HIDDEN is right here
+
+    // The source vanishes without an InputRemoved reaching this client, and a
+    // names feed that started before the removal still carries the old name,
+    // so only the poll's own 600 answer can tell.
+    mock.inputs.delete('Browser');
+    tracker.setSourceNames(['Browser']);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: null, showing: null });
+    });
+    expect(chipOf(tracker)).toEqual({ state: 'unknown', text: 'UNKNOWN', detail: 'No overlay page seen yet' });
+  });
+
+  it('a transient GetSourceActive failure (not 600) keeps the last reading', async () => {
+    const mock = await startMockObs({ inputs: [{ inputName: 'Browser', inputKind: 'browser_source', inputSettings: {} }] });
+    mockServers.push(mock);
+    const client = await connectedClient(mock.url);
+    const bus = new Bus(client, 'dock');
+    const tracker = makeTracker({ client, bus, nowMs: () => 0, pollMs: 10_000_000 });
+
+    tracker.setSourceNames(['Browser']);
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws).toEqual({ active: false, showing: false });
+    });
+    mock.setSourceActive('Browser', { active: true });
+    await vi.waitFor(() => {
+      expect(tracker.snapshot().ws.active).toBe(true);
+    });
+
+    mock.failNext('GetSourceActive', 500);
+    tracker.setSourceNames(['Browser']);
+    await client.request('GetStudioModeEnabled'); // the failed poll's answer has landed by now
+    expect(mock.requestLog.filter((t) => t === 'GetSourceActive')).toHaveLength(2);
+    expect(tracker.snapshot().ws).toEqual({ active: true, showing: false });
+  });
+});
+
 // Fix round 1 (review finding) — `ObsWsClient` reconnects on its own
 // (backoff + retry) without `main.ts` ever tearing this tracker down, so a
 // genuine network blip must not leave the pre-outage ws cache looking

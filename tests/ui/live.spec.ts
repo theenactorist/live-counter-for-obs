@@ -641,6 +641,42 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Real-OBS walkthrough D4 — the overlay Browser Source removed entirely
+  // (obs-websocket RemoveInput) while LIVE. OBS sends InputRemoved and then
+  // the removed source's deactivate/hide events; the ws layer used to keep
+  // that last false/false reading, so once the overlay page went silent the
+  // chip sat on HIDDEN "Source not visible in OBS" instead of UNKNOWN.
+  test('overlay source removed while LIVE: chip goes UNKNOWN once the overlay page is silent, not HIDDEN', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200, liveFreshnessMs: 1000 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true, showing: true });
+      injectOverlayHeartbeat(mock, { obsActive: true, obsShowing: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      mock.removeInput(OVERLAY_INPUT_NAME); // the overlay page goes with it: no further heartbeats
+
+      await expect(chip).toHaveAttribute('data-state', 'unknown', { timeout: 5000 });
+      await expect(chip).toHaveText('UNKNOWN');
+      await expect(chip).toHaveAttribute('data-detail', 'No overlay page seen yet');
+      await expect(chip).toHaveAttribute('title', 'No overlay page seen yet');
+
+      // Several 200ms GetSourceActive polls later, nothing has brought the
+      // removed source's reading back.
+      await page.waitForTimeout(1000);
+      await expect(chip).toHaveAttribute('data-state', 'unknown');
+    } finally {
+      await mock.close();
+    }
+  });
+
   // 2026-09-25 review, item 5: all five chip states must render as a filled
   // pill. LIVE and SHOWING (PREVIEW) previously had no rule, so LIVE showed
   // as bare text while HIDDEN got a red pill. Driven through the relay layer
