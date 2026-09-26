@@ -225,6 +225,19 @@
         letter-spacing: 0.03em;
         margin-bottom: 0.75rem;
       }
+      /* On air: the only solid, saturated pill, so it can't be mistaken for
+         HIDDEN's dark red one. White on #c8370a is 5.2:1. */
+      .status-chip[data-state='live'] {
+        background: #c8370a;
+        color: #ffffff;
+        border: 1px solid #ff7a45;
+      }
+      /* In Preview or a projector only, not in Program. */
+      .status-chip[data-state='showing-preview'] {
+        background: #3a2e08;
+        color: #ffd166;
+        border: 1px solid #7a5f10;
+      }
       .status-chip[data-state='showing'] {
         background: #123a1f;
         color: #7be495;

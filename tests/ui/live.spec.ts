@@ -254,6 +254,27 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // 2026-09-25 review, DOCKUX-8: the toggle names the action it takes (like
+  // Show/Hide beside it), not the mode the session is already in.
+  test('mode-toggle is labelled with the mode it switches to', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const toggle = page.getByTestId('mode-toggle');
+      await expect(toggle).toHaveText('Switch to Automatic');
+      await toggle.click(); // manual -> automatic
+      await expect(page.getByTestId('auto-start')).toBeVisible();
+      await expect(toggle).toHaveText('Switch to Manual');
+      await toggle.click(); // automatic -> manual
+      await expect(page.getByTestId('auto-start')).toHaveCount(0);
+      await expect(toggle).toHaveText('Switch to Automatic');
+    } finally {
+      await mock.close();
+    }
+  });
+
   // Task 2.18 fix wave 5 (coordinator re-review residual) — Setup no longer
   // has any path that changes a running session's mode (ruling 1: Mode's
   // dedicated control is HERE, on Live); the deleted Setup-side test that
@@ -560,6 +581,47 @@ test.describe('dock Live view', () => {
       await expect(chip).toHaveText('SHOWING (PREVIEW)', { timeout: 3000 });
       await expect(chip).toHaveAttribute('data-state', 'showing-preview');
       await expect(chip).toHaveAttribute('data-detail', 'Preview or projector only — not in Program');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // 2026-09-25 review, item 5: all five chip states must render as a filled
+  // pill. LIVE and SHOWING (PREVIEW) previously had no rule, so LIVE showed
+  // as bare text while HIDDEN got a red pill. Driven through the relay layer
+  // (the overlay's own heartbeat), so no matched OBS source is needed.
+  test('every status-chip state has its own non-transparent background', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      const backgrounds = new Map<string, string>();
+      const record = async (state: string): Promise<void> => {
+        await expect(chip).toHaveAttribute('data-state', state, { timeout: 3000 });
+        const bg = await chip.evaluate((node) => getComputedStyle(node).backgroundColor);
+        expect(bg, `${state} background`).not.toBe('rgba(0, 0, 0, 0)');
+        expect(bg, `${state} background`).not.toBe('transparent');
+        backgrounds.set(state, bg);
+      };
+
+      await record('unknown'); // no overlay heartbeat yet
+
+      injectOverlayHeartbeat(mock);
+      await record('showing');
+
+      injectOverlayHeartbeat(mock, { obsActive: false, obsShowing: true });
+      await record('showing-preview');
+
+      injectOverlayHeartbeat(mock, { obsActive: true, obsShowing: true });
+      await record('live');
+
+      await page.getByTestId('btn-show-hide').click(); // Hide is never guarded
+      await record('hidden');
+
+      // Each state reads differently at a glance, LIVE vs HIDDEN included.
+      expect(new Set(backgrounds.values()).size).toBe(5);
     } finally {
       await mock.close();
     }

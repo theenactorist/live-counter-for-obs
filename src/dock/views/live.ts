@@ -1252,7 +1252,8 @@ export function mountLiveView(
 
   function renderModeToggle(session: Session): HTMLElement {
     const row = el('div', { class: 'mode-row' });
-    const label = session.mode === 'manual' ? 'Manual' : 'Automatic';
+    // Labelled by the action, like Show/Hide (2026-09-25 review, DOCKUX-8).
+    const label = session.mode === 'manual' ? 'Switch to Automatic' : 'Switch to Manual';
     const toggle = button('mode-toggle', label);
     toggle.addEventListener('click', () =>
       dispatch({ type: 'setMode', mode: session.mode === 'manual' ? 'automatic' : 'manual', nonce: generateNonce() }),
