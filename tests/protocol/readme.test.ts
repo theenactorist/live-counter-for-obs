@@ -67,6 +67,19 @@ describe('README.md', () => {
     expect(section).toContain('Diagnostics');
   });
 
+  // Checklist B2: inside OBS's dock the clipboard read can hang, so Paste
+  // does nothing (or, since the fix, says it is blocked). Typing the
+  // password is the way through, and both the password step and the
+  // troubleshooting list must say so.
+  it('password step and If something breaks say to type the password when Paste does nothing', () => {
+    const text = readFileSync(README_PATH, 'utf8');
+    const setup = sectionOf(text, '## One-time setup');
+    expect(setup).toContain('If Paste does nothing or says it is blocked, type the password');
+    const breaks = sectionOf(text, '## If something breaks');
+    expect(breaks).toContain('Paste does nothing or says it is blocked');
+    expect(breaks).toContain('Type the password instead');
+  });
+
   it('mentions counter-hotkeys.lua (the script an operator must actually install)', () => {
     const text = readFileSync(README_PATH, 'utf8');
     expect(text).toContain('counter-hotkeys.lua');

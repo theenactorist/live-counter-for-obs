@@ -61,6 +61,8 @@ test.describe('setup.html', () => {
     // activates Live by default), so that is where the steps send it.
     await expect(steps).toContainText('Show Connect Info');
     await expect(steps).toContainText('Connect to OBS');
+    // Checklist B2: Paste can be blocked inside OBS's dock; typing works.
+    await expect(steps).toContainText('If Paste does nothing or says it is blocked, type the password instead.');
     await expect(steps).toContainText('counter-hotkeys.lua');
     await expect(steps).toContainText('Hotkeys');
 

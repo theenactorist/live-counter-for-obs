@@ -27,7 +27,7 @@ Copy the Live Counter folder (`live-counter-for-obs`) onto the streaming compute
 1. Double-click `setup.html` in the Live Counter folder. It opens in your web browser and shows the two addresses OBS needs on this computer, each with a Copy button. Keep it open for the next steps.
 2. In OBS: **Tools → WebSocket Server Settings**. Tick **Enable WebSocket server** and leave **Enable Authentication** ticked. Note the Server Port (usually 4455). Click **Show Connect Info** and copy the Server Password. Click Apply, then OK.
 3. In OBS: **Docks → Custom Browser Docks**. In an empty row, type a name such as "Live Counter" and paste the **Dock URL** from `setup.html`. Click Apply.
-4. The new dock opens on the **Live tab** with a **Connect to OBS** card. Check that the Port matches step 2, click **Paste** next to Password, then click **Connect**. You can also connect from the dock's **Diagnostics** tab: click Paste next to Password, then Save. The Diagnostics checklist turns green once the dock is connected.
+4. The new dock opens on the **Live tab** with a **Connect to OBS** card. Check that the Port matches step 2, click **Paste** next to Password, then click **Connect**. If Paste does nothing or says it is blocked, type the password into the field instead. You can also connect from the dock's **Diagnostics** tab: click Paste next to Password (or type it), then Save. The Diagnostics checklist turns green once the dock is connected.
 5. Add the overlay. The easy way: put the scene for the counter in Program, open the dock's **Diagnostics** tab and click **Add overlay to my scene**. It creates the Browser Source with the right settings. The manual way: add a **Browser Source** to your scene using the **Overlay URL** from `setup.html`.
 6. In OBS: **Tools → Scripts**, click **+** and choose `counter-hotkeys.lua` from the Live Counter folder. Then assign keys in **Settings → Hotkeys** (see Hotkeys below).
 
@@ -71,6 +71,7 @@ The script, its key assignments and the overlay source are saved in the OBS scen
 - **The dock looks stuck or frozen:** reload it (right-click the dock → Reload, or close and reopen it from Docks). The count is kept.
 - **OBS crashes or you have to restart it:** when OBS reopens, the dock restores your last session, paused, so you can check the number before continuing.
 - **OBS asks "Are you sure you want to exit?" when quitting:** that is OBS's own exit confirmation, not a Live Counter warning. Your session is already saved, so it is safe to confirm.
+- **Paste does nothing or says it is blocked:** OBS stops the dock reading the clipboard on some computers. Type the password instead.
 - **Something looks wrong (wrong numbers, stuck settings):** open the dock's **Diagnostics** tab and use **Reset everything**. It asks you to confirm and names what it deletes (settings, presets, sessions and logs on this computer). It cannot be undone, so use it only as a last resort.
 - **Still stuck:** click **Copy diagnostics** on the Diagnostics tab and send the result to whoever is helping you.
 

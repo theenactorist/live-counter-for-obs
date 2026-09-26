@@ -542,7 +542,35 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('settings-paste').click();
 
       await expect(page.getByTestId('settings-paste-error')).toBeVisible();
-      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
+      await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Checklist B2 (real OBS 32.2.2, CEF 127 on macOS): the dock's
+  // navigator.clipboard.readText() neither resolves nor rejects there, so
+  // the Paste button used to do nothing at all. It must stop waiting and say
+  // what to do instead.
+  test('settings-paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => new Promise<string>(() => {});
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('settings-password').fill('unchanged');
+      await page.getByTestId('settings-paste').click();
+
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible({ timeout: 3000 });
+      await expect(page.getByTestId('settings-paste-error')).toHaveText(
+        'Paste is blocked inside OBS on this computer. Type it instead.',
+      );
       await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -564,7 +592,7 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('settings-paste').click();
 
       await expect(page.getByTestId('settings-paste-error')).toBeVisible();
-      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
       await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
     } finally {
       await mock.close();

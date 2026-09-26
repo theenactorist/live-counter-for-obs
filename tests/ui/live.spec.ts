@@ -1311,6 +1311,27 @@ test.describe('dock Live view', () => {
     await expect(page.getByTestId('connect-paste-error')).toBeHidden();
   });
 
+  // Checklist B2: readText() never settles inside OBS's dock (CEF 127), and
+  // this card is the first place a new operator pastes the password.
+  test('connect-card: Paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      navigator.clipboard.readText = () => new Promise<string>(() => {});
+    });
+    await openDock(page, { port: 39469, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+
+    await page.getByTestId('connect-password').fill('unchanged');
+    await page.getByTestId('connect-paste').click();
+
+    await expect(page.getByTestId('connect-paste-error')).toBeVisible({ timeout: 3000 });
+    await expect(page.getByTestId('connect-paste-error')).toHaveText(
+      'Paste is blocked inside OBS on this computer. Type it instead.',
+    );
+    await expect(page.getByTestId('connect-password')).toHaveValue('unchanged');
+  });
+
   test('live-empty mirrors add-overlay: creates the overlay once identified with no session, without visiting Diagnostics', async ({
     page,
   }) => {

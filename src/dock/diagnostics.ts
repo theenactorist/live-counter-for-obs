@@ -1017,7 +1017,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   passwordInput.addEventListener('input', () => {
     settingsPassword = passwordInput.value;
     // Review fix: the operator typing here IS them acting on a stale
-    // "Clipboard blocked" hint — it must disappear immediately, not linger
+    // "Paste is blocked" hint — it must disappear immediately, not linger
     // until they happen to click Paste again (which may never happen once
     // they've already typed the value in by hand).
     settingsPasteError.hidden = true;
@@ -1026,7 +1026,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   saveBtn.addEventListener('click', () => {
     // Review fix: Save is the other moment a stale paste-error hint must
     // clear — previously it only reset on a subsequent Paste click, so an
-    // invalid-port Save kept showing "Clipboard blocked" right next to the
+    // invalid-port Save kept showing "Paste is blocked" right next to the
     // unrelated port error, and a successful save only LOOKED clean because
     // boot()'s reconnect happens to remount this whole view as a side
     // effect (masking the same bug on the happy path).
@@ -1051,9 +1051,11 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
 
   // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so
   // this is the operator's only way to get a copied password into the field
-  // at all. On rejection (permission denied/unavailable) or an empty read,
-  // the field is left completely untouched and an inline hint takes over —
-  // never a silent no-op an operator could mistake for "it worked."
+  // at all. On rejection (permission denied/unavailable), a read that never
+  // settles (B2: OBS's own dock, cut off by clipboard-keys.ts's
+  // readClipboardText() timeout) or an empty read, the field is left
+  // completely untouched and an inline hint takes over — never a silent
+  // no-op an operator could mistake for "it worked."
   passwordPasteBtn.addEventListener('click', () => {
     settingsPasteError.hidden = true;
     void pasteIntoField(passwordInput, {

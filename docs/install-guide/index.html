@@ -425,7 +425,7 @@
         <ol class="steps">
           <li>In the panel, click the <b>Diagnostics</b> tab.</li>
           <li>Under <b>Settings</b>, check <b>Port</b> matches Step 2.</li>
-          <li>Click <b>Paste</b> next to <b>Password</b>.</li>
+          <li>Click <b>Paste</b> next to <b>Password</b>. If Paste does nothing or says it is blocked, type the password instead.</li>
           <li>Click <b>Save</b>.</li>
         </ol>
         <p>The <b>Connection checklist</b> turns green: <b>Storage</b>, <b>OBS WebSocket</b> (showing <b>Connected to OBS</b>) and <b>Transport</b> now, <b>Overlay</b> after Step 5, <b>Hotkeys</b> after Step 6. Any row that is not green names its fix.</p>
@@ -564,7 +564,8 @@
           <li><b>Panel frozen.</b> Right-click it and choose <b>Reload</b>, or reopen it from <b>Docks</b>. The count is kept.</li>
           <li><b>OBS crashed or restarted.</b> The panel restores your session, paused, so you can check the number first.</li>
           <li><b>OBS asks "Are you sure you want to exit?"</b> That is OBS's normal question. Your session is saved, so it is safe to confirm.</li>
-          <li><b>OBS WebSocket row not green.</b> Check the server is on and the port matches. For a wrong password, copy it again from <b>Show Connect Info</b>, then <b>Paste</b> and <b>Save</b>.</li>
+          <li><b>OBS WebSocket row not green.</b> Check the server is on and the port matches. For a wrong password, copy it again from <b>Show Connect Info</b>, then <b>Paste</b> (or type it) and <b>Save</b>.</li>
+          <li><b>Paste does nothing or says it is blocked.</b> OBS stops the panel reading the clipboard on some computers. Type the password instead.</li>
           <li><b>Overlay not seen.</b> Add the overlay (Step 5), or check that its scene is loaded.</li>
           <li><b>Hotkey bridge silent.</b> Add <code>counter-hotkeys.lua</code> again in <b>Tools → Scripts</b>.</li>
           <li><b>Still stuck.</b> Click <b>Copy diagnostics</b> on the Diagnostics tab and send it to whoever helps you.</li>

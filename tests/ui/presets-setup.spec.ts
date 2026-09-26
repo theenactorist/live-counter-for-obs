@@ -1726,7 +1726,33 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('import-paste').click();
 
       await expect(page.getByTestId('import-paste-error')).toBeVisible();
-      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
+      await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Checklist B2: readText() never settles inside OBS's dock (CEF 127).
+  test('import-paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the textarea is untouched', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => new Promise<string>(() => {});
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      await page.getByTestId('import-textarea').fill('unchanged');
+      await page.getByTestId('import-paste').click();
+
+      await expect(page.getByTestId('import-paste-error')).toBeVisible({ timeout: 3000 });
+      await expect(page.getByTestId('import-paste-error')).toHaveText(
+        'Paste is blocked inside OBS on this computer. Type it instead.',
+      );
       await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -1749,7 +1775,7 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('import-paste').click();
 
       await expect(page.getByTestId('import-paste-error')).toBeVisible();
-      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
       await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -4508,7 +4534,7 @@ test.describe('dock Setup + Presets views', () => {
         // The ACCURATE message ("can't paste that here"), never the generic
         // clipboard-denial one — this was never a clipboard-read failure.
         await expect(page.getByTestId('clipboard-key-hint')).toContainText("Can't paste that into a number field");
-        await expect(page.getByTestId('clipboard-key-hint')).not.toContainText('Clipboard blocked');
+        await expect(page.getByTestId('clipboard-key-hint')).not.toContainText('Paste is blocked');
       } finally {
         await mock.close();
       }
@@ -4588,8 +4614,36 @@ test.describe('dock Setup + Presets views', () => {
         await page.keyboard.press(`${MOD}+v`);
 
         await expect(page.getByTestId('clipboard-key-hint')).toBeVisible();
-        await expect(page.getByTestId('clipboard-key-hint')).toContainText('Clipboard blocked — type it in manually');
+        await expect(page.getByTestId('clipboard-key-hint')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
         await expect(label).toHaveValue('');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // Checklist B2: inside OBS's dock (CEF 127) readText() never settles, so
+    // Cmd/Ctrl+V used to do nothing, silently.
+    test('Cmd/Ctrl+V stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await page.addInitScript(() => {
+          navigator.clipboard.readText = () => new Promise<string>(() => {});
+        });
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('unchanged');
+        await label.click();
+        await page.keyboard.press(`${MOD}+v`);
+
+        await expect(page.getByTestId('clipboard-key-hint')).toBeVisible({ timeout: 3000 });
+        await expect(page.getByTestId('clipboard-key-hint')).toHaveText(
+          'Paste is blocked inside OBS on this computer. Type it instead.',
+        );
+        await expect(label).toHaveValue('unchanged');
       } finally {
         await mock.close();
       }
