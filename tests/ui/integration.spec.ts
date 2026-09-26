@@ -7,21 +7,29 @@ import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { startMockObs } from '../helpers/mock-obsws.js';
+import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import type { CompletionConfig, Mode } from '../../src/engine/types.js';
 import { createSession, applyCommand } from '../../src/engine/counter.js';
 import { serializeSession } from '../../src/engine/migrate.js';
+import { BRIDGE_CHANNEL_INPUT, BRIDGE_SETTINGS_KEY } from '../../src/shared/bridge-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
 const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
 
 // Requests the dock is allowed to make while merely running a session. The
-// first three are the protocol itself; the rest are the gate fix wave's
-// READ-ONLY add-overlay detection scan (Ruling A: it now runs unprompted at
+// first three are the protocol itself; the add-overlay group is the gate fix
+// wave's READ-ONLY detection scan (Ruling A: it now runs unprompted at
 // mount/identify/tab-activation so the button's label is truthful before the
-// first click). Every one of them is a GET — see MUTATING_REQUEST_TYPES below,
-// which is the assertion that actually carries this test's meaning.
+// first click); the last two were added when Task 3.2 introduced the
+// LIVE-status tracker — its own unprompted READ-ONLY polling
+// (GetStudioModeEnabled on every identify; GetSourceActive once a matched
+// overlay source exists — this test seeds none, so it never actually fires
+// here, but stays allowed for any test that does). Adding them was purely an
+// additive allowlist update: this test's own purpose — no MUTATING request
+// ever fires unprompted — is unchanged. Every one of them is a GET — see
+// MUTATING_REQUEST_TYPES below, which is the assertion that actually carries
+// this test's meaning.
 const ALLOWED_REQUEST_TYPES = [
   'BroadcastCustomEvent',
   'SetPersistentData',
@@ -32,6 +40,8 @@ const ALLOWED_REQUEST_TYPES = [
   'GetInputSettings',
   'GetSceneItemList',
   'GetSceneList',
+  'GetStudioModeEnabled',
+  'GetSourceActive',
 ];
 // Nothing here may EVER be sent without the operator clicking add-overlay.
 const MUTATING_REQUEST_TYPES = ['CreateInput', 'SetInputSettings', 'CreateSceneItem', 'RemoveInput', 'SetCurrentProgramScene'];
@@ -52,13 +62,22 @@ interface AnimationCfg {
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; diagRefreshMs?: number },
+  opts: {
+    port: number;
+    devhook?: boolean;
+    overlaySilenceMs?: number;
+    diagRefreshMs?: number;
+    livePollMs?: number;
+    liveFreshnessMs?: number;
+  },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
   if (opts.diagRefreshMs !== undefined) params.set('diagRefreshMs', String(opts.diagRefreshMs));
+  if (opts.livePollMs !== undefined) params.set('livePollMs', String(opts.livePollMs));
+  if (opts.liveFreshnessMs !== undefined) params.set('liveFreshnessMs', String(opts.liveFreshnessMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
 }
 
@@ -84,6 +103,14 @@ async function startSession(page: Page, cfg: StartCfg, animation?: AnimationCfg)
 
 async function dockValue(page: Page): Promise<number> {
   return Number(await page.getByTestId('current-value').textContent());
+}
+
+/** Injects a raw InputSettingsChanged event carrying a JSON-encoded hotkey-bridge payload (Task 3.1). */
+function injectBridgePayload(mock: MockObs, cmd: string, nonce: string): void {
+  mock.injectEvent('InputSettingsChanged', {
+    inputName: BRIDGE_CHANNEL_INPUT,
+    inputSettings: { [BRIDGE_SETTINGS_KEY]: JSON.stringify({ app: 'live-counter', v: 1, cmd, nonce }) },
+  });
 }
 
 test.describe('Phase 2 integration gate: dock + overlay against one mock server', () => {
@@ -137,8 +164,16 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
     }
   });
 
+  // Task 3.3 EDIT (justification: liveSafetyArmed's studio-mode-off branch
+  // arms whenever nothing else is known about activity AND Studio Mode reads
+  // `false` — the mock server's own default; with no ws source seeded and no
+  // relay heartbeat here, mergedActive stays null the whole test. This test
+  // isn't about live-safety, so `setStudioMode(true)` establishes an
+  // explicit not-armed baseline before anything connects, so the jump-apply
+  // click below applies directly as it always did.
   test('3. jump to 37 (range 0-50): dock progress shows 74%, overlay shows 37', async ({ context }) => {
     const mock = await startMockObs();
+    mock.setStudioMode(true);
     try {
       const dock = await context.newPage();
       const overlay = await context.newPage();
@@ -288,6 +323,44 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       const texts = await overlay.evaluate(() => (window as unknown as { __texts: string[] }).__texts);
       expect(texts.length).toBeGreaterThan(0);
       for (const t of texts) expect(t).not.toBe('0');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('6b. overlay reload shows the current value well under 1s, with no new command and no heartbeat wait', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 50, mode: 'manual' });
+      const plus = dock.getByTestId('btn-plus');
+      for (let i = 0; i < 5; i++) await plus.click();
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('5', { timeout: 3000 });
+
+      // Reload right after a heartbeat, so the next one is ~2s away and
+      // cannot be what paints the reloaded overlay. Only the heartbeat loop
+      // raises the `heartbeat` field, so a higher value marks a fresh beat.
+      const lastHeartbeat = (): number => {
+        let max = -1;
+        for (const b of mock.broadcasts) {
+          const e = b.eventData as { source?: string; kind?: string; payload?: { heartbeat?: unknown } } | null;
+          if (e?.source !== 'dock' || e.kind !== 'state') continue;
+          if (typeof e.payload?.heartbeat === 'number') max = Math.max(max, e.payload.heartbeat);
+        }
+        return max;
+      };
+      const seen = lastHeartbeat();
+      await expect.poll(lastHeartbeat, { timeout: 3000, intervals: [10] }).toBeGreaterThan(seen);
+
+      await overlay.reload();
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('5', { timeout: 1000 });
+      await expect(dock.getByTestId('current-value')).toHaveText('5');
     } finally {
       await mock.close();
     }
@@ -467,6 +540,8 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
     // The card is what greets an operator with no OBS...
     await expect(dock.getByTestId('connect-card')).toBeVisible();
     await expect(dock.getByTestId('connect-optional-note')).toContainText('count without OBS');
+    // Hotkeys need the connection too, so the note has to say so before "Not now".
+    await expect(dock.getByTestId('connect-optional-note')).toContainText('keyboard shortcuts and Stream Deck');
 
     // ...and "Not now" gets them straight to the working product.
     await dock.getByTestId('connect-dismiss').click();
@@ -572,6 +647,174 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       }
     } finally {
       if (!closed) await mock.close();
+    }
+  });
+
+  test('13. hotkey bridge end-to-end: an inc event on the settings channel moves the dock and the overlay follows', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 100, mode: 'manual' });
+      await expect(dock.getByTestId('current-value')).toHaveText('0');
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      // Simulates counter-hotkeys.lua's send('inc') — a real Lua script would
+      // write this same shape into the channel input's "text" setting from
+      // inside OBS; the mock's injectEvent delivers the resulting
+      // InputSettingsChanged exactly as a real obs-websocket server would.
+      injectBridgePayload(mock, 'inc', 'integration-inc-1');
+
+      await expect(dock.getByTestId('current-value')).toHaveText('1', { timeout: 3000 });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('1', { timeout: 3000 });
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.2 — proves the RELAY layer (the overlay page's own window
+  // CustomEvent, forwarded over the bus) is a genuinely self-sufficient
+  // PRIMARY layer: no browser_source input is seeded in this mock at all, so
+  // overlaySourceNames() resolves to `[]` and the ws layer never has a name
+  // to poll — yet the dock's chip still reaches LIVE purely from the
+  // overlay's relayed signal, over whichever transport is live (Task 2.13's
+  // zero-config direct transport included).
+  test('14. overlay relays OBS active via a window event: dock chip goes LIVE with no GetSourceActive ever polled', async ({
+    context,
+  }) => {
+    const mock = await startMockObs(); // no inputs seeded — nothing for the ws layer to match
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      await overlay.evaluate(() => {
+        window.dispatchEvent(new CustomEvent('obsSourceActiveChanged', { detail: { active: true } }));
+      });
+
+      await expect(dock.getByTestId('status-chip')).toHaveText('LIVE', { timeout: 3000 });
+      await expect(dock.getByTestId('status-chip')).toHaveAttribute('data-state', 'live');
+      expect(mock.requestLog.filter((t) => t === 'GetSourceActive')).toHaveLength(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.2 — with the ws connection gone entirely, the chip does NOT fall
+  // back to UNKNOWN as long as the overlay page is still heartbeating over
+  // the direct transport (Task 2.13's headline scenario) — it reads the
+  // RENDER state (chipFrom row 6's Phase-2-preserved SHOWING/HIDDEN). Only
+  // once the overlay page itself goes away (no more heartbeats at all, over
+  // ANY transport) does `overlaySeen` finally go stale and the chip fall to
+  // UNKNOWN.
+  test('15. ws dropped: overlay still heartbeating keeps the chip at render state; overlay silenced flips it to UNKNOWN', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    let closed = false;
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port, liveFreshnessMs: 800 });
+      await openOverlay(overlay, mock.port, { statusMs: '200' });
+
+      await startSession(dock, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+      await expect(dock.getByTestId('status-chip')).toHaveText('SHOWING', { timeout: 3000 });
+
+      await mock.close(); // ws goes away entirely, mid-session
+      closed = true;
+
+      // The overlay keeps heartbeating every 200ms over the local transport
+      // — comfortably inside the 800ms freshness window — so the chip stays
+      // at the render-driven SHOWING the whole time, well past one window.
+      await dock.waitForTimeout(1500);
+      await expect(dock.getByTestId('status-chip')).toHaveText('SHOWING');
+
+      // Now the overlay page itself goes away — no more heartbeats at all.
+      await overlay.close();
+      await expect(dock.getByTestId('status-chip')).toHaveText('UNKNOWN', { timeout: 3000 });
+      await expect(dock.getByTestId('status-chip')).toHaveAttribute('data-state', 'unknown');
+    } finally {
+      if (!closed) await mock.close();
+    }
+  });
+
+  // Task 3.2 — the dock's Identify (op 1) payload must carry the composed
+  // EventSub mask (General|Inputs|Ui|InputActiveStateChanged|
+  // InputShowStateChanged = 394249), proving main.ts's real wiring sends the
+  // exact locked value end-to-end, not just that the arithmetic checks out
+  // (already covered by a unit test in tests/protocol/obsws-client.test.ts).
+  test('16. dock Identify payload carries eventSubscriptions: 394249', async ({ context }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await expect.poll(() => mock.lastIdentify !== null).toBe(true);
+      expect(mock.lastIdentify?.eventSubscriptions).toBe(394249);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.3 (AC 14) — the live-safety confirm's one structural bypass (PRD
+  // ruling): installHotkeyBridge dispatches straight through main.ts's own
+  // dispatch closure, never through live.ts, so there is no modal in the
+  // bridge's path to intercept a showHide with AT ALL — but the bypass still
+  // has to leave an audit trail rather than silently doing something the
+  // operator can't see coming.
+  test('17. bridge showHide bypasses the live-safety confirm entirely while armed, and logs bridge-show-while-live', async ({
+    context,
+  }) => {
+    const overlayInputName = 'Live Counter Overlay';
+    const mock = await startMockObs({
+      inputs: [{ inputName: overlayInputName, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port, livePollMs: 200 });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 });
+
+      // Overlay starts visible (createSession's default) — hide it first
+      // (unguarded either way) so the bridge's next showHide is a genuine
+      // Show, then arm live-safety via the real ws source.
+      await dock.getByTestId('btn-show-hide').click();
+      await expect(dock.getByTestId('btn-show-hide')).toHaveText('Show');
+      await expect(overlay.getByTestId('overlay-number')).toHaveCount(0); // render-blank while hidden
+
+      mock.setSourceActive(overlayInputName, { active: true });
+      await expect(dock.getByTestId('status-chip')).toHaveText('HIDDEN', { timeout: 3000 });
+      await expect(dock.getByTestId('status-chip')).toHaveAttribute(
+        'data-detail',
+        'Source is live in Program — Show would be visible immediately',
+      );
+
+      // Simulates counter-hotkeys.lua's send('showHide') — installHotkeyBridge
+      // decodes it and dispatches showOverlay DIRECTLY (see
+      // src/dock/hotkey-bridge.ts), bypassing live.ts's guard structurally.
+      injectBridgePayload(mock, 'showHide', 'bridge-show-while-live-1');
+
+      await expect(dock.getByTestId('btn-show-hide')).toHaveText('Hide', { timeout: 3000 }); // the bridge's Show actually ran
+      await expect(dock.getByTestId('live-safety-confirm')).toHaveCount(0); // never opened
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('0', { timeout: 3000 }); // and the overlay really is showing again
+
+      await dock.getByTestId('tab-diagnostics').click();
+      await expect(dock.getByTestId('diag-log')).toContainText('bridge-show-while-live', { timeout: 5000 });
+    } finally {
+      await mock.close();
     }
   });
 });

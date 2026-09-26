@@ -225,6 +225,19 @@
         letter-spacing: 0.03em;
         margin-bottom: 0.75rem;
       }
+      /* On air: the only solid, saturated pill, so it can't be mistaken for
+         HIDDEN's dark red one. White on #c8370a is 5.2:1. */
+      .status-chip[data-state='live'] {
+        background: #c8370a;
+        color: #ffffff;
+        border: 1px solid #ff7a45;
+      }
+      /* In Preview or a projector only, not in Program. */
+      .status-chip[data-state='showing-preview'] {
+        background: #3a2e08;
+        color: #ffd166;
+        border: 1px solid #7a5f10;
+      }
       .status-chip[data-state='showing'] {
         background: #123a1f;
         color: #7be495;
@@ -732,10 +745,10 @@
       .diag-row[data-state='fail'] .diag-row-text {
         color: #ff9a9a;
       }
-      /* Deliberately distinct from 'ok' green — a placeholder that hasn't
-         actually been verified (e.g. diag-row-hotkeys) must never read as
-         a success state. Matches .status-chip[data-state='unknown']'s own
-         neutral gray. */
+      /* Deliberately distinct from 'ok' green — a row with nothing verified
+         yet (e.g. diag-row-hotkeys before any bridge payload has ever
+         arrived this boot) must never read as a success state. Matches
+         .status-chip[data-state='unknown']'s own neutral gray. */
       .diag-row[data-state='neutral'] {
         border-color: #444;
       }

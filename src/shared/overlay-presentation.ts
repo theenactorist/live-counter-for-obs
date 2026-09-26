@@ -159,13 +159,54 @@ function applyLayoutStyle(nodes: PresentationNodes, layout: OverlayLayout): void
   behindWrapEl.style.display = behind ? 'block' : 'none';
 }
 
+// 2026-09-25 review, OVERLAY-1: the bundled Oswald files have no tabular
+// figures, so `tabular-nums` (applyPresentation, below) does nothing for
+// them. Oswald's "1" is much narrower than its "0", so the label beside the
+// number would move on every tick. For Oswald only, each digit gets its own
+// inline-block box 1ch wide: `ch` is the width of "0", Oswald's widest
+// digit. Inter keeps plain text, since its tabular digits already share one
+// width and that width is narrower than 1ch.
+function isOswald(fontFamily: string): boolean {
+  return fontFamily.trim().toLowerCase() === 'oswald';
+}
+
+function paintNumberText(numberEl: HTMLElement, valueText: string, fixedWidthDigits: boolean): void {
+  if (!fixedWidthDigits) {
+    numberEl.textContent = valueText;
+    return;
+  }
+  // Already showing this value in digit boxes (the 2 s heartbeat repaints
+  // an unchanged value): leave the nodes alone.
+  if (numberEl.firstElementChild !== null && numberEl.textContent === valueText) return;
+  const cells = document.createDocumentFragment();
+  for (const char of valueText) {
+    if (char >= '0' && char <= '9') {
+      const cell = document.createElement('span');
+      cell.style.display = 'inline-block';
+      cell.style.width = '1ch';
+      cell.style.textAlign = 'center';
+      cell.textContent = char;
+      cells.appendChild(cell);
+    } else {
+      cells.appendChild(document.createTextNode(char));
+    }
+  }
+  numberEl.replaceChildren(cells);
+}
+
 // The six layouts' CONTENT differences. numberEl always shows the formatted
 // value regardless of layout; the label text's source and destination node
 // vary — see src/shared/template-content.ts's own doc comment for the full
 // substitution contract this delegates to.
-function applyLayoutContent(nodes: PresentationNodes, layout: OverlayLayout, template: string | null, valueText: string): void {
+function applyLayoutContent(
+  nodes: PresentationNodes,
+  layout: OverlayLayout,
+  template: string | null,
+  valueText: string,
+  fixedWidthDigits: boolean,
+): void {
   const { beforeEl, numberEl, afterEl, behindEl } = nodes;
-  numberEl.textContent = valueText;
+  paintNumberText(numberEl, valueText, fixedWidthDigits);
   switch (layout) {
     case 'numberOnly':
       beforeEl.textContent = '';
@@ -229,7 +270,9 @@ export function applyPresentation(nodes: PresentationNodes, input: ApplyPresenta
   numberEl.style.color = s.numberColor;
   // The one PRD-locked "always on" detail (AC 9's tabular-nums check) — keeps
   // digit width constant across a fast-ticking automatic count so
-  // surrounding template text never jitters horizontally.
+  // surrounding template text never jitters horizontally. Oswald has no
+  // tabular figures, so it gets fixed-width digit boxes instead
+  // (paintNumberText, above).
   numberEl.style.fontVariantNumeric = 'tabular-nums';
   numberEl.style.webkitTextStroke = s.outline ? `${s.outline.widthPx}px ${s.outline.color}` : '';
   numberEl.style.textShadow = s.shadow ? `${s.shadow.offsetX}px ${s.shadow.offsetY}px ${s.shadow.blurPx}px ${s.shadow.color}` : '';
@@ -248,7 +291,7 @@ export function applyPresentation(nodes: PresentationNodes, input: ApplyPresenta
   behindEl.style.opacity = '0.18';
 
   applyLayoutStyle(nodes, s.layout);
-  applyLayoutContent(nodes, s.layout, input.template, input.value);
+  applyLayoutContent(nodes, s.layout, input.template, input.value, isOswald(s.fontFamily));
 }
 
 /**

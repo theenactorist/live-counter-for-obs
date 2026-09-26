@@ -304,6 +304,124 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
+  // Gate fix wave (I-1) — `SessionController.startSession()` replaces
+  // `this.session` directly, whether or not a session was already active; it
+  // never passes through `null`. The OLD once-per-session safety-ack reset
+  // only fired on a null -> non-null transition, so an ack from a PRIOR
+  // session silently carried into the NEXT one whenever Presets' Restart (or
+  // Setup's always-replaces "Start session") replaced an ALREADY-active
+  // session without ending it first — this test drives that exact real path.
+  // Fixed by resetting on the session's IDENTITY changing
+  // (`ControllerState.sessionEpoch`, bumped only inside `startSession()`),
+  // not merely on null -> non-null (see controller.ts/views/live.ts).
+  test('safety ack does not survive a Presets Start-Restart over an active session (gate fix I-1)', async ({ page }) => {
+    // studioModeEnabled defaults false and no browser_source input is seeded
+    // — merged `active` stays null for the whole test, so the guard arms via
+    // the Studio-Mode-off secondary branch (same technique as live.spec.ts's
+    // "studio-mode-off secondary case" test) with no ws-activity setup
+    // needed.
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Restart Target' });
+      await page.getByTestId('setup-save').click();
+
+      // Session A.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('50');
+      await page.getByTestId('setup-start-session').click();
+
+      await expect.poll(() => mock.requestLog.filter((t) => t === 'GetStudioModeEnabled').length).toBeGreaterThanOrEqual(1);
+      await page.waitForTimeout(100);
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await showHide.click(); // Hide (unguarded)
+      await showHide.click(); // Show — armed: acknowledge for session A
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+
+      // Acknowledged within session A: no confirm on a second guarded action.
+      await showHide.click(); // Hide
+      await showHide.click(); // Show
+      await expect(confirm).toHaveCount(0);
+
+      // Restart OVER the still-active session A via Presets, WITHOUT ending
+      // it first — the exact real path the finding names.
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('preset-start').click();
+      await expect(page.getByTestId('preset-replace-confirm')).toBeVisible();
+      await page.getByTestId('preset-restart').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      // Session B's first guarded action must confirm again — the ack from
+      // session A must not have carried over.
+      await expect(showHide).toHaveText('Hide'); // fresh session default (overlayVisible true)
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — must re-arm
+      await expect(confirm).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Gate fix wave (I-1) — the other half of the same fix: "Update session"
+  // (reconfigure) continues the SAME session on purpose and must NOT re-arm
+  // the ack, while Setup's own "Start session" (Replace, over an active
+  // session) genuinely starts a new one and MUST re-arm it, even with no End
+  // in between.
+  test('Update session (reconfigure) keeps the safety ack; Setup Start session over an active session re-arms it (gate fix I-1)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('50');
+      await page.getByTestId('setup-start-session').click();
+
+      await expect.poll(() => mock.requestLog.filter((t) => t === 'GetStudioModeEnabled').length).toBeGreaterThanOrEqual(1);
+      await page.waitForTimeout(100);
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — armed
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+
+      // Update session (reconfigure) on the SAME session — must NOT re-arm.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-finish').fill('60');
+      await page.getByTestId('setup-update-session').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — still acknowledged, no confirm
+      await expect(confirm).toHaveCount(0);
+
+      // Setup "Start session" over this still-active session (confirmed with
+      // Replace) is a genuinely new session, so it must re-arm.
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('0');
+      await page.getByTestId('setup-finish').fill('20');
+      await page.getByTestId('setup-start-session').click();
+      await page.getByTestId('setup-start-replace').click();
+      await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — must re-arm
+      await expect(confirm).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('preset-keep-value with an out-of-range current value clamps into the new range and shows a warning', async ({
     page,
   }) => {
@@ -1062,6 +1180,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
 
       // Import the SAME export back in without wiping storage first — the
@@ -1093,6 +1212,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
 
       // First reimport collides with the original "Collide" -> "(imported)".
@@ -1164,6 +1284,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
       const originalEnvelope = JSON.parse(clip) as { presets: Array<{ id: string }> };
       const originalId = originalEnvelope.presets[0]!.id;
@@ -1605,7 +1726,33 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('import-paste').click();
 
       await expect(page.getByTestId('import-paste-error')).toBeVisible();
-      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
+      await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Checklist B2: readText() never settles inside OBS's dock (CEF 127).
+  test('import-paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the textarea is untouched', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => new Promise<string>(() => {});
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+
+      await page.getByTestId('import-textarea').fill('unchanged');
+      await page.getByTestId('import-paste').click();
+
+      await expect(page.getByTestId('import-paste-error')).toBeVisible({ timeout: 3000 });
+      await expect(page.getByTestId('import-paste-error')).toHaveText(
+        'Paste is blocked inside OBS on this computer. Type it instead.',
+      );
       await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -1628,7 +1775,7 @@ test.describe('dock Setup + Presets views', () => {
       await page.getByTestId('import-paste').click();
 
       await expect(page.getByTestId('import-paste-error')).toBeVisible();
-      await expect(page.getByTestId('import-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('import-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
       await expect(page.getByTestId('import-textarea')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -2211,6 +2358,76 @@ test.describe('dock Setup + Presets views', () => {
     } finally {
       await mock.close();
     }
+  });
+
+  // 2026-09-25 review, OVERLAY-2: the preview shrinks anything to fit the
+  // dock, but the overlay cuts off whatever falls outside the OBS canvas.
+  // When the counter at full size is wider or taller than the canvas, Setup
+  // says so in one line. The preview is never framed or shrunk further.
+  test.describe('preview overflow note (OVERLAY-2)', () => {
+    const NOTE = 'Wider or taller than your canvas: it will be cut off on air';
+
+    test('shows when the counter is wider or taller than a 1920x1080 canvas, and clears when it fits', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        const note = page.getByTestId('setup-preview-overflow');
+        await expect(page.getByTestId('setup-preview-number')).toHaveText('5');
+        await expect(note).toBeHidden();
+
+        // Wider: a long background label at the largest number size.
+        await page.getByTestId('setup-layout-textBehind').click();
+        await page.getByTestId('setup-template').fill('HALLELUJAH');
+        await page.getByTestId('setup-number-size').fill('512');
+        await expect(note).toBeVisible();
+        await expect(note).toHaveText(NOTE);
+        await expect(page.getByTestId('setup-preview-label')).toBeVisible();
+
+        // About 1450 px wide at the default 96 px: inside the canvas.
+        await page.getByTestId('setup-number-size').fill('96');
+        await expect(note).toBeHidden();
+
+        // Taller: a short stacked label, both sizes at the maximum.
+        await page.getByTestId('setup-layout-textAbove').click();
+        await page.getByTestId('setup-template').fill('Hi');
+        await page.getByTestId('setup-number-size').fill('512');
+        await page.getByTestId('setup-text-size').fill('512');
+        await expect(note).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('uses the canvas size OBS reports', async ({ page }) => {
+      const mock = await startMockObs({ videoSettings: { baseWidth: 1280, baseHeight: 720 } });
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        await page.getByTestId('setup-layout-textBehind').click();
+        await page.getByTestId('setup-template').fill('HALLELUJAH');
+        // Fits 1920 at 96 px (test above), but not this 1280 px canvas.
+        await expect(page.getByTestId('setup-preview-overflow')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('falls back to 1920x1080 with no OBS connection', async ({ page }) => {
+      // Nothing listens on this port, so no canvas size is ever read.
+      await openDock(page, { port: 39218, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('5');
+      await page.getByTestId('setup-layout-textBehind').click();
+      await page.getByTestId('setup-template').fill('HALLELUJAH');
+      const note = page.getByTestId('setup-preview-overflow');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('HALLELUJAH');
+      await expect(note).toBeHidden();
+      await page.getByTestId('setup-number-size').fill('512');
+      await expect(note).toBeVisible();
+    });
   });
 
   test('preview liveness: typing in the label field updates the WYSIWYG preview on every keystroke, with no state broadcast', async ({
@@ -3228,7 +3445,10 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
-    test('Start session from Setup still replaces an active session immediately, with no confirmation prompt (existing behaviour intact)', async ({
+    // 2026-09-25 review, item 2. Start session over a running session throws
+    // the current count away (the new session's undo history starts empty),
+    // so Setup now asks first and points at Update session, which keeps it.
+    test('Start session from Setup over an active session asks first; Replace starts the new session at its start value', async ({
       page,
     }) => {
       const mock = await startMockObs();
@@ -3250,10 +3470,70 @@ test.describe('dock Setup + Presets views', () => {
         await page.getByTestId('setup-finish').fill('20');
         await page.getByTestId('setup-start-session').click();
 
-        // No confirmation dialog anywhere — replaces immediately at the new
-        // start value, exactly as before this task.
+        const confirm = page.getByTestId('setup-start-confirm');
+        await expect(confirm).toBeVisible();
+        await expect(confirm).toContainText('Replace the running session? Its current count will be lost.');
+        // No number in the question: Setup does not repaint on automatic
+        // ticks, so a quoted count would go stale while the box is open.
+        await expect(confirm).not.toContainText(/\d/);
+        await expect(confirm).toContainText('Update session');
+        await expect(page.getByTestId('setup-start-cancel')).toBeFocused();
+        // Nothing has been replaced while the question is on screen.
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await page.getByTestId('setup-start-replace').click();
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
         await expect(page.getByTestId('current-value')).toHaveText('5');
+        await expect(page.getByTestId('progress-line')).toContainText('of 20');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cancel on the Setup start confirm leaves the running session and its count untouched', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click();
+        await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        await page.getByTestId('setup-finish').fill('20');
+        await page.getByTestId('setup-start-session').click();
+
+        const confirm = page.getByTestId('setup-start-confirm');
+        await expect(confirm).toBeVisible();
+
+        // Leaving the tab drops the question; it does not linger for later.
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('tab-setup').click();
+        await expect(confirm).toHaveCount(0);
+
+        await page.getByTestId('setup-start-session').click();
+        await expect(confirm).toBeVisible();
+        await page.getByTestId('setup-start-cancel').click();
+        await expect(confirm).toHaveCount(0);
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-live').click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+        await expect(page.getByTestId('progress-line')).toContainText('of 50');
+        // Same session, so its undo history is still there.
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { startValue: number; currentValue: number },
+        );
+        expect(stored.startValue).toBe(0);
+        expect(stored.currentValue).toBe(2);
       } finally {
         await mock.close();
       }
@@ -4008,6 +4288,7 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('setup-mode-mismatch-note')).toBeVisible();
 
         await page.getByTestId('setup-start-session').click();
+        await page.getByTestId('setup-start-replace').click();
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
 
         // The brand-new session is AUTOMATIC — what the visible control said
@@ -4253,7 +4534,7 @@ test.describe('dock Setup + Presets views', () => {
         // The ACCURATE message ("can't paste that here"), never the generic
         // clipboard-denial one — this was never a clipboard-read failure.
         await expect(page.getByTestId('clipboard-key-hint')).toContainText("Can't paste that into a number field");
-        await expect(page.getByTestId('clipboard-key-hint')).not.toContainText('Clipboard blocked');
+        await expect(page.getByTestId('clipboard-key-hint')).not.toContainText('Paste is blocked');
       } finally {
         await mock.close();
       }
@@ -4333,8 +4614,36 @@ test.describe('dock Setup + Presets views', () => {
         await page.keyboard.press(`${MOD}+v`);
 
         await expect(page.getByTestId('clipboard-key-hint')).toBeVisible();
-        await expect(page.getByTestId('clipboard-key-hint')).toContainText('Clipboard blocked — type it in manually');
+        await expect(page.getByTestId('clipboard-key-hint')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
         await expect(label).toHaveValue('');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // Checklist B2: inside OBS's dock (CEF 127) readText() never settles, so
+    // Cmd/Ctrl+V used to do nothing, silently.
+    test('Cmd/Ctrl+V stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await page.addInitScript(() => {
+          navigator.clipboard.readText = () => new Promise<string>(() => {});
+        });
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+
+        const label = page.getByTestId('setup-template');
+        await label.fill('unchanged');
+        await label.click();
+        await page.keyboard.press(`${MOD}+v`);
+
+        await expect(page.getByTestId('clipboard-key-hint')).toBeVisible({ timeout: 3000 });
+        await expect(page.getByTestId('clipboard-key-hint')).toHaveText(
+          'Paste is blocked inside OBS on this computer. Type it instead.',
+        );
+        await expect(label).toHaveValue('unchanged');
       } finally {
         await mock.close();
       }
@@ -4454,6 +4763,320 @@ test.describe('dock Setup + Presets views', () => {
 
         await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
         await expect(page.getByTestId('setup-save-confirm')).toContainText("Preset 'Editable Confirm' updated");
+      } finally {
+        await mock.close();
+      }
+    });
+  });
+
+  // --- Task 3.0: carry-forward fix wave (parked Phase 3 rulings) ----------
+  test.describe('Task 3.0: carry-forward fix wave', () => {
+    /** Starts a session via the devhook test seam, bypassing Setup's own form. */
+    async function startSessionViaHook(
+      page: Page,
+      cfg: { startValue: number; finishValue: number; mode: Mode; intervalSeconds?: number },
+    ): Promise<void> {
+      await page.waitForFunction(() => Boolean((window as unknown as { __lc?: unknown }).__lc));
+      await page.evaluate((c) => {
+        (window as unknown as { __lc: { startSession: (cfg: unknown) => void } }).__lc.startSession(c);
+      }, cfg);
+    }
+
+    async function liveStyle(page: Page): Promise<Record<string, unknown> | null> {
+      return page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __lc: { controller: { getState(): { presentation: { style: Record<string, unknown> } | null } } };
+            }
+          ).__lc.controller.getState().presentation?.style ?? null,
+      );
+    }
+
+    /** A style carrying non-default values in every one of the seven fields this form has never modelled. */
+    function fancyStyle(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        fontFamily: 'Inter',
+        fontWeight: 400,
+        numberSizePx: 96,
+        textSizePx: 24,
+        numberColor: '#ffffff',
+        textColor: '#cccccc',
+        alignH: 'left',
+        alignV: 'top',
+        outline: { color: '#112233', widthPx: 3 },
+        shadow: { color: '#000000', blurPx: 4, offsetX: 1, offsetY: 2 },
+        background: { color: '#00ff00', opacity: 0.5 },
+        paddingPx: 20,
+        layout: 'textBefore',
+        ...overrides,
+      };
+    }
+
+    function fancyPreset(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      return {
+        schemaVersion: 2,
+        id: 'fancy-preset-1',
+        title: 'Fancy Import',
+        description: null,
+        startValue: 0,
+        finishValue: 50,
+        mode: 'manual',
+        intervalSeconds: 1,
+        template: 'Score: {count}',
+        style: fancyStyle(),
+        animation: { type: 'none', target: 'number', durationMs: 300 },
+        completion: { kind: 'hold' },
+        createdAt: '2026-07-01T09:00:00.000Z',
+        updatedAt: '2026-07-01T09:30:00.000Z',
+        ...overrides,
+      };
+    }
+
+    function envelope(presets: Array<Record<string, unknown>>): string {
+      return JSON.stringify({
+        app: 'live-counter',
+        kind: 'preset-export',
+        v: 1,
+        exportedAt: new Date().toISOString(),
+        presets,
+      });
+    }
+
+    async function importPreset(page: Page, preset: Record<string, unknown>): Promise<void> {
+      await page.getByTestId('tab-presets').click();
+      await page.getByTestId('presets-import').click();
+      await page.getByTestId('import-textarea').fill(envelope([preset]));
+      await page.getByTestId('import-apply').click();
+      await expect(page.getByTestId('import-confirm')).toContainText('1 presets imported');
+    }
+
+    // --- Item 1/2: imported-preset style spread (parked ruling) -----------
+
+    test('imported-preset style spread: Save retains outline/shadow/background/fontWeight/align/padding — the seven fields this form never modelled', async ({
+      page,
+      context,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+        await openDock(page, { port: mock.port, devhook: false });
+        await importPreset(page, fancyPreset());
+
+        await page.getByTestId('preset-row').filter({ hasText: 'Fancy Import' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await page.getByTestId('setup-save').click();
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+
+        await page.getByTestId('tab-presets').click();
+        await page.getByTestId('presets-export').click();
+        await expect(page.getByTestId('export-confirm')).toBeVisible();
+        const clip = await page.evaluate(() => navigator.clipboard.readText());
+        const exported = JSON.parse(clip) as { presets: Array<{ style: Record<string, unknown> }> };
+        const style = exported.presets[0]!.style;
+        expect(style.outline).toEqual({ color: '#112233', widthPx: 3 });
+        expect(style.shadow).toEqual({ color: '#000000', blurPx: 4, offsetX: 1, offsetY: 2 });
+        expect(style.background).toEqual({ color: '#00ff00', opacity: 0.5 });
+        expect(style.fontWeight).toBe(400);
+        expect(style.alignH).toBe('left');
+        expect(style.alignV).toBe('top');
+        expect(style.paddingPx).toBe(20);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('imported-preset style spread: loading the SAME preset over a running session, then Update, keeps outline while the edited size applies', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port }); // devhook default true — needed for the presentation assertion below
+        await importPreset(page, fancyPreset());
+
+        const row = page.getByTestId('preset-row').filter({ hasText: 'Fancy Import' });
+        // Starts DIRECTLY from the preset (bypassing Setup) — outline/shadow
+        // are genuinely live now, from a path this task never touched.
+        await row.getByTestId('preset-start').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        expect((await liveStyle(page))?.outline).toEqual({ color: '#112233', widthPx: 3 });
+
+        // Load the SAME preset back into Setup WHILE the session is running,
+        // then edit a form-modelled field.
+        await page.getByTestId('tab-presets').click();
+        await row.getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await page.getByTestId('setup-number-size').fill('222');
+
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        const style = await liveStyle(page);
+        expect(style?.outline).toEqual({ color: '#112233', widthPx: 3 }); // survived
+        expect(style?.shadow).toEqual({ color: '#000000', blurPx: 4, offsetX: 1, offsetY: 2 }); // survived
+        expect(style?.numberSizePx).toBe(222); // the edit applied
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('out-of-bounds imported size (9999) clamps into bounds, keeps Update enabled, and applies the clamped value', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        // The clamped value is still MAX_SIZE_PX (512) — a real preview at
+        // that size is tall enough that the sticky preview section can cover
+        // the actions row below at the default viewport height; a taller
+        // viewport keeps this test about the clamp, not about scrolling.
+        await page.setViewportSize({ width: 1280, height: 1600 });
+        await openDock(page, { port: mock.port }); // devhook default true
+        await startSessionViaHook(page, { startValue: 0, finishValue: 50, mode: 'manual' });
+        await importPreset(page, fancyPreset({ style: fancyStyle({ numberSizePx: 9999 }) }));
+
+        await page.getByTestId('preset-row').filter({ hasText: 'Fancy Import' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        // The field shows the CLAMP, not the imported 9999 — never a
+        // disabled Update with no visible reason.
+        await expect(page.getByTestId('setup-number-size')).toHaveValue('512');
+        await expect(page.getByTestId('setup-number-size-error')).toHaveCount(0);
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+        expect((await liveStyle(page))?.numberSizePx).toBe(512);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Item 3: glyph-coverage warning (AC 31) ---------------------------
+
+    test('glyph warning: a label containing → names it, and never blocks Save', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'Glyph Test', template: 'Next →' });
+
+        const warning = page.getByTestId('setup-glyph-warning');
+        await expect(warning).toBeVisible();
+        await expect(warning).toContainText('may not display:');
+        await expect(warning).toContainText('→');
+
+        await expect(page.getByTestId('setup-save')).toBeEnabled();
+        await page.getByTestId('setup-save').click();
+        await expect(page.getByTestId('setup-save-confirm')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('glyph warning: "HALLELUJAH × 23" (U+00D7, latin-1 — covered) does not warn', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await fillCoreSetupFields(page, { start: 0, finish: 10, title: 'No Warning', template: 'HALLELUJAH × 23' });
+
+        await expect(page.getByTestId('setup-glyph-warning')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    // --- Item 8: two Live/Setup paper cuts ---------------------------------
+
+    test('F3 follow-up: ending the session drops the stale "(current)" option instead of describing a session that no longer exists', async ({
+      page,
+    }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.evaluate(() => {
+          const now = new Date().toISOString();
+          window.localStorage.setItem(
+            'lc.session.v1',
+            JSON.stringify({
+              schemaVersion: 1,
+              revision: 0,
+              presetId: null,
+              startValue: 0,
+              finishValue: 1000,
+              currentValue: 0,
+              direction: 'up',
+              mode: 'automatic',
+              status: 'paused',
+              intervalSeconds: 1.3, // off-menu, and legitimate (engine rule 5)
+              overlayVisible: true,
+              hiddenByCompletion: false,
+              undoStack: [],
+              completion: { kind: 'hold' },
+              updatedAt: now,
+            }),
+          );
+        });
+        await openDock(page, { port: mock.port, devhook: false }); // reload: recovers it
+
+        await page.getByTestId('tab-setup').click();
+        await expect(page.getByTestId('setup-interval-current')).toHaveText('1.3s (current)');
+
+        // Durably sets `ui.mode = 'automatic'` (the Mode select is disabled
+        // while this session is active — loadPreset() is the only OTHER
+        // writer): a preset whose OWN interval also happens to be the
+        // session's exact 1.3s, the one value `reconfigure` accepts
+        // unchanged off-menu (engine rule 5), so Update below applies
+        // cleanly and clears the dirty marker without touching the live
+        // tick rate at all — proving the row stays up (mode stays
+        // 'automatic') for the REAL reason this fix matters, not because it
+        // happens to hide behind an unrelated dirty flag.
+        await importPreset(page, fancyPreset({ mode: 'automatic', intervalSeconds: 1.3, startValue: 0, finishValue: 1000 }));
+        await page.getByTestId('preset-row').filter({ hasText: 'Fancy Import' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+        await expect(page.getByTestId('setup-update-session')).toBeEnabled();
+        await page.getByTestId('setup-update-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        await page.getByTestId('btn-end').click();
+        await page.getByTestId('end-hide').click();
+
+        await page.getByTestId('tab-setup').click();
+        // The Interval row is still up (ui.mode is still 'automatic') — only
+        // the disabled "(current)" option describing the now-gone session
+        // is what should disappear.
+        await expect(page.getByTestId('setup-interval')).toBeVisible();
+        await expect(page.getByTestId('setup-interval-current')).toHaveCount(0);
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('off-menu-interval Start shows a friendly inline message instead of the raw engine error', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        // canStart() never checks SPEED_LEVELS membership (only the range/
+        // completion/style fields it always has); a preset's own interval,
+        // unlike a Session's, is never restricted to SPEED_LEVELS either
+        // (isPositiveFiniteNumber only) — so importing one is the only way
+        // to reach Start with an off-menu value at all.
+        await importPreset(page, fancyPreset({ mode: 'automatic', intervalSeconds: 1.3, title: 'Off Menu Start' }));
+        await page.getByTestId('preset-row').filter({ hasText: 'Off Menu Start' }).getByTestId('preset-load').click();
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await expect(page.getByTestId('setup-start-session')).toBeEnabled();
+        await page.getByTestId('setup-start-session').click();
+
+        const error = page.getByTestId('setup-error');
+        await expect(error).toBeVisible();
+        await expect(error).toHaveText('Interval must be one of the listed speeds');
+        await expect(error).not.toContainText('createSession');
+        await expect(error).not.toContainText('Error:');
+
+        // Never actually started.
+        await page.getByTestId('tab-live').click();
+        await expect(page.getByTestId('live-empty')).toBeVisible();
       } finally {
         await mock.close();
       }

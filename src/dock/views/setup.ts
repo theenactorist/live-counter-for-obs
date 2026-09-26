@@ -37,10 +37,12 @@
 // number-only after a recovery.
 //
 // Mid-session guard scope: PRD §8.7's Restart-vs-Keep prompt is implemented
-// only for Presets view's `preset-start` (per the Task 2.6 brief) — this
-// view's `setup-start-session` always immediately replaces any active
-// session, same as `SessionController.startSession()`'s own documented
-// behavior (it unconditionally creates a fresh session).
+// only for Presets view's `preset-start` (per the Task 2.6 brief). This
+// view's `setup-start-session` asks first when a session is active
+// (`setup-start-confirm`, 2026-09-25 review item 2): Replace starts a fresh
+// session, the same as `SessionController.startSession()` always does, and
+// Cancel leaves the running one alone. The prompt points at Update session,
+// which keeps the count.
 //
 // Escaping discipline: template (label) text and titles are operator
 // content — every dynamic string this view renders goes through
@@ -53,6 +55,8 @@ import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 import { createPresentationNodes, applyPresentation, animationTargets, type PresentationNodes } from '../../shared/overlay-presentation.js';
+import { unsupportedGlyphs } from '../../shared/glyphs.js';
+import { el, button, captureFocus, restoreFocus } from './dom.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -128,6 +132,14 @@ const DEFAULT_NUMBER_SIZE_PX = 96;
 // (whose textSizePx is already 24) round-trips with no visible change.
 const DEFAULT_TEXT_SIZE_PX = 24;
 
+// 2026-09-25 review, OVERLAY-2: the preview shrinks anything to fit the
+// dock, but the overlay cuts off whatever falls outside the OBS canvas. When
+// the preview's full-size box is bigger than the canvas, one line says so.
+// The canvas size comes from Diagnostics' overlay scan when OBS is
+// connected, otherwise 1920x1080.
+const FALLBACK_CANVAS = { width: 1920, height: 1080 } as const;
+const PREVIEW_OVERFLOW_TEXT = 'Wider or taller than your canvas: it will be cut off on air';
+
 // Which variant of the `setup-conflict` box to render, or null for none.
 //  - 'stale':   the stored preset changed since editing began (Task 2.6's
 //               original stale-edit guard).
@@ -156,6 +168,10 @@ export interface MountSetupViewOptions {
   controller: SessionController;
   storage: DockStorage;
   onSessionStarted: () => void;
+  /** OVERLAY-2: the OBS canvas size, or null when it has not been read. */
+  canvasSize?: () => { width: number; height: number } | null;
+  /** OVERLAY-2: fires when `canvasSize()` may have changed; returns an unsubscribe. */
+  onCanvasSizeChange?: (fn: () => void) => () => void;
 }
 
 interface EditingState {
@@ -166,6 +182,28 @@ interface EditingState {
   // brief's "stale-edit guard").
   editingSince: string;
 }
+
+// The form fields tracked in `SetupUiState.dirtyFields`. Each name is the
+// `SetupUiState` property that field's control writes. 'mode' is left out on
+// purpose: Setup never applies a mode change to a running session (see
+// `loadPreset()`).
+type SetupField =
+  | 'title'
+  | 'startValue'
+  | 'finishValue'
+  | 'intervalSeconds'
+  | 'template'
+  | 'layout'
+  | 'numberSizePx'
+  | 'numberColor'
+  | 'textSizePx'
+  | 'textColor'
+  | 'fontFamily'
+  | 'animType'
+  | 'animTarget'
+  | 'animDurationMs'
+  | 'completionKind'
+  | 'completionSeconds';
 
 interface SetupUiState {
   title: string;
@@ -213,10 +251,15 @@ interface SetupUiState {
   // this tab (see refresh()) — never persisted, page-session only, same as
   // every other transient confirm/hint in this codebase.
   saveConfirmText: string | null;
+  // 2026-09-25 review, item 2: true while `setup-start-confirm` ("Replace
+  // the running session?") is open. Set only by a Start click while a
+  // session is active; cleared by Replace, Cancel, or leaving the tab (see
+  // refresh()). Page-session only, like every other confirm here.
+  startConfirmOpen: boolean;
   // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
   // tracking, replacing fix wave 1's single whole-form boolean. Each control
   // adds its own canonical field name (matching the `SetupUiState` property
-  // it writes — 'startValue', 'mode', 'intervalSeconds', etc.) when the
+  // it writes; see `SetupField` for the full list) when the
   // operator changes it. `refresh()` (tab-activation) re-prefills every field
   // NOT in this set from the live session and leaves fields that ARE in it
   // untouched — so an unrelated edit elsewhere in the form no longer freezes
@@ -240,67 +283,22 @@ interface SetupUiState {
   // number of tab round-trips until the operator explicitly commits or
   // discards them — clearing markers there would silently revert an edit on
   // the SECOND round-trip even though nothing was ever applied.
-  dirtyFields: Set<string>;
-}
-
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string, opts: { disabled?: boolean } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: 'ctl' }, text);
-  b.disabled = opts.disabled ?? false;
-  return b;
-}
-
-function captureFocus(container: HTMLElement): FocusSnapshot | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-  const testid = active.getAttribute('data-testid');
-  if (!testid) return null;
-  let selectionStart: number | null = null;
-  let selectionEnd: number | null = null;
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    selectionStart = active.selectionStart;
-    selectionEnd = active.selectionEnd;
-  }
-  return { testid, selectionStart, selectionEnd };
-}
-
-function restoreFocus(container: HTMLElement, snapshot: FocusSnapshot | null): void {
-  if (!snapshot) return;
-  const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-  if (!target) return;
-  target.focus();
-  if (
-    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-    snapshot.selectionStart !== null &&
-    snapshot.selectionEnd !== null
-  ) {
-    try {
-      target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-    } catch {
-      // Not every input type supports selection ranges (e.g. type=number in
-      // some browsers) — restoring focus alone is still strictly better than
-      // nothing.
-    }
-  }
+  dirtyFields: Set<SetupField>;
+  // Task 3.0 (carry-forward fix wave, parked ruling) — the FULL `StyleConfig`
+  // of the most recently loaded preset, set only by `loadPreset()`. This form
+  // has never modelled seven of `StyleConfig`'s thirteen fields (fontWeight/
+  // alignH/alignV/outline/shadow/background/paddingPx — no control exists for
+  // any of them), so `buildStyle()` used to always rebuild those seven from
+  // hardcoded defaults, flattening an IMPORTED preset's outline/shadow/etc.
+  // on every Save (and, transitively, Start — both call buildStyle()). This
+  // is the base `buildStyle()` spreads before overriding only the fields the
+  // form actually models — `null` (never loaded anything this page session)
+  // falls back to the exact same hardcoded defaults as before, so a
+  // never-imported/blank form's Save/Start behavior is unchanged. Update's
+  // OWN base is different (and needed no new field here): a running
+  // session's live `presentation.style`, already threaded into
+  // `resolvePresentation` as its `presentation` parameter.
+  baseStyle: StyleConfig | null;
 }
 
 function parseIntStrict(raw: string): number | null {
@@ -337,7 +335,9 @@ function defaultUiState(): SetupUiState {
     error: null,
     titleError: false,
     saveConfirmText: null,
+    startConfirmOpen: false,
     dirtyFields: new Set(),
+    baseStyle: null,
   };
 }
 
@@ -434,6 +434,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   //    exactly big enough for everything inside it.
   let previewScaleBox: HTMLElement | null = null;
   let previewScaleInner: HTMLElement | null = null;
+  // OVERLAY-2 note, also rebuilt by `renderPreviewBlock()` on every render.
+  let previewOverflowNote: HTMLElement | null = null;
+
+  function canvasSize(): { width: number; height: number } {
+    const size = opts.canvasSize?.() ?? null;
+    if (size === null) return FALLBACK_CANVAS;
+    const valid = (n: number): boolean => Number.isFinite(n) && n > 0;
+    return valid(size.width) && valid(size.height) ? size : FALLBACK_CANVAS;
+  }
 
   // Scales `previewScaleInner` down (uniformly, preserving aspect ratio) just
   // enough that the preview's TRUE, unwrapped width fits the footprint box's
@@ -493,6 +502,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     const unionWidth = right - left;
     const unionHeight = bottom - top;
+
+    // OVERLAY-2: the union is measured before any scaling, so it is the size
+    // the overlay draws at. A hidden pane measures 0 and shows no note.
+    if (previewOverflowNote) {
+      const canvas = canvasSize();
+      previewOverflowNote.hidden = !(unionWidth > canvas.width || unionHeight > canvas.height);
+    }
     // How far the union extends ABOVE/LEFT of contentRoot's own origin —
     // i.e. exactly how far contentRoot has to move down/right inside `inner`
     // for the whole ghost to sit at non-negative local coordinates, which is
@@ -541,6 +557,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     previewResizeObserver = new ResizeObserver(() => fitPreviewToScale());
     previewResizeObserver.observe(container);
   }
+  // OVERLAY-2: re-check the note when a new canvas size arrives.
+  const unsubCanvasSize = opts.onCanvasSizeChange?.(() => fitPreviewToScale()) ?? null;
 
   // Assigns 'setup-preview-label'/'setup-preview-label-after' to whichever
   // node is actually carrying the label for the CURRENT layout — mirrors the
@@ -601,22 +619,47 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return numberSizeValue() !== null && textSizeValue() !== null;
   }
 
+  // Task 3.0 (carry-forward fix wave, parked ruling) — an imported preset's
+  // numberSizePx/textSizePx is authored OUTSIDE this form (by whatever wrote
+  // the preset, or hand-edited into an export envelope) and can carry a value
+  // past MIN_SIZE_PX/MAX_SIZE_PX. Before this, `loadPreset()` copied it in
+  // verbatim, `numberSizeValue()`/`textSizeValue()` returned null for it (out
+  // of bounds), and every button gated by `styleValid()` — Save, Start, AND
+  // Update — went disabled with nothing to click and fix but the field itself
+  // (recoverable, but the operator has to notice and retype it manually).
+  // Clamping at load time, into a field ALREADY marked dirty by
+  // `loadPreset()`'s own `dirtyFromPreset` set, means the visible value is
+  // immediately valid and immediately what Update/Save will actually apply —
+  // never a disabled button with an invisible-until-you-look reason.
+  function clampToSizeBounds(n: number): number {
+    return Math.min(MAX_SIZE_PX, Math.max(MIN_SIZE_PX, Math.round(n)));
+  }
+
+  // Task 3.0 (carry-forward fix wave) — the seven fields this form has never
+  // modelled, defaulted exactly as `buildStyle()` always hardcoded them,
+  // for a form that has never loaded a preset (`ui.baseStyle === null`).
+  const UNMODELLED_STYLE_DEFAULTS: Pick<
+    StyleConfig,
+    'fontWeight' | 'alignH' | 'alignV' | 'outline' | 'shadow' | 'background' | 'paddingPx'
+  > = { fontWeight: 700, alignH: 'center', alignV: 'middle', outline: null, shadow: null, background: null, paddingPx: 8 };
+
   function buildStyle(): StyleConfig {
+    // Task 3.0 (parked ruling) — spread the loaded preset's full style (or
+    // the hardcoded defaults, for a form that never loaded one) FIRST, then
+    // override only the six fields this form actually models. Before this,
+    // the seven unmodelled fields (outline/shadow/background/fontWeight/
+    // align/padding) were always rebuilt from the hardcoded defaults below,
+    // silently flattening an IMPORTED preset's outline/shadow/etc. on every
+    // Save (and Start, which also calls this).
     return {
+      ...(ui.baseStyle ?? UNMODELLED_STYLE_DEFAULTS),
       fontFamily: ui.fontFamily,
-      fontWeight: 700,
       // Non-null by construction: every caller is gated behind
       // canSave()/canStart(), both of which require styleValid().
       numberSizePx: numberSizeValue() ?? DEFAULT_NUMBER_SIZE_PX,
       textSizePx: textSizeValue() ?? DEFAULT_TEXT_SIZE_PX,
       numberColor: ui.numberColor,
       textColor: ui.textColor,
-      alignH: 'center',
-      alignV: 'middle',
-      outline: null,
-      shadow: null,
-      background: null,
-      paddingPx: 8,
       layout: ui.layout,
     };
   }
@@ -777,7 +820,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // input/change handler below calls this (with ITS OWN canonical field
   // name, matching the `SetupUiState` property it writes) instead of
   // `render()` directly, marking that one field dirty before repainting.
-  function markDirty(field: string): void {
+  function markDirty(field: SetupField): void {
     ui.dirtyFields.add(field);
     // Task 2.19 — nearly every field's onChange already runs through this
     // one choke point, so it doubles as "clear the stale save confirmation
@@ -849,10 +892,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   //
   // The non-operator-editable `StyleConfig` fields (fontWeight/alignH/
   // alignV/outline/shadow/background/paddingPx) are not tracked as dirty at
-  // all — Setup has never exposed a control for any of them, in this task
-  // or any earlier one — so they're always the same hardcoded constants
-  // `buildStyle()` itself has always produced, matching every OTHER caller
-  // of `buildStyle()` in this file (`onStartSession()`/`performSave()`).
+  // all — Setup has never exposed a control for any of them, in this task or
+  // any earlier one. Task 3.0 (carry-forward fix wave, parked ruling) fixed
+  // what they resolve TO, though: they used to always be the hardcoded
+  // constants below regardless of what was actually live, silently
+  // flattening a preset-backed session's outline/shadow/etc. back to
+  // defaults on every Update. They now come from `presentation.style` itself
+  // (the live look, spread first, below) — matching `buildStyle()`'s own
+  // fix, which spreads the loaded preset's full style for the
+  // `presentation === null` branch just above.
   function resolvePresentation(
     presentation: ControllerState['presentation'],
   ): { style: StyleConfig; template: string | null; animation: AnimationConfig } {
@@ -879,19 +927,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const animDurationMs = ui.dirtyFields.has('animDurationMs') ? ui.animDurationMs : liveAnimation.durationMs;
 
     return {
+      // Task 3.0 — spread the LIVE style first (the seven unmodelled fields
+      // survive untouched), then override only the six this form models.
       style: {
+        ...presentation.style,
         fontFamily,
-        fontWeight: 700,
         numberSizePx,
         textSizePx,
         numberColor,
         textColor,
-        alignH: 'center',
-        alignV: 'middle',
-        outline: null,
-        shadow: null,
-        background: null,
-        paddingPx: 8,
         layout,
       },
       template,
@@ -1145,7 +1189,27 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     render();
   }
 
+  // 2026-09-25 review, item 2: Start over a running session throws away
+  // its count (the new session's undo history is empty, so Undo cannot bring
+  // it back). Ask first, the way Presets' preset-start already does; with no
+  // session active, start straight away as before.
   function onStartSession(): void {
+    if (!canStart()) return;
+    if (opts.controller.getState().session !== null) {
+      ui.startConfirmOpen = true;
+      render();
+      // The confirm sits below the form's last row, so it can open out of
+      // sight in a short dock. Bring it into view with focus on Cancel.
+      const box = container.querySelector<HTMLElement>('[data-testid="setup-start-confirm"]');
+      const cancel = container.querySelector<HTMLButtonElement>('[data-testid="setup-start-cancel"]');
+      cancel?.focus({ preventScroll: true });
+      box?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    startSessionNow();
+  }
+
+  function startSessionNow(): void {
     if (!canStart()) return;
     ui.error = null;
     const startValue = parseIntStrict(ui.startValue)!;
@@ -1185,7 +1249,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     try {
       opts.controller.startSession(cfg, style, template, animation);
     } catch (err) {
-      ui.error = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
+      // Task 3.0 (parked ruling) — an off-menu `ui.intervalSeconds` (e.g.
+      // carried in, dirty, from a loaded preset — `canStart()` never checks
+      // SPEED_LEVELS membership) makes `createSession()` throw its own raw,
+      // engine-vocabulary message ("createSession: intervalSeconds must be
+      // one of [...]; got 1.3"). Every OTHER error this catch can plausibly
+      // see is defense-in-depth for a case `canStart()` should have already
+      // prevented (see the comment above), so this one substitution is
+      // enough to keep an operator from ever reading "createSession:" on
+      // screen — the raw message is still the fallback for anything else.
+      ui.error = message.includes('intervalSeconds must be one of')
+        ? 'Interval must be one of the listed speeds'
+        : message;
       render();
       return;
     }
@@ -1327,7 +1403,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     testid: string,
     value: string,
     onChange: (v: string) => void,
-    field: string,
+    field: SetupField,
     type: 'text' | 'number' = 'text',
     extraAttrs: Record<string, string> = {},
   ): HTMLInputElement {
@@ -1341,7 +1417,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return input;
   }
 
-  function colorField(testid: string, value: string, onChange: (v: string) => void, field: string): HTMLInputElement {
+  function colorField(testid: string, value: string, onChange: (v: string) => void, field: SetupField): HTMLInputElement {
     const input = el('input', { 'data-testid': testid, type: 'color' }) as HTMLInputElement;
     input.value = value;
     input.addEventListener('input', () => {
@@ -1387,7 +1463,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return select;
   }
 
-  function renderIntervalSelect(): HTMLSelectElement {
+  function renderIntervalSelect(hasActiveSession: boolean): HTMLSelectElement {
     const select = el('select', { 'data-testid': 'setup-interval' }) as HTMLSelectElement;
     // Final gate wave (F3) — a live session can legitimately run at an
     // interval that is not a SPEED_LEVELS entry (engine reconfigure rule 5
@@ -1403,8 +1479,19 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     // `loadPreset()` (a preset's own interval), which is a pending choice,
     // not the session's current rate, so labelling it "(current)" would be
     // its own small lie.
+    //
+    // Task 3.0 (parked ruling) — ALSO only while a session is actually
+    // active: `displayMode` (this row's own visibility gate, in render()
+    // below) falls back to `ui.mode` once a session ends, and `ui.mode` can
+    // still read 'automatic' from before that session started (it is never
+    // reset by starting OR ending one — only the Mode select and
+    // loadPreset() ever write it). Without this, a clean off-menu
+    // `ui.intervalSeconds` left over from the ended session's own prefill
+    // kept rendering "(current)" describing a session that no longer exists.
     const offMenu =
-      !(SPEED_LEVELS as readonly number[]).includes(ui.intervalSeconds) && !ui.dirtyFields.has('intervalSeconds');
+      hasActiveSession &&
+      !(SPEED_LEVELS as readonly number[]).includes(ui.intervalSeconds) &&
+      !ui.dirtyFields.has('intervalSeconds');
     if (offMenu) {
       const current = el(
         'option',
@@ -1687,6 +1774,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     scaleBox.appendChild(scaleInner);
     wrap.appendChild(scaleBox);
     section.appendChild(wrap);
+
+    // OVERLAY-2: shown or hidden by fitPreviewToScale(), which can only
+    // measure once this tree is attached.
+    const overflowNote = el('div', { 'data-testid': 'setup-preview-overflow', class: 'field-hint' }, PREVIEW_OVERFLOW_TEXT);
+    overflowNote.hidden = true;
+    previewOverflowNote = overflowNote;
+    section.appendChild(overflowNote);
     return section;
   }
 
@@ -1716,6 +1810,35 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     const row = el('div', { class: 'two-col-row' });
     row.append(a, b);
     return row;
+  }
+
+  // 2026-09-25 review, item 2: see onStartSession(). Same inline
+  // confirm-box pattern as Presets' preset-replace-confirm. The text quotes
+  // no number: this view does not repaint on automatic ticks, so a count
+  // shown here would go stale while the question is open.
+  function renderStartConfirm(): HTMLElement {
+    const box = el('div', { 'data-testid': 'setup-start-confirm', class: 'confirm-box' });
+    box.appendChild(
+      el(
+        'span',
+        {},
+        'Replace the running session? Its current count will be lost. ' +
+          'To apply these settings and keep the count, use Update session instead.',
+      ),
+    );
+    const replace = button('setup-start-replace', 'Replace', { disabled: !canStart() });
+    replace.addEventListener('click', () => {
+      ui.startConfirmOpen = false;
+      startSessionNow();
+    });
+    const cancel = button('setup-start-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      ui.startConfirmOpen = false;
+      render();
+    });
+    box.appendChild(replace);
+    box.appendChild(cancel);
+    return box;
   }
 
   function render(): void {
@@ -1828,7 +1951,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     }
     counterChildren.push(formRow('Mode', renderModeSelect(activeSession)));
     if (displayMode === 'automatic') {
-      counterChildren.push(formRow('Interval', renderIntervalSelect()));
+      counterChildren.push(formRow('Interval', renderIntervalSelect(activeSession !== null)));
     }
     root.appendChild(group('setup-group-counter', 'Counter', counterChildren));
 
@@ -1861,6 +1984,21 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
           'div',
           { 'data-testid': 'setup-template-token-hint', class: 'field-hint' },
           'This label contains {count}, which sets where the number goes.',
+        ),
+      );
+    }
+    // Task 3.0 (AC 31) — a heads-up, never a block: a character outside the
+    // bundled fonts' latin coverage still renders (the browser substitutes a
+    // system font for it), so this never disables Save/Start/Update, unlike
+    // every OTHER inline error in this form. Up to 5 offending characters,
+    // unique and in the order they first appear in the label.
+    const offendingGlyphs = unsupportedGlyphs(ui.template);
+    if (offendingGlyphs.length > 0) {
+      labelChildren.push(
+        el(
+          'div',
+          { 'data-testid': 'setup-glyph-warning', class: 'field-hint' },
+          `may not display: ${offendingGlyphs.slice(0, 5).join(' ')}`,
         ),
       );
     }
@@ -2062,6 +2200,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     root.appendChild(actions);
 
+    if (ui.startConfirmOpen && activeSession !== null) {
+      root.appendChild(renderStartConfirm());
+    }
+
     // Task 2.19 (operator feedback: "there is no confirmation dialogue or
     // any message to notify me") — right below the actions row, matching the
     // "confirm sits next to the button that produced it" pattern already
@@ -2085,11 +2227,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   return {
     destroy(): void {
-      // No subscriptions of its own (this view only reads controller/storage
-      // on demand) — but an in-flight performSave() must not repaint this
-      // torn-down mount over its replacement (code-quality:P2-Q-03).
+      // The canvas-size subscription (OVERLAY-2) is this view's only one; it
+      // otherwise reads controller/storage on demand. An in-flight
+      // performSave() must not repaint this torn-down mount over its
+      // replacement (code-quality:P2-Q-03).
       destroyed = true;
       previewResizeObserver?.disconnect();
+      unsubCanvasSize?.();
     },
     loadPreset(preset: Preset): void {
       ui.title = preset.title;
@@ -2099,11 +2243,24 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       ui.intervalSeconds = preset.intervalSeconds;
       ui.template = preset.template ?? '';
       ui.layout = preset.style.layout;
-      ui.numberSizePx = String(preset.style.numberSizePx);
+      // Task 3.0 (parked ruling) — clamped into MIN_SIZE_PX/MAX_SIZE_PX
+      // immediately, rather than copied verbatim: an out-of-bounds imported
+      // size (e.g. a hand-edited export envelope) used to leave the field
+      // showing an invalid value with Save/Start/Update all disabled and no
+      // visible reason beyond the field's own error text. Both fields are
+      // already in `dirtyFromPreset` below, so the clamped value — not the
+      // preset's original out-of-bounds one — is what Update/Save apply.
+      ui.numberSizePx = String(clampToSizeBounds(preset.style.numberSizePx));
       ui.numberColor = preset.style.numberColor;
-      ui.textSizePx = String(preset.style.textSizePx);
+      ui.textSizePx = String(clampToSizeBounds(preset.style.textSizePx));
       ui.textColor = preset.style.textColor;
       ui.fontFamily = preset.style.fontFamily;
+      // Task 3.0 (parked ruling) — the loaded preset's FULL style, so
+      // buildStyle() can spread the seven fields this form never modelled
+      // (outline/shadow/background/fontWeight/align/padding) instead of
+      // flattening them to defaults on the next Save/Start. See
+      // `SetupUiState.baseStyle`'s own doc comment.
+      ui.baseStyle = preset.style;
       ui.animType = preset.animation.type;
       ui.animTarget = preset.animation.target;
       ui.animDurationMs = preset.animation.durationMs;
@@ -2145,7 +2302,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // is still written above (for the mismatch note, and for a future
       // Start), just not tracked as "dirty" — that concept no longer
       // applies to this field.
-      const dirtyFromPreset = new Set([
+      const dirtyFromPreset = new Set<SetupField>([
         'title', 'startValue', 'finishValue', 'intervalSeconds', 'template', 'layout',
         'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
         'animType', 'animTarget', 'animDurationMs', 'completionKind', 'completionSeconds',
@@ -2196,6 +2353,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // switch) — leaving Setup and coming back must not still show a
       // "saved ✓" from a visit that's now over.
       ui.saveConfirmText = null;
+      ui.startConfirmOpen = false;
       if (ui.editing === null) {
         const state = opts.controller.getState();
         if (state.session) prefillFromSession(state.session, state.presentation);

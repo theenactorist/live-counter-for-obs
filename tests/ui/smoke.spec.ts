@@ -1,12 +1,14 @@
 import { test, expect } from '@playwright/test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
 import { startMockObs } from '../helpers/mock-obsws.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
 const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
+const LUA_DIST_PATH = path.resolve(__dirname, '../../dist/counter-hotkeys.lua');
 
 /** Collects console errors + page errors for a page. */
 function trackConsoleErrors(page: Page): string[] {
@@ -111,5 +113,18 @@ test.describe('overlay.html', () => {
     } finally {
       await mock.close();
     }
+  });
+});
+
+test.describe('build artifacts', () => {
+  // Task 3.1 — counter-hotkeys.lua is never bundled by vite (dock.html and
+  // overlay.html never import it); scripts/copy-static.mjs is the ONLY thing
+  // that puts it in dist/, so this is the one place that would catch that
+  // step silently regressing or being dropped from `npm run build`.
+  test('dist/counter-hotkeys.lua exists after the build and carries the locked contract tokens', () => {
+    expect(existsSync(LUA_DIST_PATH)).toBe(true);
+    const source = readFileSync(LUA_DIST_PATH, 'utf8');
+    expect(source).toContain('LiveCounterCommandChannel');
+    expect(source).toContain('"app":"live-counter"');
   });
 });

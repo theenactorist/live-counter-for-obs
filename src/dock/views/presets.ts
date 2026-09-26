@@ -29,7 +29,8 @@ import type { SessionController } from '../controller.js';
 import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { loadPresets as engineLoadPresets, serializePresets } from '../../engine/migrate.js';
-import { CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
+import { CLIPBOARD_BLOCKED_TEXT, readClipboardText } from '../clipboard-keys.js';
+import { el, button, captureFocus, restoreFocus } from './dom.js';
 
 export interface PresetsViewHandle {
   destroy(): void;
@@ -116,63 +117,6 @@ function uniqueTitle(base: string, seen: ReadonlySet<string>): string {
     n += 1;
   }
   return candidate;
-}
-
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string, opts: { extraClass?: string } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: `ctl${opts.extraClass ? ' ' + opts.extraClass : ''}` }, text);
-  return b;
-}
-
-function captureFocus(container: HTMLElement): FocusSnapshot | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-  const testid = active.getAttribute('data-testid');
-  if (!testid) return null;
-  let selectionStart: number | null = null;
-  let selectionEnd: number | null = null;
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    selectionStart = active.selectionStart;
-    selectionEnd = active.selectionEnd;
-  }
-  return { testid, selectionStart, selectionEnd };
-}
-
-function restoreFocus(container: HTMLElement, snapshot: FocusSnapshot | null): void {
-  if (!snapshot) return;
-  const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-  if (!target) return;
-  target.focus();
-  if (
-    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-    snapshot.selectionStart !== null &&
-    snapshot.selectionEnd !== null
-  ) {
-    try {
-      target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-    } catch {
-      // Not every input type supports selection ranges.
-    }
-  }
 }
 
 export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewOptions): PresetsViewHandle {
@@ -335,7 +279,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     ui.importError = null;
     ui.importFeedback = null;
     // Review fix: Apply is a success/apply-handler moment too — a stale
-    // "Clipboard blocked" hint left over from an earlier failed paste must
+    // "Paste is blocked" hint left over from an earlier failed paste must
     // not keep showing once the operator has typed the JSON in by hand and
     // successfully applied it (it would otherwise misleadingly imply the
     // paste — or the import — had failed).
@@ -496,23 +440,19 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
   // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so
   // this is the operator's only way to get a copied export envelope into the
-  // textarea at all. On rejection (permission denied/unavailable) or an empty
-  // read, the textarea is left completely untouched and an inline hint takes
-  // over — never a silent no-op an operator could mistake for "it worked."
+  // textarea at all. On rejection (permission denied/unavailable), a read
+  // that never settles (B2: OBS's own dock, cut off by readClipboardText()'s
+  // timeout) or an empty read, the textarea is left completely untouched and
+  // an inline hint takes over — never a silent no-op an operator could
+  // mistake for "it worked."
   async function onImportPaste(): Promise<void> {
     ui.importPasteError = null;
-    let text = '';
-    let failed = false;
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      failed = true;
-    }
+    const text = await readClipboardText();
     // Same guard as onExport/onDelete/onDuplicate above: a tab switch (or
     // settings-save reconnect) mid-await must not repaint this torn-down
     // mount over its replacement.
     if (destroyed) return;
-    if (failed || text.length === 0) {
+    if (text === null || text.length === 0) {
       ui.importPasteError = CLIPBOARD_BLOCKED_TEXT;
       render();
       return;
@@ -545,7 +485,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     textarea.addEventListener('input', () => {
       ui.importText = textarea.value;
       // Review fix: the operator typing here IS them acting on a stale
-      // "Clipboard blocked" hint — it must disappear immediately, not
+      // "Paste is blocked" hint — it must disappear immediately, not
       // linger until Apply (or a subsequent Paste click) resets it. Guarded
       // so a normal keystroke (no error showing) doesn't force an extra
       // full rebuild.

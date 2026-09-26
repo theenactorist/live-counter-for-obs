@@ -30,6 +30,7 @@ import { VERSION } from '../shared/version.js';
 // consumer) now imports directly from clipboard-keys.ts instead of
 // indirecting through this module's settings-paste-only usage of them.
 import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
+import { el, button, parsePort, DEFAULT_WS_PORT } from './views/dom.js';
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
@@ -43,8 +44,13 @@ export interface MountDiagnosticsViewOptions {
   storage: DockStorage;
   /** The settings this controller/client stack is CURRENTLY connected with — seeds the form. */
   initialSettings: DockSettings;
-  /** Persists + triggers a full reconnect via main.ts's existing boot() path. */
-  onSaveSettings: (port: number, password: string) => void;
+  /**
+   * Persists + triggers a full reconnect via main.ts's existing boot() path.
+   * Task 3.0 (carry-forward fix wave) — returns a refusal note to show
+   * instead (e.g. "Reset in progress — try again in a moment") when main.ts
+   * declined to act on it, or `null` on the normal, accepted path.
+   */
+  onSaveSettings: (port: number, password: string) => string | null;
   /**
    * Task 2.14, hardened per fix-wave review — owns the ENTIRE guarded
    * "Reset everything" sequence (this view only shows the confirm/cancel
@@ -65,12 +71,29 @@ export interface MountDiagnosticsViewOptions {
   overlaySilenceMs?: number;
   /** Overrides the 2s checklist/log poll interval (test seam — must stay well below `overlaySilenceMs` for the "ok" window to be observable at all). */
   refreshMs?: number;
+  /**
+   * Task 3.1 — the timestamp (`Date.now()` epoch ms) of the last valid
+   * hotkey-bridge payload this boot has seen (including a `hello`
+   * heartbeat), or `null` if none yet. A live getter, not a snapshot: main.ts
+   * hands in a closure over its own `bridgeLastSeenAt`, re-read on every
+   * checklist poll tick.
+   */
+  bridgeSeenAt: () => number | null;
+  /** Overrides the 90s hotkeys-row staleness threshold (test seam, mirrors `overlaySilenceMs`). */
+  hotkeyStaleMs?: number;
 }
 
 export type RowState = 'ok' | 'warn' | 'fail' | 'neutral';
 
 const DEFAULT_REFRESH_MS = 2000;
 const DEFAULT_OVERLAY_SILENCE_MS = 10_000;
+// Task 3.1 (brief: "the 90s threshold a named constant") — how long the
+// hotkeys row stays 'ok' after the last valid bridge payload before flipping
+// to 'warn'. The Lua script's own hello beat fires every 30s (HELLO_INTERVAL_
+// MS in counter-hotkeys.lua), so 90s tolerates up to two missed beats (a slow
+// OBS tick, a brief script reload) before treating the bridge as genuinely
+// silent.
+const DEFAULT_HOTKEY_STALE_MS = 90_000;
 const COPY_CONFIRM_MS = 1500;
 const PROBE_KEY = 'lc.diag-probe.v1';
 const LOG_TAIL = 100;
@@ -89,14 +112,22 @@ const OVERLAY_NOT_SEEN_TEXT =
 // change with the transport's own state.
 const TRANSPORT_LABEL = 'Panel ↔ overlay';
 const TRANSPORT_HELP_TEXT =
-  'Session persistence, LIVE status, and Add overlay to scene still require the OBS WebSocket connection.';
-// Review fix (Important 1): NEVER "ok" — there is no hotkey bridge to check
-// yet, so claiming success would be misleading. `HOTKEYS_COPY_TEXT` is the
-// deliberately terser line "Copy diagnostics" emits (brief: exactly
-// "Hotkeys: not built yet (Phase 3)"), distinct from the row's own longer
-// display text.
-const HOTKEYS_TEXT = 'Hotkey bridge — not built yet (coming in Phase 3)';
-const HOTKEYS_COPY_TEXT = 'Hotkeys: not built yet (Phase 3)';
+  'Session persistence, LIVE status, Add overlay to scene, keyboard shortcuts and Stream Deck still require the OBS WebSocket connection.';
+// Task 3.1 — the hotkey bridge's three real states, driven by
+// `bridgeSeenAt()` (main.ts's `bridgeLastSeenAt` closure, updated by
+// installHotkeyBridge's `onBridgeSeen` on every valid payload including the
+// Lua script's own 30s `hello` heartbeat — see hotkey-bridge.ts): never seen
+// this boot -> neutral (nothing to report yet, not a failure); seen recently
+// -> ok; seen once but gone quiet -> warn (the script may have been removed,
+// or OBS's Scripts list reloaded without it).
+const HOTKEYS_NEVER_SEEN_TEXT =
+  'Hotkey bridge — add counter-hotkeys.lua in OBS Tools → Scripts, then assign keys in Settings → Hotkeys';
+// Hotkey presses reach the dock only as obs-websocket events (Lua script ->
+// the channel input's settings -> InputSettingsChanged), so with no
+// connection the install hint above would point at the wrong fix.
+const HOTKEYS_NEEDS_WS_TEXT = 'Keyboard shortcuts need the OBS connection above';
+const HOTKEYS_OK_TEXT = 'Hotkey bridge connected';
+const HOTKEYS_WARN_TEXT = 'Hotkey bridge silent — was the script removed or OBS Scripts reloaded?';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
   'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
@@ -153,11 +184,6 @@ const NAME_TAKEN_CODE_MATCH = 'code 601';
 // will ever have this many same-prefixed inputs.
 const MAX_NAME_SUFFIX_ATTEMPTS = 50;
 
-// The port an untouched install talks to (obs-websocket's own default). Used
-// by `overlaySourceUrlFor` below to decide whether the written URL needs a
-// `?port=` at all.
-const DEFAULT_WS_PORT = 4455;
-
 export const ADD_OVERLAY_CREATE_LABEL = 'Add overlay to my scene';
 export const ADD_OVERLAY_FIX_LABEL = 'Fix overlay settings';
 export const ADD_OVERLAY_ATTACH_LABEL = 'Add overlay to this scene';
@@ -199,8 +225,21 @@ export type OverlayIntent = 'create' | 'fix' | 'attach';
  *                    created in a live scene.
  */
 export type OverlayScan =
-  | { status: 'none'; sceneName: string; baseWidth: number; baseHeight: number }
-  | { status: 'in-scene'; sceneName: string; inputName: string; baseWidth: number; baseHeight: number }
+  | { status: 'none'; sceneName: string; baseWidth: number; baseHeight: number; allMatches: string[] }
+  | {
+      status: 'in-scene';
+      sceneName: string;
+      inputName: string;
+      baseWidth: number;
+      baseHeight: number;
+      allMatches: string[];
+      /** Task 3.4 (AC 29) — one plain string per mismatch against the recommended Browser Source settings; empty means all-clear. */
+      settingsIssues: string[];
+      /** Task 3.4 — this scene item's eye state (`sceneItemEnabled`); null only if it could not be determined. */
+      eyeEnabled: boolean | null;
+      /** Task 3.4 — the source's CURRENT settings URL (before any Fix), so the Fix confirmation can tell whether it carries the websocket password. */
+      currentUrl: string;
+    }
   | {
       status: 'other-scene';
       sceneName: string;
@@ -208,6 +247,7 @@ export type OverlayScan =
       otherSceneName: string | null;
       baseWidth: number;
       baseHeight: number;
+      allMatches: string[];
     }
   | { status: 'unknown'; message: string };
 
@@ -218,7 +258,47 @@ interface InputListEntry {
 
 interface SceneItemEntry {
   sourceName: string;
+  /** Task 3.4 — obs-websocket's own field name; a scene item's "eye" toggle in the OBS UI. */
+  sceneItemEnabled: boolean;
 }
+
+/** Task 3.4 — the exactly-five checks (locked, AC 29): width/height must match the base canvas, `shutdown`/`restart_when_active` must be false (absent counts as false — OBS omits both on a freshly-created source), and a custom fps below 30 warns. Each issue is one plain string naming the expected value. */
+const SHUTDOWN_LABEL = 'Shutdown source when not visible';
+const RESTART_LABEL = 'Refresh browser when scene becomes active';
+const MIN_RECOMMENDED_FPS = 30;
+
+function computeSettingsIssues(settings: Record<string, unknown>, baseWidth: number, baseHeight: number): string[] {
+  const issues: string[] = [];
+  const width = Number(settings.width);
+  if (width !== baseWidth) issues.push(`width ${width} — expected ${baseWidth}`);
+  const height = Number(settings.height);
+  if (height !== baseHeight) issues.push(`height ${height} — expected ${baseHeight}`);
+  if (settings.shutdown === true) issues.push(`"${SHUTDOWN_LABEL}" is on — expected off`);
+  if (settings.restart_when_active === true) issues.push(`"${RESTART_LABEL}" is on — expected off`);
+  if (settings.fps_custom === true) {
+    const fps = Number(settings.fps);
+    if (fps < MIN_RECOMMENDED_FPS) issues.push(`fps ${fps} — expected ${MIN_RECOMMENDED_FPS} or higher`);
+  }
+  return issues;
+}
+
+// Task 3.4 (AC 30) — shown whenever more than one browser_source anywhere in
+// the collection matches the overlay URL: LIVE detection (Task 3.2's
+// overlaySourceNames) assumes exactly one, so a second copy makes that
+// tracking ambiguous even though add-overlay itself only ever touches the
+// program scene's own match.
+const MULTI_SOURCE_TAIL = 'LIVE detection assumes one; remove duplicates.';
+
+function multiSourceWarningFor(matches: string[]): string | null {
+  if (matches.length <= 1) return null;
+  return `Overlay URL found in ${matches.length} sources: ${matches.join(', ')} — ${MULTI_SOURCE_TAIL}`;
+}
+
+// Task 3.4 — exact copy for the in-scene source's eye toggle being off
+// (`sceneItemEnabled === false`): the source is configured but invisible in
+// THIS scene, which would otherwise look like "nothing is wrong" everywhere
+// else in the checklist.
+export const OVERLAY_EYE_OFF_TEXT = "The source's eye is off in this scene (hidden in OBS)";
 
 interface SceneListEntry {
   sceneName: string;
@@ -351,10 +431,20 @@ function publishScan(client: ObsWsClient, result: OverlayScan): void {
   notifyOverlayScan();
 }
 
-async function sceneItemSourceNames(client: ObsWsClient, sceneName: string): Promise<string[]> {
+async function sceneItemEntries(client: ObsWsClient, sceneName: string): Promise<SceneItemEntry[]> {
   const resp = await client.request('GetSceneItemList', { sceneName });
-  const items = (resp.sceneItems ?? []) as SceneItemEntry[];
-  return items.map((item) => String(item.sourceName));
+  const items = (resp.sceneItems ?? []) as Array<{ sourceName: unknown; sceneItemEnabled?: unknown }>;
+  return items.map((item) => ({
+    sourceName: String(item.sourceName),
+    // A missing/non-boolean value (only possible against a mock or a future
+    // API change) defaults to visible rather than silently claiming "eye
+    // off" for a source nothing has actually reported hidden.
+    sceneItemEnabled: item.sceneItemEnabled !== false,
+  }));
+}
+
+async function sceneItemSourceNames(client: ObsWsClient, sceneName: string): Promise<string[]> {
+  return (await sceneItemEntries(client, sceneName)).map((item) => item.sourceName);
 }
 
 /**
@@ -382,6 +472,79 @@ async function findSceneContaining(client: ObsWsClient, inputName: string, excep
   return null;
 }
 
+/** The one predicate that decides "is this a Live Counter overlay?" (matched by SETTINGS URL, not by name — see performOverlayScan's own doc comment) — reused by both the scan below and overlaySourceNames() (Task 3.2) so the two can never disagree about what counts as an overlay input. */
+function isOverlayUrl(url: string): boolean {
+  return url.includes(OVERLAY_URL_MARKER);
+}
+
+/** Task 3.4 — one matched browser_source's name AND its current settings (needed for the settings-mismatch diagnostic and the Fix-confirm password check), so a second `GetInputSettings` round trip is never needed once the match is found. */
+interface OverlayMatch {
+  inputName: string;
+  settings: Record<string, unknown>;
+}
+
+/**
+ * Every `browser_source` input (from a `GetInputList` result already in
+ * hand) whose settings URL matches the overlay. `null` signals a per-input
+ * `GetInputSettings` failure (Gate fix wave F6) — a half-read scene is
+ * inconclusive, not "no matches" — so a genuine empty match list and an
+ * inconclusive scan stay distinguishable to callers.
+ */
+async function matchingOverlayInputs(client: ObsWsClient, inputs: InputListEntry[]): Promise<OverlayMatch[] | null> {
+  const matches: OverlayMatch[] = [];
+  for (const input of inputs) {
+    if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
+    let settingsResp: Record<string, unknown>;
+    try {
+      settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
+    } catch {
+      return null;
+    }
+    const settings = (settingsResp.inputSettings as Record<string, unknown> | undefined) ?? {};
+    const existingUrl = String(settings.url ?? '');
+    if (isOverlayUrl(existingUrl)) matches.push({ inputName: input.inputName, settings });
+  }
+  return matches;
+}
+
+/**
+ * Task 3.2 — every browser_source input in the collection whose settings URL
+ * matches the overlay (the SAME match rule performOverlayScan uses, via
+ * `matchingOverlayInputs`), scene membership aside: this feeds the LIVE
+ * status tracker's ws layer (`LiveStatusTracker.setSourceNames`), which
+ * cares about every matching source regardless of which scene it currently
+ * sits in, not just the current program scene the add-overlay flow itself
+ * only ever writes to. Read-only, and never throws — main.ts calls this
+ * unprompted on identify and on a periodic poll, so it must never produce an
+ * unhandled rejection.
+ *
+ * Gate fix wave (M-1) — resolves `null` on a genuine request FAILURE
+ * (`GetInputList` rejecting, or `matchingOverlayInputs` itself returning
+ * `null` for a half-read scene — see its own doc comment: a per-input
+ * `GetInputSettings` failure is inconclusive, not "no matches"), distinct
+ * from `[]` (a real, successful "nothing matched" answer — e.g. no
+ * browser_source inputs exist at all). Before this, both cases collapsed
+ * into the same `[]`, and main.ts fed that straight into
+ * `LiveStatusTracker.setSourceNames([])` — a transient failure (a single
+ * dropped request during OBS's own connection scene-collection load, say)
+ * wiped the tracker's ws-layer name list for up to this poll's own interval
+ * (~30 s), even though the overlay source never actually stopped existing.
+ * Callers that only care about the final name list on success (main.ts) skip
+ * the `setSourceNames` call entirely on `null`, keeping whatever names were
+ * already known instead of silently blanking them.
+ */
+export async function overlaySourceNames(client: ObsWsClient): Promise<string[] | null> {
+  try {
+    const listResp = await client.request('GetInputList');
+    const inputs = (listResp.inputs ?? []) as InputListEntry[];
+    const matches = await matchingOverlayInputs(client, inputs);
+    if (matches === null) return null;
+    return matches.map((m) => m.inputName);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Scene-AWARE detection (Ruling A item 2). obs-websocket v5's `GetInputList`
  * is scene-collection-global — it says nothing about which scene an input is
@@ -402,34 +565,40 @@ async function performOverlayScan(client: ObsWsClient): Promise<OverlayScan> {
     const listResp = await client.request('GetInputList');
     const inputs = (listResp.inputs ?? []) as InputListEntry[];
 
-    const matches: string[] = [];
-    for (const input of inputs) {
-      if (input.inputKind !== BROWSER_SOURCE_KIND) continue;
-      let settingsResp: Record<string, unknown>;
-      try {
-        settingsResp = await client.request('GetInputSettings', { inputName: input.inputName });
-      } catch {
-        // Gate fix wave (F6): a per-input failure used to be skipped and the
-        // scan carried on — but if the failing input IS the real overlay,
-        // "carry on" means detection misses it, CreateInput collides on the
-        // name, and the suffix retry puts a genuine duplicate "Live Counter
-        // Overlay 2" into a LIVE scene. A half-read scene is now
-        // inconclusive: the button disables and offers a retry instead.
-        return { status: 'unknown', message: ADD_OVERLAY_SCAN_FAILED_TEXT };
-      }
-      const existingUrl = String((settingsResp.inputSettings as Record<string, unknown> | undefined)?.url ?? '');
-      if (existingUrl.includes(OVERLAY_URL_MARKER)) matches.push(input.inputName);
+    // Gate fix wave (F6): a per-input GetInputSettings failure used to be
+    // skipped and the scan carried on — but if the failing input IS the real
+    // overlay, "carry on" means detection misses it, CreateInput collides on
+    // the name, and the suffix retry puts a genuine duplicate "Live Counter
+    // Overlay 2" into a LIVE scene. A half-read scene is now inconclusive:
+    // the button disables and offers a retry instead.
+    const matches = await matchingOverlayInputs(client, inputs);
+    if (matches === null) return { status: 'unknown', message: ADD_OVERLAY_SCAN_FAILED_TEXT };
+    // Task 3.4 (AC 30) — every matching input's name, regardless of scene
+    // membership, feeds the multi-source warning below.
+    const allMatches = matches.map((m) => m.inputName);
+
+    if (matches.length === 0) return { status: 'none', sceneName, baseWidth, baseHeight, allMatches };
+
+    const programItems = await sceneItemEntries(client, sceneName);
+    const inProgramMatch = matches.find((m) => programItems.some((item) => item.sourceName === m.inputName));
+    if (inProgramMatch !== undefined) {
+      const sceneItem = programItems.find((item) => item.sourceName === inProgramMatch.inputName);
+      return {
+        status: 'in-scene',
+        sceneName,
+        inputName: inProgramMatch.inputName,
+        baseWidth,
+        baseHeight,
+        allMatches,
+        settingsIssues: computeSettingsIssues(inProgramMatch.settings, baseWidth, baseHeight),
+        eyeEnabled: sceneItem ? sceneItem.sceneItemEnabled : null,
+        currentUrl: String(inProgramMatch.settings.url ?? ''),
+      };
     }
 
-    if (matches.length === 0) return { status: 'none', sceneName, baseWidth, baseHeight };
-
-    const programSources = await sceneItemSourceNames(client, sceneName);
-    const inProgram = matches.find((name) => programSources.includes(name));
-    if (inProgram !== undefined) return { status: 'in-scene', sceneName, inputName: inProgram, baseWidth, baseHeight };
-
-    const inputName = matches[0] as string;
+    const inputName = (matches[0] as OverlayMatch).inputName;
     const otherSceneName = await findSceneContaining(client, inputName, sceneName);
-    return { status: 'other-scene', sceneName, inputName, otherSceneName, baseWidth, baseHeight };
+    return { status: 'other-scene', sceneName, inputName, otherSceneName, baseWidth, baseHeight, allMatches };
   } catch (err) {
     return { status: 'unknown', message: errorText(err) };
   }
@@ -447,6 +616,12 @@ export interface AddOverlayButtonState {
   /** Whether to offer an explicit re-scan control (F6's inconclusive branch). */
   retry: boolean;
   retryMessage: string | null;
+  /** Task 3.4 (AC 29) — the in-scene source's settings mismatches, one plain string each; empty when all-clear or there is no in-scene source. */
+  settingsIssues: string[];
+  /** Task 3.4 — true only when there IS an in-scene source and its scene item's eye is off. */
+  eyeOff: boolean;
+  /** Task 3.4 (AC 30) — set whenever more than one overlay-matching browser_source exists anywhere in the collection, naming every one. */
+  multiSourceWarning: string | null;
 }
 
 /**
@@ -457,14 +632,20 @@ export interface AddOverlayButtonState {
  * cause).
  */
 export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonState {
-  const neutral = {
+  // Not `as const`: settingsIssues (a genuine string[], not a fixed tuple)
+  // would otherwise infer as `readonly []`, incompatible with the mutable
+  // `string[]` AddOverlayButtonState.settingsIssues elsewhere returns.
+  const neutral: AddOverlayButtonState = {
     label: ADD_OVERLAY_CHECKING_LABEL,
     disabled: true,
     intent: null,
     note: null,
     retry: false,
     retryMessage: null,
-  } as const;
+    settingsIssues: [],
+    eyeOff: false,
+    multiSourceWarning: null,
+  };
   if (client.state !== 'identified') {
     // Nothing can be scanned, and nothing can be clicked either — the label
     // stays neutral rather than promising an addition it has not verified.
@@ -476,11 +657,34 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
     return { ...neutral, retry: true, retryMessage: scan.message };
   }
   const busy = isAddOverlayBusy() || isOverlayScanInFlight();
+  // Task 3.4 (AC 30) — every non-unknown status carries `allMatches`, so this
+  // is computed once and reused regardless of which case below fires.
+  const multiSourceWarning = multiSourceWarningFor(scan.allMatches);
   switch (scan.status) {
     case 'none':
-      return { label: ADD_OVERLAY_CREATE_LABEL, disabled: busy, intent: 'create', note: null, retry: false, retryMessage: null };
+      return {
+        label: ADD_OVERLAY_CREATE_LABEL,
+        disabled: busy,
+        intent: 'create',
+        note: null,
+        retry: false,
+        retryMessage: null,
+        settingsIssues: [],
+        eyeOff: false,
+        multiSourceWarning,
+      };
     case 'in-scene':
-      return { label: ADD_OVERLAY_FIX_LABEL, disabled: busy, intent: 'fix', note: null, retry: false, retryMessage: null };
+      return {
+        label: ADD_OVERLAY_FIX_LABEL,
+        disabled: busy,
+        intent: 'fix',
+        note: null,
+        retry: false,
+        retryMessage: null,
+        settingsIssues: scan.settingsIssues,
+        eyeOff: scan.eyeEnabled === false,
+        multiSourceWarning,
+      };
     case 'other-scene':
     default:
       return {
@@ -493,14 +697,31 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
             : `An overlay already exists in another scene — this adds that same source to '${scan.sceneName}'.`,
         retry: false,
         retryMessage: null,
+        settingsIssues: [],
+        eyeOff: false,
+        multiSourceWarning,
       };
   }
 }
 
+// Task 3.4 (Phase 2 deferred) — appended to the Fix confirmation whenever the
+// URL about to be REPLACED carries `pw=`: an operator who once pasted the
+// credentialed manual-copy URL into a hand-added Browser Source (rather than
+// using the password-free add-overlay write) is about to lose that password
+// from the scene collection — worth a heads-up, since the replacement is
+// otherwise silent about it.
+// Gate fix wave (M-8) — unexported: nothing outside this module reads it
+// (fixOverlayConfirmText, right below, is the only consumer, and no test
+// imports it directly) — kept as the module-private constant it always
+// should have been, rather than a public export with no external reader.
+const FIX_CONFIRM_PASSWORD_SENTENCE =
+  'This replaces the existing URL, which contained the websocket password — the saved one is password-free.';
+
 /** Names EXACTLY what the Fix action will change, shown BEFORE any request goes out (Ruling A item 3). */
 export function fixOverlayConfirmText(scan: OverlayScan): string {
   if (scan.status !== 'in-scene') return '';
-  return `This will set '${scan.inputName}' to ${scan.baseWidth}×${scan.baseHeight} and reload it on air.`;
+  const base = `This will set '${scan.inputName}' to ${scan.baseWidth}×${scan.baseHeight} and reload it on air.`;
+  return scan.currentUrl.includes('pw=') ? `${base} ${FIX_CONFIRM_PASSWORD_SENTENCE}` : base;
 }
 
 /**
@@ -549,6 +770,12 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
     if (intent === 'fix') {
       if (scan.status !== 'in-scene') return { ok: false, message: ADD_OVERLAY_STALE_TEXT };
       await client.request('SetInputSettings', { inputName: scan.inputName, inputSettings: settings });
+      // Task 3.4 — a full re-scan (rather than hand-building the new
+      // in-scene record) is the only way to get accurate settingsIssues
+      // (now genuinely all-clear) and allMatches after the write; eyeEnabled
+      // is unaffected by this action but a stale value would still be wrong
+      // the moment the eye toggle itself changes.
+      publishScan(client, await performOverlayScan(client));
       return { ok: true, action: 'updated', sceneName: scan.sceneName, inputName: scan.inputName };
     }
 
@@ -559,13 +786,7 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
       // touching its settings here would reconfigure a scene the operator did
       // not ask about. Fix is a separate, explicitly-confirmed action.
       await client.request('CreateSceneItem', { sceneName: scan.sceneName, sourceName: scan.inputName });
-      publishScan(client, {
-        status: 'in-scene',
-        sceneName: scan.sceneName,
-        inputName: scan.inputName,
-        baseWidth: scan.baseWidth,
-        baseHeight: scan.baseHeight,
-      });
+      publishScan(client, await performOverlayScan(client));
       return { ok: true, action: 'attached', sceneName: scan.sceneName, inputName: scan.inputName };
     }
 
@@ -579,13 +800,7 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
           inputKind: BROWSER_SOURCE_KIND,
           inputSettings: settings,
         });
-        publishScan(client, {
-          status: 'in-scene',
-          sceneName: scan.sceneName,
-          inputName: candidate,
-          baseWidth: scan.baseWidth,
-          baseHeight: scan.baseHeight,
-        });
+        publishScan(client, await performOverlayScan(client));
         return { ok: true, action: 'created', sceneName: scan.sceneName, inputName: candidate };
       } catch (err) {
         if (!isNameTakenError(err)) throw err;
@@ -596,29 +811,6 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
   } catch (err) {
     return { ok: false, message: errorText(err) };
   }
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string): HTMLButtonElement {
-  return el('button', { 'data-testid': testid, class: 'ctl' }, text);
-}
-
-function parsePort(raw: string): number | null {
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
 }
 
 // Derives overlay.html's absolute URL from the DOCK's own location: both are
@@ -682,6 +874,24 @@ function overlayRowState(lastSeenAt: number, silenceMs: number): { state: RowSta
     : { state: 'warn', text: OVERLAY_NOT_SEEN_TEXT };
 }
 
+// Task 3.1 — the three locked hotkeys-row states (brief): never seen this
+// boot -> neutral (nothing verified yet, not a failure — distinct from
+// `overlayRowState`'s two-state ok/warn, which always has a real elapsed time
+// to compare against); seen <= staleMs ago -> ok; seen > staleMs ago -> warn.
+// Checked first: not connected -> warn, since no hotkey can arrive at all
+// until the websocket is up, whatever the bridge's own history.
+function hotkeysRowState(
+  wsState: ObsWsClient['state'],
+  seenAt: number | null,
+  staleMs: number,
+): { state: RowState; text: string } {
+  if (wsState !== 'identified') return { state: 'warn', text: HOTKEYS_NEEDS_WS_TEXT };
+  if (seenAt === null) return { state: 'neutral', text: HOTKEYS_NEVER_SEEN_TEXT };
+  return Date.now() - seenAt <= staleMs
+    ? { state: 'ok', text: HOTKEYS_OK_TEXT }
+    : { state: 'warn', text: HOTKEYS_WARN_TEXT };
+}
+
 // Task 2.13 — reflects Bus.activeTransports(). 'direct only' is 'ok' (not a
 // warning): it's the headline scenario this task exists for — counting,
 // presets, and the overlay are all fully functional with zero OBS setup.
@@ -733,6 +943,7 @@ function setRow(handle: RowHandle, state: RowState, text: string): void {
 export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnosticsViewOptions): DiagnosticsViewHandle {
   const silenceMs = opts.overlaySilenceMs ?? DEFAULT_OVERLAY_SILENCE_MS;
   const refreshMs = opts.refreshMs ?? DEFAULT_REFRESH_MS;
+  const hotkeyStaleMs = opts.hotkeyStaleMs ?? DEFAULT_HOTKEY_STALE_MS;
 
   // Initialized "now" rather than 0 — same reasoning as live.ts's own
   // `lastOverlaySeenAt`: a freshly-mounted panel must not immediately claim
@@ -760,12 +971,6 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const checklist = el('div', { 'data-testid': 'diagnostics-checklist', class: 'diag-checklist' });
   checklist.append(rowStorage.row, rowWs.row, rowTransport.row, rowOverlay.row, rowHotkeys.row);
   root.appendChild(checklist);
-  // Static placeholder — Phase 3 gives this row a real check. Deliberately
-  // 'neutral', never 'ok' (review fix, Important 1): nothing has actually
-  // been verified yet, so a green "ok" would misrepresent a bridge that
-  // doesn't exist. Set once here and excluded from both updateChecklist()
-  // and the periodic poll — it never transitions on its own.
-  setRow(rowHotkeys, 'neutral', HOTKEYS_TEXT);
 
   // --- Settings (moved here from Task 2.5's always-visible minimal row) ----
   root.appendChild(el('div', { class: 'diag-section-title' }, 'Settings'));
@@ -812,7 +1017,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   passwordInput.addEventListener('input', () => {
     settingsPassword = passwordInput.value;
     // Review fix: the operator typing here IS them acting on a stale
-    // "Clipboard blocked" hint — it must disappear immediately, not linger
+    // "Paste is blocked" hint — it must disappear immediately, not linger
     // until they happen to click Paste again (which may never happen once
     // they've already typed the value in by hand).
     settingsPasteError.hidden = true;
@@ -821,7 +1026,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   saveBtn.addEventListener('click', () => {
     // Review fix: Save is the other moment a stale paste-error hint must
     // clear — previously it only reset on a subsequent Paste click, so an
-    // invalid-port Save kept showing "Clipboard blocked" right next to the
+    // invalid-port Save kept showing "Paste is blocked" right next to the
     // unrelated port error, and a successful save only LOOKED clean because
     // boot()'s reconnect happens to remount this whole view as a side
     // effect (masking the same bug on the happy path).
@@ -833,14 +1038,24 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       return;
     }
     settingsError.hidden = true;
-    opts.onSaveSettings(port, passwordInput.value);
+    // Task 3.0 (carry-forward fix wave) — a reset in flight refuses the
+    // save (main.ts's `resetInFlight` guard) and hands back a note instead
+    // of persisting/reconnecting; reuses this SAME box the port-validation
+    // error above already uses rather than a second inline-error element.
+    const refusal = opts.onSaveSettings(port, passwordInput.value);
+    if (refusal !== null) {
+      settingsError.hidden = false;
+      settingsError.textContent = refusal;
+    }
   });
 
   // OBS's Custom Browser Dock never delivers Cmd/Ctrl+V to page content, so
   // this is the operator's only way to get a copied password into the field
-  // at all. On rejection (permission denied/unavailable) or an empty read,
-  // the field is left completely untouched and an inline hint takes over —
-  // never a silent no-op an operator could mistake for "it worked."
+  // at all. On rejection (permission denied/unavailable), a read that never
+  // settles (B2: OBS's own dock, cut off by clipboard-keys.ts's
+  // readClipboardText() timeout) or an empty read, the field is left
+  // completely untouched and an inline hint takes over — never a silent
+  // no-op an operator could mistake for "it worked."
   passwordPasteBtn.addEventListener('click', () => {
     settingsPasteError.hidden = true;
     void pasteIntoField(passwordInput, {
@@ -898,6 +1113,22 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const addOverlayNote = el('div', { 'data-testid': 'add-overlay-note', class: 'diag-note' });
   addOverlayNote.hidden = true;
   root.appendChild(addOverlayNote);
+  // Task 3.4 (AC 29/30) — three more note slots, each with its own stable
+  // testid, alongside the existing single-string `add-overlay-note` above
+  // (which stays reserved for the `attach` case's "already exists in X"
+  // text): a settings-mismatch list, the eye-off note, and the multi-source
+  // warning can all be true AT THE SAME TIME as each other (and independently
+  // of `note`), so folding them into one string would either lose one or
+  // force fragile substring assertions in tests.
+  const addOverlaySettingsIssues = el('div', { 'data-testid': 'add-overlay-settings-issues', class: 'diag-note' });
+  addOverlaySettingsIssues.hidden = true;
+  root.appendChild(addOverlaySettingsIssues);
+  const addOverlayEyeOff = el('div', { 'data-testid': 'add-overlay-eye-off', class: 'diag-note' }, OVERLAY_EYE_OFF_TEXT);
+  addOverlayEyeOff.hidden = true;
+  root.appendChild(addOverlayEyeOff);
+  const addOverlayMultiSource = el('div', { 'data-testid': 'add-overlay-multi-source', class: 'diag-note' });
+  addOverlayMultiSource.hidden = true;
+  root.appendChild(addOverlayMultiSource);
   root.appendChild(el('div', { 'data-testid': 'add-overlay-url-note', class: 'diag-note' }, ADD_OVERLAY_URL_NOTE));
   const addOverlayRetryBtn = button('add-overlay-retry', 'Check again');
   addOverlayRetryBtn.hidden = true;
@@ -935,6 +1166,14 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     addOverlayBtn.disabled = state.disabled;
     addOverlayNote.hidden = state.note === null;
     addOverlayNote.textContent = state.note ?? '';
+    // Task 3.4 (AC 29/30) — same shared-state derivation the button label
+    // itself comes from, so this note can never disagree with what the
+    // button is about to do.
+    addOverlaySettingsIssues.hidden = state.settingsIssues.length === 0;
+    addOverlaySettingsIssues.textContent = state.settingsIssues.join(' · ');
+    addOverlayEyeOff.hidden = !state.eyeOff;
+    addOverlayMultiSource.hidden = state.multiSourceWarning === null;
+    addOverlayMultiSource.textContent = state.multiSourceWarning ?? '';
     addOverlayRetryBtn.hidden = !state.retry;
     if (state.retryMessage !== null) {
       addOverlayError.hidden = false;
@@ -1121,19 +1360,28 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       ['OBS WebSocket', rowWs],
       ['Transport', rowTransport],
       ['Overlay', rowOverlay],
+      // Task 3.1 — now a real, checked row: mirrors its actual state like
+      // every other line instead of a fixed "not built yet" placeholder.
+      ['Hotkeys', rowHotkeys],
     ];
-    const checklistText = [
-      ...rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`),
-      // Deliberately NOT the generic "label: state — text" shape (review
-      // fix, Important 1) — Hotkeys must never read "ok", and the brief
-      // locks its exact copy-diagnostics line.
-      HOTKEYS_COPY_TEXT,
-    ].join('\n');
+    const checklistText = rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`).join('\n');
+    // Task 3.4 (AC 29/30) — the same shared add-overlay state the visible
+    // notes above render from, folded into the copyable dump so a remote
+    // helper reading a pasted report sees the exact same mismatches/warnings
+    // the operator sees on screen.
+    const addOverlayState = addOverlayButtonState(opts.client);
+    const overlayDiagLines: string[] = [];
+    if (addOverlayState.settingsIssues.length > 0) {
+      overlayDiagLines.push(`Overlay settings issues: ${addOverlayState.settingsIssues.join(' · ')}`);
+    }
+    if (addOverlayState.eyeOff) overlayDiagLines.push(OVERLAY_EYE_OFF_TEXT);
+    if (addOverlayState.multiSourceWarning !== null) overlayDiagLines.push(addOverlayState.multiSourceWarning);
     const lines = opts.storage.readLog().slice(-LOG_TAIL).reverse();
     return [
       `Live Counter diagnostics — v${VERSION}`,
       '',
       checklistText,
+      ...(overlayDiagLines.length > 0 ? ['', ...overlayDiagLines] : []),
       '',
       '--- Event log (most recent first, up to 100 lines) ---',
       ...lines,
@@ -1205,6 +1453,9 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
 
     const overlayResult = overlayRowState(lastOverlaySeenAt, silenceMs);
     setRow(rowOverlay, overlayResult.state, overlayResult.text);
+
+    const hotkeysResult = hotkeysRowState(opts.client.state, opts.bridgeSeenAt(), hotkeyStaleMs);
+    setRow(rowHotkeys, hotkeysResult.state, hotkeysResult.text);
 
     updateAddOverlayUi();
   }
