@@ -1813,14 +1813,16 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   }
 
   // 2026-09-25 review, item 2: see onStartSession(). Same inline
-  // confirm-box pattern as Presets' preset-replace-confirm.
-  function renderStartConfirm(currentValue: number): HTMLElement {
+  // confirm-box pattern as Presets' preset-replace-confirm. The text quotes
+  // no number: this view does not repaint on automatic ticks, so a count
+  // shown here would go stale while the question is open.
+  function renderStartConfirm(): HTMLElement {
     const box = el('div', { 'data-testid': 'setup-start-confirm', class: 'confirm-box' });
     box.appendChild(
       el(
         'span',
         {},
-        `Replace the running session? The current count (${currentValue}) will be lost. ` +
+        'Replace the running session? Its current count will be lost. ' +
           'To apply these settings and keep the count, use Update session instead.',
       ),
     );
@@ -2199,7 +2201,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     root.appendChild(actions);
 
     if (ui.startConfirmOpen && activeSession !== null) {
-      root.appendChild(renderStartConfirm(activeSession.currentValue));
+      root.appendChild(renderStartConfirm());
     }
 
     // Task 2.19 (operator feedback: "there is no confirmation dialogue or

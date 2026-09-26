@@ -3446,7 +3446,10 @@ test.describe('dock Setup + Presets views', () => {
 
         const confirm = page.getByTestId('setup-start-confirm');
         await expect(confirm).toBeVisible();
-        await expect(confirm).toContainText('Replace the running session? The current count (2) will be lost.');
+        await expect(confirm).toContainText('Replace the running session? Its current count will be lost.');
+        // No number in the question: Setup does not repaint on automatic
+        // ticks, so a quoted count would go stale while the box is open.
+        await expect(confirm).not.toContainText(/\d/);
         await expect(confirm).toContainText('Update session');
         await expect(page.getByTestId('setup-start-cancel')).toBeFocused();
         // Nothing has been replaced while the question is on screen.
