@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Install Live Counter</title>
+  <meta name="description" content="How to install Live Counter for OBS: a big on-screen number you count up or down live, set up inside OBS Studio in about ten minutes." />
+  <style>
+    /* ------------------------------------------------------------------
+       Live Counter for OBS: install guide
+       Self-contained: no external requests. Fonts ship in ./fonts,
+       screenshots in ./img. Works from file:// or any static server.
+       ------------------------------------------------------------------ */
+    @font-face {
+      font-family: "Oswald";
+      font-style: normal;
+      font-weight: 500;
+      font-display: swap;
+      src: url("fonts/oswald-latin-500-normal.woff2") format("woff2");
+    }
+    @font-face {
+      font-family: "Oswald";
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url("fonts/oswald-latin-700-normal.woff2") format("woff2");
+    }
+
+    :root {
+      color-scheme: light dark;
+      --paper: #f3eee4;
+      --paper-2: #faf7f0;
+      --ink: #1d1a16;
+      --ink-2: #5d574d;
+      --line: #d8d0c1;
+      --line-2: #eae3d6;
+      --accent: #b9601a;
+      --accent-2: #f4dcc5;
+      --on-accent: #fffaf3;
+      --good: #2f7a4d;
+      --good-2: #dcefe2;
+      --warn: #a5382b;
+      --warn-2: #f6dcd6;
+      --code: #ebe4d6;
+      --shadow: 0 1px 2px rgba(35, 25, 10, 0.08), 0 12px 32px -18px rgba(35, 25, 10, 0.35);
+      --display: "Oswald", "Bahnschrift", "DIN Condensed", "Arial Narrow", sans-serif;
+      --body: ui-sans-serif, -apple-system, "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --rail-w: 240px;
+      --measure: 66ch;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --paper: #141517;
+        --paper-2: #1c1e22;
+        --ink: #ece7dc;
+        --ink-2: #a8a196;
+        --line: #303338;
+        --line-2: #24272c;
+        --accent: #e6973f;
+        --accent-2: #3a2a17;
+        --on-accent: #1a120a;
+        --good: #78d69f;
+        --good-2: #173224;
+        --warn: #ff9a86;
+        --warn-2: #3d1d18;
+        --code: #24272c;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 16px 40px -20px rgba(0, 0, 0, 0.8);
+      }
+    }
+    :root[data-theme="dark"] {
+      --paper: #141517;
+      --paper-2: #1c1e22;
+      --ink: #ece7dc;
+      --ink-2: #a8a196;
+      --line: #303338;
+      --line-2: #24272c;
+      --accent: #e6973f;
+      --accent-2: #3a2a17;
+      --on-accent: #1a120a;
+      --good: #78d69f;
+      --good-2: #173224;
+      --warn: #ff9a86;
+      --warn-2: #3d1d18;
+      --code: #24272c;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 16px 40px -20px rgba(0, 0, 0, 0.8);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--body);
+      font-size: 1.0625rem;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      background-image:
+        radial-gradient(1200px 600px at 100% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+        radial-gradient(800px 500px at -10% 30%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 60%);
+      background-attachment: fixed;
+    }
+    a { color: var(--accent); text-underline-offset: 0.15em; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+    code, kbd {
+      font-family: var(--mono);
+      font-size: 0.92em;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 0.08em 0.4em;
+      white-space: nowrap;
+    }
+    kbd { font-family: var(--body); font-weight: 600; box-shadow: inset 0 -2px 0 var(--line); }
+    b, strong { font-weight: 650; }
+    img { max-width: 100%; height: auto; display: block; }
+    p, li { max-width: var(--measure); }
+
+    .skip {
+      position: absolute; left: -999px; top: 0.5rem;
+      background: var(--accent); color: var(--on-accent); padding: 0.5rem 0.8rem; border-radius: 6px; z-index: 50;
+    }
+    .skip:focus { left: 0.5rem; }
+
+    /* ---------- layout ---------- */
+    .frame {
+      display: grid;
+      grid-template-columns: 1fr;
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 16px 6rem;
+    }
+    @media (min-width: 1000px) {
+      .frame { grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: 3rem; padding: 0 24px 6rem; }
+      .rail { position: sticky; top: 1.25rem; align-self: start; max-height: calc(100vh - 2.5rem); overflow: auto; }
+    }
+
+    /* ---------- hero ---------- */
+    .hero {
+      grid-column: 1 / -1;
+      padding: 3.5rem 0 2.5rem;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 2.5rem;
+      position: relative;
+    }
+    .hero__eyebrow {
+      font-family: var(--display);
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-size: 0.85rem;
+      color: var(--accent);
+      margin: 0 0 0.5rem;
+    }
+    .hero h1 {
+      font-family: var(--display);
+      font-weight: 700;
+      font-size: clamp(3rem, 8vw, 6.5rem);
+      line-height: 0.95;
+      letter-spacing: -0.01em;
+      margin: 0 0 1rem;
+      text-transform: uppercase;
+    }
+    .hero p.lede { font-size: 1.25rem; color: var(--ink-2); margin: 0 0 1.75rem; max-width: 40ch; }
+    .facts { display: flex; flex-wrap: wrap; gap: 0.6rem; padding: 0; margin: 0 0 1.5rem; list-style: none; }
+    .facts li {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: var(--paper-2); border: 1px solid var(--line); border-radius: 999px;
+      padding: 0.35rem 0.9rem 0.35rem 0.6rem; font-size: 0.95rem;
+    }
+    .facts .dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--accent); flex: none; }
+    .hero__tools { position: absolute; right: 0; top: 1.25rem; display: flex; gap: 0.5rem; }
+    .btn {
+      appearance: none; border: 1px solid var(--line); background: var(--paper-2); color: var(--ink);
+      border-radius: 8px; padding: 0.45rem 0.8rem; font: inherit; font-size: 0.9rem; cursor: pointer;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .jump { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; font-size: 0.98rem; }
+    .jump a { color: var(--ink); text-decoration: none; border-bottom: 2px solid var(--accent-2); }
+    .jump a:hover { border-color: var(--accent); }
+
+    /* staggered reveal on load */
+    .reveal > * { animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+    .reveal > *:nth-child(2) { animation-delay: 0.06s; }
+    .reveal > *:nth-child(3) { animation-delay: 0.12s; }
+    .reveal > *:nth-child(4) { animation-delay: 0.18s; }
+    .reveal > *:nth-child(5) { animation-delay: 0.24s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .reveal > * { animation: none; } }
+
+    /* ---------- rail (table of contents) ---------- */
+    .rail { display: none; }
+    @media (min-width: 1000px) { .rail { display: block; } }
+    .rail h2 { font-family: var(--display); font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.8rem; color: var(--ink-2); margin: 0 0 0.6rem; }
+    .rail ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+    .rail li a {
+      display: block; padding: 0.35rem 0 0.35rem 0.9rem; color: var(--ink-2); text-decoration: none; font-size: 0.95rem;
+      border-left: 2px solid transparent; margin-left: -1px;
+    }
+    .rail li a:hover { color: var(--ink); }
+    .rail li a.is-active { color: var(--ink); border-left-color: var(--accent); font-weight: 600; }
+    .rail li.group { margin-top: 0.9rem; font-family: var(--display); font-size: 0.75rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); padding-left: 0.9rem; }
+
+    /* ---------- content ---------- */
+    main { min-width: 0; }
+    section { margin: 0 0 3.5rem; scroll-margin-top: 1.5rem; }
+    h2 {
+      font-family: var(--display);
+      font-weight: 700;
+      font-size: clamp(1.7rem, 3vw, 2.3rem);
+      line-height: 1.05;
+      letter-spacing: 0.005em;
+      margin: 0 0 1rem;
+      text-transform: uppercase;
+    }
+    h3 { font-size: 1.15rem; margin: 1.75rem 0 0.5rem; }
+    .step { position: relative; padding-top: 0.25rem; }
+    .step__num {
+      font-family: var(--display);
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: 0.2em;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin: 0 0 0.35rem;
+      display: flex; align-items: center; gap: 0.75rem;
+    }
+    .step__num::after { content: ""; height: 1px; flex: 1; max-width: 6rem; background: var(--accent); opacity: 0.6; }
+    ol.steps { counter-reset: s; list-style: none; margin: 0 0 1.25rem; padding: 0; }
+    ol.steps > li {
+      counter-increment: s;
+      position: relative;
+      padding: 0.55rem 0 0.55rem 2.6rem;
+      border-top: 1px solid var(--line-2);
+    }
+    ol.steps > li:first-child { border-top: 0; }
+    ol.steps > li::before {
+      content: counter(s);
+      position: absolute; left: 0; top: 0.55rem;
+      width: 1.75rem; height: 1.75rem; border-radius: 50%;
+      background: var(--accent); color: var(--on-accent);
+      font-family: var(--display); font-weight: 700; font-size: 1rem; line-height: 1.75rem; text-align: center;
+    }
+    ul.plain { padding-left: 1.2rem; margin: 0 0 1rem; }
+    ul.plain li { margin: 0.25rem 0; }
+
+    .note {
+      border-left: 4px solid var(--accent);
+      background: var(--paper-2);
+      padding: 0.8rem 1rem;
+      border-radius: 0 10px 10px 0;
+      margin: 1.25rem 0;
+      max-width: calc(var(--measure) + 2rem);
+    }
+    .note.good { border-left-color: var(--good); background: var(--good-2); }
+    .note.warn { border-left-color: var(--warn); background: var(--warn-2); }
+    .note p { margin: 0.25rem 0; }
+    .note .tag {
+      font-family: var(--display); letter-spacing: 0.14em; text-transform: uppercase; font-size: 0.75rem; font-weight: 700;
+      color: var(--accent);
+    }
+    .note.good .tag { color: var(--good); }
+    .note.warn .tag { color: var(--warn); }
+
+    /* ---------- figures ---------- */
+    .figs { display: grid; grid-template-columns: 1fr; gap: 1.25rem; margin: 1.5rem 0 0.5rem; }
+    @media (min-width: 720px) { .figs.two { grid-template-columns: 1fr 1fr; } .figs.three { grid-template-columns: repeat(3, 1fr); } }
+    figure.shot { margin: 0; }
+    figure.shot .frame-img {
+      display: block;
+      background: var(--paper-2);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      transition: transform 0.25s ease, box-shadow 0.25s ease;
+    }
+    figure.shot .frame-img:hover { transform: translateY(-2px); }
+    figure.shot img { width: 100%; }
+    figure.shot--dock .frame-img { max-width: 360px; }
+    figure.shot--menu .frame-img { max-width: 320px; }
+    figure.shot--wide .frame-img { max-width: 100%; }
+    figcaption { font-size: 0.93rem; color: var(--ink-2); margin: 0.6rem 0 0; max-width: 60ch; }
+    figcaption .n {
+      display: inline-block; font-family: var(--display); font-weight: 700; color: var(--accent);
+      letter-spacing: 0.08em; margin-right: 0.4rem;
+    }
+
+    table { border-collapse: collapse; margin: 0.75rem 0 1rem; font-size: 0.98rem; }
+    th, td { text-align: left; padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+    th { font-family: var(--display); font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.8rem; color: var(--ink-2); }
+
+    /* ---------- checklist ---------- */
+    ul.check { list-style: none; padding: 0; margin: 0 0 1rem; }
+    ul.check li { border-top: 1px solid var(--line-2); }
+    ul.check li:first-child { border-top: 0; }
+    ul.check label { display: flex; gap: 0.8rem; align-items: flex-start; padding: 0.6rem 0; cursor: pointer; }
+    ul.check input { width: 1.35rem; height: 1.35rem; margin: 0.15rem 0 0; accent-color: var(--good); flex: none; }
+    ul.check input:checked + span { color: var(--ink-2); text-decoration: line-through; text-decoration-color: var(--good); }
+    .check-foot { font-size: 0.9rem; color: var(--ink-2); }
+
+    /* ---------- lightbox ---------- */
+    dialog.lightbox { border: 0; padding: 0; background: transparent; max-width: min(96vw, 1600px); max-height: 96vh; }
+    dialog.lightbox::backdrop { background: rgba(10, 8, 5, 0.82); backdrop-filter: blur(4px); }
+    dialog.lightbox img { max-width: 96vw; max-height: 88vh; width: auto; height: auto; border-radius: 10px; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); margin: 0 auto; }
+    dialog.lightbox figcaption { color: #f1ece2; text-align: center; margin: 0.75rem auto 0; max-width: 70ch; }
+    dialog.lightbox .close {
+      position: fixed; top: 1rem; right: 1rem; background: #f1ece2; color: #1d1a16; border: 0; border-radius: 999px;
+      width: 2.5rem; height: 2.5rem; font-size: 1.3rem; cursor: pointer;
+    }
+
+    footer { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 1.5rem; color: var(--ink-2); font-size: 0.9rem; }
+    footer p { margin: 0.25rem 0; }
+
+    @media print {
+      body { background: #fff; color: #000; font-size: 11pt; }
+      .rail, .hero__tools, .skip, .jump { display: none !important; }
+      .frame { display: block; max-width: none; padding: 0; }
+      figure.shot .frame-img { box-shadow: none; border-color: #999; break-inside: avoid; }
+      section { break-inside: avoid-page; }
+      a { color: #000; text-decoration: none; }
+      .note { border-color: #000; background: #f2f2f2; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the steps</a>
+
+  <div class="frame">
+    <header class="hero reveal">
+      <p class="hero__eyebrow">Live Counter for OBS</p>
+      <h1>Install<br />Live Counter</h1>
+      <p class="lede">A live on-screen counter, set up inside OBS in about ten minutes. No installer, no extra program, no internet needed.</p>
+      <ul class="facts" aria-label="What you need">
+        <li><span class="dot"></span>OBS Studio 31 or newer</li>
+        <li><span class="dot"></span>Windows or macOS</li>
+        <li><span class="dot"></span>The Live Counter folder</li>
+        <li><span class="dot"></span>About 10 minutes</li>
+      </ul>
+      <ul class="jump" aria-label="Jump to">
+        <li><a href="#before">Before you start</a></li>
+        <li><a href="#step-1">Setup steps</a></li>
+        <li><a href="#check">Check it works</a></li>
+        <li><a href="#sunday">Using it on a Sunday</a></li>
+        <li><a href="#moved">Moved the folder?</a></li>
+        <li><a href="#trouble">If something goes wrong</a></li>
+      </ul>
+      <div class="hero__tools">
+        <button class="btn" id="theme" type="button" aria-pressed="false">Dark mode</button>
+        <button class="btn" type="button" onclick="window.print()">Print</button>
+      </div>
+    </header>
+
+    <nav class="rail" aria-label="On this page">
+      <h2>On this page</h2>
+      <ol>
+        <li><a href="#what">What you are installing</a></li>
+        <li><a href="#before">Before you start</a></li>
+        <li class="group">Setup</li>
+        <li><a href="#step-1">1. Put the folder somewhere permanent</a></li>
+        <li><a href="#step-2">2. Turn on the WebSocket server</a></li>
+        <li><a href="#step-3">3. Add the control panel</a></li>
+        <li><a href="#step-4">4. Connect the panel to OBS</a></li>
+        <li><a href="#step-5">5. Add the overlay to your scene</a></li>
+        <li><a href="#step-6">6. Keyboard shortcuts (optional)</a></li>
+        <li class="group">After setup</li>
+        <li><a href="#check">Check that everything works</a></li>
+        <li><a href="#sunday">Using it on a Sunday</a></li>
+        <li><a href="#moved">Moved the folder?</a></li>
+        <li><a href="#trouble">If something goes wrong</a></li>
+        <li><a href="#another">Moving to another computer</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+
+      <section id="what">
+        <h2>What you are installing</h2>
+        <p>Live Counter for OBS puts a big number on your stream that you count up or down live, for example "Hallelujah" shouted 50 times. It runs inside OBS Studio, with nothing to install and no internet needed: a folder of files plus a few clicks, done once. It has three pieces:</p>
+        <ul class="plain">
+          <li><b>Control panel</b>: a panel inside OBS (a dock) with <b>+1</b>, <b>−1</b>, <b>Undo</b>, <b>Show</b> and <b>Hide</b>.</li>
+          <li><b>Overlay</b>: a transparent Browser Source that shows the number on screen.</li>
+          <li><b>Keyboard shortcuts script</b>: keyboard or Stream Deck shortcuts for the main actions.</li>
+        </ul>
+        <div class="figs two">
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-live-tab.png"><img src="img/dock-live-tab.png" alt="Live tab with a large number and +1, −1, Undo, Show buttons." loading="lazy" width="840" height="1680" /></a>
+            <figcaption>The control panel during a count. The big number is what your congregation sees.</figcaption>
+          </figure>
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/overlay-on-stage.png"><img src="img/overlay-on-stage.png" alt="Large counter number over a dark stage." loading="lazy" width="1280" height="720" /></a>
+            <figcaption>The overlay shows one large number over your scene.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="before">
+        <h2>Before you start</h2>
+        <ul class="plain">
+          <li>OBS Studio 31 or newer, on Windows or macOS.</li>
+          <li>No internet connection is needed at any point.</li>
+          <li>The <code>live-counter-for-obs</code> folder, copied onto the streaming computer.</li>
+          <li>About 10 minutes, ideally well before a service.</li>
+        </ul>
+        <p>The pictures on this page come from a Mac running OBS 32. OBS menus are identical on Windows; only file addresses differ.</p>
+        <div class="note">
+          <p class="tag">For developers</p>
+          <p>If you run from the source repository instead of the shipped folder, the same files live inside <code>dist/</code>.</p>
+        </div>
+      </section>
+
+      <section class="step" id="step-1">
+        <p class="step__num">Step 1</p>
+        <h2>Put the folder somewhere permanent</h2>
+        <p>OBS remembers the folder's exact location, so moving or renaming it later breaks the setup.</p>
+        <ol class="steps">
+          <li>Put the <code>live-counter-for-obs</code> folder in <b>Documents</b>. An external drive is fine if it stays connected.</li>
+          <li>Double-click <code>setup.html</code> in the folder. It opens in your web browser. Keep it open.</li>
+        </ol>
+        <p>The page shows two addresses with <b>Copy</b> buttons: the <b>Dock URL</b> for the control panel and the <b>Overlay URL</b> for the on-screen number. On Windows they start with <code>file:///C:/Users/</code>, on a Mac with <code>file:///Users/</code>. If Copy is blocked, the page highlights the address so you can copy it by hand.</p>
+        <div class="figs">
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/plugin-setup-page.png"><img src="img/plugin-setup-page.png" alt="Setup page with two addresses and Copy buttons." loading="lazy" width="1800" height="1874" /></a>
+            <figcaption>Each address has its own Copy button. The addresses shown are always the right ones for the computer the page is opened on.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="step" id="step-2">
+        <p class="step__num">Step 2</p>
+        <h2>Turn on the WebSocket server in OBS</h2>
+        <p>OBS's WebSocket server (a built-in switch that lets the control panel talk to OBS) needs to be on.</p>
+        <ol class="steps">
+          <li>Open <b>Tools → WebSocket Server Settings</b>.</li>
+          <li>Tick <b>Enable WebSocket server</b>. Leave <b>Enable Authentication</b> ticked.</li>
+          <li>Note the <b>Server Port</b>, usually <code>4455</code>.</li>
+          <li>Click <b>Show Connect Info</b> and copy the <b>Server Password</b>, or reveal it in the password field.</li>
+          <li>Click <b>Apply</b>, then <b>OK</b>.</li>
+        </ol>
+        <div class="figs two">
+          <figure class="shot shot--menu">
+            <a class="frame-img zoom" href="img/obs-tools-menu.png"><img src="img/obs-tools-menu.png" alt="OBS Tools menu showing WebSocket Server Settings and Scripts." loading="lazy" width="396" height="378" /></a>
+            <figcaption>The Tools menu holds WebSocket Server Settings and Scripts.</figcaption>
+          </figure>
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-websocket-server-settings.png"><img src="img/obs-websocket-server-settings.png" alt="WebSocket Server Settings dialog with port and password fields." loading="lazy" width="1350" height="1446" /></a>
+            <figcaption>Both Enable boxes are ticked, with Show Connect Info below the password.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="step" id="step-3">
+        <p class="step__num">Step 3</p>
+        <h2>Add the control panel</h2>
+        <ol class="steps">
+          <li>Open <b>Docks → Custom Browser Docks</b>.</li>
+          <li>In an empty row, type <code>Live Counter</code> under <b>Dock Name</b>.</li>
+          <li>Copy the <b>Dock URL</b> from the setup page and paste it under <b>URL</b>.</li>
+          <li>Click <b>Apply</b>.</li>
+        </ol>
+        <p>The panel appears as a floating window. Drag it by its title bar to sit beside your other panels.</p>
+        <div class="figs two">
+          <figure class="shot shot--menu">
+            <a class="frame-img zoom" href="img/obs-docks-menu.png"><img src="img/obs-docks-menu.png" alt="OBS Docks menu with Custom Browser Docks highlighted." loading="lazy" width="362" height="614" /></a>
+            <figcaption>The Docks menu opens Custom Browser Docks.</figcaption>
+          </figure>
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-custom-browser-docks.png"><img src="img/obs-custom-browser-docks.png" alt="Custom Browser Docks dialog with a Live Counter row." loading="lazy" width="1570" height="770" /></a>
+            <figcaption>Each panel is one row: a Dock Name and a URL.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="step" id="step-4">
+        <p class="step__num">Step 4</p>
+        <h2>Connect the panel to OBS</h2>
+        <ol class="steps">
+          <li>In the panel, click the <b>Diagnostics</b> tab.</li>
+          <li>Under <b>Settings</b>, check <b>Port</b> matches Step 2.</li>
+          <li>Click <b>Paste</b> next to <b>Password</b>.</li>
+          <li>Click <b>Save</b>.</li>
+        </ol>
+        <p>The <b>Connection checklist</b> turns green: <b>Storage</b>, <b>OBS WebSocket</b> (showing <b>Connected to OBS</b>) and <b>Transport</b> now, <b>Overlay</b> after Step 5, <b>Hotkeys</b> after Step 6. Any row that is not green names its fix.</p>
+        <div class="note good">
+          <p class="tag">Good to know</p>
+          <p>Even without the password, the panel and the overlay talk to each other directly, so counting still works. The password is what unlocks <b>Add overlay to my scene</b>, the LIVE indicator (showing when you are on air), keyboard shortcuts, and a session backup inside OBS.</p>
+        </div>
+        <div class="figs">
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-diagnostics-connected.png"><img src="img/dock-diagnostics-connected.png" alt="Diagnostics tab with green checklist rows and a password field." loading="lazy" width="840" height="2084" /></a>
+            <figcaption>The checklist is green, with Port and Password under Settings.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="step" id="step-5">
+        <p class="step__num">Step 5</p>
+        <h2>Add the overlay to your scene</h2>
+
+        <h3>The easy way</h3>
+        <ol class="steps">
+          <li>Select the scene for the counter. The overlay goes into the scene in <b>Program</b> (on air).</li>
+          <li>On the <b>Diagnostics</b> tab, click <b>Add overlay to my scene</b>.</li>
+        </ol>
+        <p>The panel shows <b>Overlay added to</b> and your scene name. It creates a Browser Source named <b>Live Counter Overlay</b> with the recommended settings, and never saves your password into it. If an overlay already exists, the button reads <b>Add overlay to this scene</b> or <b>Fix overlay settings</b> instead.</p>
+        <div class="figs">
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-add-overlay-confirm.png"><img src="img/dock-add-overlay-confirm.png" alt="Diagnostics tab showing an Overlay added to message." loading="lazy" width="840" height="2126" /></a>
+            <figcaption>The panel confirms the overlay and names the scene it went into.</figcaption>
+          </figure>
+        </div>
+
+        <h3>The manual way</h3>
+        <ol class="steps">
+          <li>In <b>Sources</b>, click <b>+</b> and choose <b>Browser</b>. Name it <code>Live Counter Overlay</code> and click <b>OK</b>. (OBS 32 opens an <b>Add Source</b> window; older versions show a short menu.)</li>
+          <li>In the properties window that opens, paste the <b>Overlay URL</b> into <b>URL</b>. Leave <b>Local file</b> unticked.</li>
+          <li>Set <b>Width</b> and <b>Height</b> to your canvas size (<b>Settings → Video → Base (Canvas) Resolution</b>).</li>
+          <li>Set <b>FPS</b> to <code>30</code>, or <code>60</code> to match your project.</li>
+          <li>Scroll down and untick <b>Shutdown source when not visible</b> and <b>Refresh browser when scene becomes active</b>.</li>
+          <li>Click <b>OK</b>.</li>
+        </ol>
+        <div class="figs two">
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-add-source-menu.png"><img src="img/obs-add-source-menu.png" alt="OBS Add Source window with Browser in the list of source types." loading="lazy" width="1600" height="1003" /></a>
+            <figcaption>The Add Source window lists Browser near the top.</figcaption>
+          </figure>
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-browser-source-properties.png"><img src="img/obs-browser-source-properties.png" alt="Browser Source properties with URL, Width and Height fields." loading="lazy" width="1440" height="1224" /></a>
+            <figcaption>Paste your own Overlay URL into the URL field. Width and height here match a 1920 × 1080 canvas; the two checkboxes are further down.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="step" id="step-6">
+        <p class="step__num">Step 6</p>
+        <h2>Keyboard shortcuts (optional)</h2>
+        <ol class="steps">
+          <li>Open <b>Tools → Scripts</b>, click <b>+</b>, and choose <code>counter-hotkeys.lua</code> from the Live Counter folder.</li>
+          <li>Open <b>Settings → Hotkeys</b> and scroll to the five entries starting <b>Live Counter:</b>.</li>
+          <li>Click each box, press your keys, then click <b>OK</b>.</li>
+        </ol>
+        <p>Suggested keys. Any combination that OBS is not already using works too.</p>
+        <table>
+          <thead><tr><th>Action</th><th>Windows</th><th>Mac</th></tr></thead>
+          <tbody>
+            <tr><td><b>+1</b></td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>=</kbd></td><td><kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>=</kbd></td></tr>
+            <tr><td><b>−1</b></td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>−</kbd></td><td><kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>−</kbd></td></tr>
+            <tr><td><b>Undo</b></td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Z</kbd></td><td><kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>Z</kbd></td></tr>
+            <tr><td><b>Pause / Resume</b></td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>P</kbd></td><td><kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>P</kbd></td></tr>
+            <tr><td><b>Show / Hide overlay</b></td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>H</kbd></td><td><kbd>Ctrl</kbd> + <kbd>Option</kbd> + <kbd>H</kbd></td></tr>
+          </tbody>
+        </table>
+        <p>Always include a modifier key: a bare key like <kbd>+</kbd> can fire while you type elsewhere in OBS. On a Mac, avoid <kbd>Cmd</kbd> + <kbd>H</kbd> (it hides OBS) and <kbd>Cmd</kbd> + <kbd>Z</kbd> (OBS's own Undo). Shortcuts need the panel connected (Step 4) and also work through a Stream Deck's OBS integration. The <b>Hotkeys</b> row on the Diagnostics tab turns green within about 30 seconds of adding the script.</p>
+        <div class="figs two">
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-scripts-window.png"><img src="img/obs-scripts-window.png" alt="OBS Scripts window with a plus button under the loaded scripts list." loading="lazy" width="1550" height="1048" /></a>
+            <figcaption>The + button below the list adds a script. Your list will show <code>counter-hotkeys.lua</code> once it is added.</figcaption>
+          </figure>
+          <figure class="shot shot--wide">
+            <a class="frame-img zoom" href="img/obs-settings-hotkeys.png"><img src="img/obs-settings-hotkeys.png" alt="OBS Settings window open on the Hotkeys page." loading="lazy" width="1600" height="1243" /></a>
+            <figcaption>Hotkeys is in the left-hand list of Settings. The five Live Counter entries appear near the bottom of the page once the script is added.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="check">
+        <h2>Check that everything works</h2>
+        <p>Tick these off. They stay ticked on this computer so you can come back to them.</p>
+        <ul class="check" id="checklist">
+          <li><label><input type="checkbox" data-k="c1" /><span>The panel opens with <b>Presets</b>, <b>Setup</b>, <b>Live</b> and <b>Diagnostics</b> tabs.</span></label></li>
+          <li><label><input type="checkbox" data-k="c2" /><span>The Diagnostics <b>Connection checklist</b> is green.</span></label></li>
+          <li><label><input type="checkbox" data-k="c3" /><span>After <b>Start session</b> (Setup) and <b>Show</b> (Live), the number appears in the OBS Preview.</span></label></li>
+          <li><label><input type="checkbox" data-k="c4" /><span><b>+1</b> changes the number on screen.</span></label></li>
+          <li><label><input type="checkbox" data-k="c5" /><span>With the OBS window clicked, your +1 shortcut works.</span></label></li>
+        </ul>
+        <p class="check-foot"><button class="btn" type="button" id="clear-checks">Clear ticks</button></p>
+      </section>
+
+      <section id="sunday">
+        <h2>Using it on a Sunday</h2>
+        <ol class="steps">
+          <li>In <b>Presets</b>, <b>Load</b> or <b>Start</b> a preset. Or set up a count in <b>Setup</b> and click <b>Start session</b>.</li>
+          <li>Click <b>Show</b>, then bring the scene to Program as usual.</li>
+          <li>Count with <b>+1</b>, <b>−1</b>, <b>Undo</b> and <b>Jump</b>. At either end of the range the count stops. Nothing breaks.</li>
+          <li>In <b>Automatic</b> mode, use <b>Start counting</b>, <b>Pause</b>, <b>Resume</b>, <b>Faster</b>, <b>Slower</b> and <b>Reverse</b>.</li>
+          <li>Finish with <b>Hide</b>, or <b>End</b> and then <b>End, keep overlay</b> or <b>End, hide overlay</b>.</li>
+        </ol>
+        <p>While the counter is live on air, your first <b>Show</b>, <b>Reset</b> or <b>Jump</b> in each session asks you to confirm.</p>
+        <div class="figs three">
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-live-tab.png"><img src="img/dock-live-tab.png" alt="Live tab with a large number and +1, −1, Undo, Show buttons." loading="lazy" width="840" height="1680" /></a>
+            <figcaption>The Live tab shows the number large, with the buttons you use during a service below it.</figcaption>
+          </figure>
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-setup-tab.png"><img src="img/dock-setup-tab.png" alt="Setup tab with counting options and a number preview." loading="lazy" width="840" height="3566" /></a>
+            <figcaption>The Setup tab shapes a count and previews how it will look.</figcaption>
+          </figure>
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/dock-presets-tab.png"><img src="img/dock-presets-tab.png" alt="Presets tab with saved presets and their buttons." loading="lazy" width="840" height="1680" /></a>
+            <figcaption>The Presets tab lists saved counts, with Export and Import.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="moved">
+        <h2>Moved the folder?</h2>
+        <p>If the folder moves or is renamed, the panel shows <b>Couldn't load that page</b> with <b>File not found</b>, the overlay goes blank, and shortcuts stop. To fix it:</p>
+        <ol class="steps">
+          <li>Open <code>setup.html</code> from the folder's new location.</li>
+          <li>In <b>Docks → Custom Browser Docks</b>, replace the Live Counter URL with the new <b>Dock URL</b>. Click <b>Apply</b>.</li>
+          <li>Right-click <b>Live Counter Overlay</b> in <b>Sources</b>, choose <b>Properties</b>, paste the new <b>Overlay URL</b> into <b>URL</b>, and click <b>OK</b>.</li>
+          <li>In <b>Tools → Scripts</b>, remove <code>counter-hotkeys.lua</code> with <b>−</b> and add it again with <b>+</b>. Reassign any missing keys.</li>
+        </ol>
+        <p>Presets are kept by OBS itself, not in the folder, so they normally survive a move. To be safe, <b>Export</b> them from the Presets tab first.</p>
+        <div class="figs">
+          <figure class="shot shot--dock">
+            <a class="frame-img zoom" href="img/obs-dock-file-not-found.png"><img src="img/obs-dock-file-not-found.png" alt="Live Counter panel showing Couldn't load that page and File not found." loading="lazy" width="720" height="1000" /></a>
+            <figcaption>After a move, the panel shows OBS's error page with the old address.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="trouble">
+        <h2>If something goes wrong</h2>
+        <ul class="plain">
+          <li><b>Panel frozen.</b> Right-click it and choose <b>Reload</b>, or reopen it from <b>Docks</b>. The count is kept.</li>
+          <li><b>OBS crashed or restarted.</b> The panel restores your session, paused, so you can check the number first.</li>
+          <li><b>OBS asks "Are you sure you want to exit?"</b> That is OBS's normal question. Your session is saved, so it is safe to confirm.</li>
+          <li><b>OBS WebSocket row not green.</b> Check the server is on and the port matches. For a wrong password, copy it again from <b>Show Connect Info</b>, then <b>Paste</b> and <b>Save</b>.</li>
+          <li><b>Overlay not seen.</b> Add the overlay (Step 5), or check that its scene is loaded.</li>
+          <li><b>Hotkey bridge silent.</b> Add <code>counter-hotkeys.lua</code> again in <b>Tools → Scripts</b>.</li>
+          <li><b>Still stuck.</b> Click <b>Copy diagnostics</b> on the Diagnostics tab and send it to whoever helps you.</li>
+        </ul>
+        <div class="note warn">
+          <p class="tag">Last resort</p>
+          <p><b>Reset everything</b> on the Diagnostics tab deletes every setting, preset, session and log on this computer after you confirm. It cannot be undone.</p>
+        </div>
+      </section>
+
+      <section id="another">
+        <h2>Moving to another computer</h2>
+        <p>Copy the folder to a permanent home on the new computer and repeat Steps 1 to 6. Addresses differ on every computer, and <code>setup.html</code> always shows the right ones.</p>
+        <p>Presets do not travel with the folder. On the old computer, click <b>Export</b> in <b>Presets</b> and paste the result into a text file you can carry across. On the new one, copy that text, then click <b>Import</b>, <b>Paste</b> and <b>Apply</b>.</p>
+      </section>
+
+    </main>
+
+    <footer>
+      <p>Live Counter for OBS, install guide. Screenshots taken on macOS with OBS Studio 32.2; the panel and overlay pictures show the shipped version 0.2.</p>
+      <p>Oswald font © The Oswald Project Authors, SIL Open Font License (see <code>fonts/oswald-OFL-LICENSE.txt</code>).</p>
+    </footer>
+  </div>
+
+  <dialog class="lightbox" id="lightbox" aria-label="Enlarged picture">
+    <button class="close" type="button" id="lb-close" aria-label="Close">×</button>
+    <figure style="margin:0">
+      <img id="lb-img" src="" alt="" />
+      <figcaption id="lb-cap"></figcaption>
+    </figure>
+  </dialog>
+
+  <script>
+    (function () {
+      var store = {
+        get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+        set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+        del: function (k) { try { localStorage.removeItem(k); } catch (e) {} }
+      };
+
+      // Theme toggle: auto by default, remembered per browser.
+      var root = document.documentElement;
+      var themeBtn = document.getElementById('theme');
+      function applyTheme(t) {
+        if (t === 'dark' || t === 'light') { root.setAttribute('data-theme', t); } else { root.removeAttribute('data-theme'); }
+        var dark = t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        themeBtn.textContent = dark ? 'Light mode' : 'Dark mode';
+        themeBtn.setAttribute('aria-pressed', dark ? 'true' : 'false');
+      }
+      applyTheme(store.get('lc-guide-theme'));
+      themeBtn.addEventListener('click', function () {
+        var dark = themeBtn.getAttribute('aria-pressed') === 'true';
+        var next = dark ? 'light' : 'dark';
+        store.set('lc-guide-theme', next);
+        applyTheme(next);
+      });
+
+      // Lightbox for every screenshot.
+      var lb = document.getElementById('lightbox');
+      var lbImg = document.getElementById('lb-img');
+      var lbCap = document.getElementById('lb-cap');
+      if (lb && typeof lb.showModal === 'function') {
+        document.querySelectorAll('a.zoom').forEach(function (a) {
+          a.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            var img = a.querySelector('img');
+            var cap = a.parentNode.querySelector('figcaption');
+            lbImg.src = a.getAttribute('href');
+            lbImg.alt = img ? img.alt : '';
+            lbCap.textContent = cap ? cap.textContent : '';
+            lb.showModal();
+          });
+        });
+        document.getElementById('lb-close').addEventListener('click', function () { lb.close(); });
+        lb.addEventListener('click', function (ev) { if (ev.target === lb) lb.close(); });
+        lb.addEventListener('close', function () { lbImg.src = ''; });
+      }
+
+      // Checklist ticks, remembered per browser.
+      var boxes = document.querySelectorAll('#checklist input[type="checkbox"]');
+      boxes.forEach(function (b) {
+        b.checked = store.get('lc-guide-' + b.dataset.k) === '1';
+        b.addEventListener('change', function () {
+          if (b.checked) store.set('lc-guide-' + b.dataset.k, '1'); else store.del('lc-guide-' + b.dataset.k);
+        });
+      });
+      document.getElementById('clear-checks').addEventListener('click', function () {
+        boxes.forEach(function (b) { b.checked = false; store.del('lc-guide-' + b.dataset.k); });
+      });
+
+      // Highlight the current section in the side rail.
+      var links = Array.prototype.slice.call(document.querySelectorAll('.rail a[href^="#"]'));
+      if ('IntersectionObserver' in window && links.length) {
+        var byId = {};
+        links.forEach(function (l) { byId[l.getAttribute('href').slice(1)] = l; });
+        var io = new IntersectionObserver(function (entries) {
+          entries.forEach(function (en) {
+            if (en.isIntersecting) {
+              links.forEach(function (l) { l.classList.remove('is-active'); });
+              var l = byId[en.target.id];
+              if (l) l.classList.add('is-active');
+            }
+          });
+        }, { rootMargin: '-10% 0px -75% 0px', threshold: 0 });
+        Object.keys(byId).forEach(function (id) { var s = document.getElementById(id); if (s) io.observe(s); });
+      }
+    })();
+  </script>
+</body>
+</html>
