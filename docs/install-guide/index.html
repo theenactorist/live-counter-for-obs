@@ -38,7 +38,6 @@
       --accent-2: #f4dcc5;
       --on-accent: #fffaf3;
       --good: #2f7a4d;
-      --good-2: #dcefe2;
       --warn: #a5382b;
       --warn-2: #f6dcd6;
       --code: #ebe4d6;
@@ -61,7 +60,6 @@
         --accent-2: #3a2a17;
         --on-accent: #1a120a;
         --good: #78d69f;
-        --good-2: #173224;
         --warn: #ff9a86;
         --warn-2: #3d1d18;
         --code: #24272c;
@@ -79,7 +77,6 @@
       --accent-2: #3a2a17;
       --on-accent: #1a120a;
       --good: #78d69f;
-      --good-2: #173224;
       --warn: #ff9a86;
       --warn-2: #3d1d18;
       --code: #24272c;
@@ -97,10 +94,6 @@
       font-size: 1.0625rem;
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
-      background-image:
-        radial-gradient(1200px 600px at 100% -10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
-        radial-gradient(800px 500px at -10% 30%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 60%);
-      background-attachment: fixed;
     }
     a { color: var(--accent); text-underline-offset: 0.15em; }
     a:hover { text-decoration-thickness: 2px; }
@@ -146,15 +139,6 @@
       margin-bottom: 2.5rem;
       position: relative;
     }
-    .hero__eyebrow {
-      font-family: var(--display);
-      font-weight: 500;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      font-size: 0.85rem;
-      color: var(--accent);
-      margin: 0 0 0.5rem;
-    }
     .hero h1 {
       font-family: var(--display);
       font-weight: 700;
@@ -165,13 +149,6 @@
       text-transform: uppercase;
     }
     .hero p.lede { font-size: 1.25rem; color: var(--ink-2); margin: 0 0 1.75rem; max-width: 40ch; }
-    .facts { display: flex; flex-wrap: wrap; gap: 0.6rem; padding: 0; margin: 0 0 1.5rem; list-style: none; }
-    .facts li {
-      display: inline-flex; align-items: center; gap: 0.5rem;
-      background: var(--paper-2); border: 1px solid var(--line); border-radius: 999px;
-      padding: 0.35rem 0.9rem 0.35rem 0.6rem; font-size: 0.95rem;
-    }
-    .facts .dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--accent); flex: none; }
     .hero__tools { position: absolute; right: 0; top: 1.25rem; display: flex; gap: 0.5rem; }
     .btn {
       appearance: none; border: 1px solid var(--line); background: var(--paper-2); color: var(--ink);
@@ -182,18 +159,9 @@
     .jump a { color: var(--ink); text-decoration: none; border-bottom: 2px solid var(--accent-2); }
     .jump a:hover { border-color: var(--accent); }
 
-    /* staggered reveal on load */
-    .reveal > * { animation: rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
-    .reveal > *:nth-child(2) { animation-delay: 0.06s; }
-    .reveal > *:nth-child(3) { animation-delay: 0.12s; }
-    .reveal > *:nth-child(4) { animation-delay: 0.18s; }
-    .reveal > *:nth-child(5) { animation-delay: 0.24s; }
-    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-    @media (prefers-reduced-motion: reduce) { .reveal > * { animation: none; } }
-
     /* ---------- rail (table of contents) ---------- */
     .rail { display: none; }
-    @media (min-width: 1000px) { .rail { display: block; } }
+    @media (min-width: 1000px) { .rail { display: block; } .jump { display: none; } }
     .rail h2 { font-family: var(--display); font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; font-size: 0.8rem; color: var(--ink-2); margin: 0 0 0.6rem; }
     .rail ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
     .rail li a {
@@ -255,14 +223,12 @@
       margin: 1.25rem 0;
       max-width: calc(var(--measure) + 2rem);
     }
-    .note.good { border-left-color: var(--good); background: var(--good-2); }
     .note.warn { border-left-color: var(--warn); background: var(--warn-2); }
     .note p { margin: 0.25rem 0; }
     .note .tag {
       font-family: var(--display); letter-spacing: 0.14em; text-transform: uppercase; font-size: 0.75rem; font-weight: 700;
       color: var(--accent);
     }
-    .note.good .tag { color: var(--good); }
     .note.warn .tag { color: var(--warn); }
 
     /* ---------- figures ---------- */
@@ -284,10 +250,6 @@
     figure.shot--menu .frame-img { max-width: 320px; }
     figure.shot--wide .frame-img { max-width: 100%; }
     figcaption { font-size: 0.93rem; color: var(--ink-2); margin: 0.6rem 0 0; max-width: 60ch; }
-    figcaption .n {
-      display: inline-block; font-family: var(--display); font-weight: 700; color: var(--accent);
-      letter-spacing: 0.08em; margin-right: 0.4rem;
-    }
 
     table { border-collapse: collapse; margin: 0.75rem 0 1rem; font-size: 0.98rem; }
     th, td { text-align: left; padding: 0.5rem 0.9rem 0.5rem 0; border-bottom: 1px solid var(--line-2); vertical-align: top; }
@@ -330,16 +292,9 @@
   <a class="skip" href="#main">Skip to the steps</a>
 
   <div class="frame">
-    <header class="hero reveal">
-      <p class="hero__eyebrow">Live Counter for OBS</p>
+    <header class="hero">
       <h1>Install<br />Live Counter</h1>
-      <p class="lede">A live on-screen counter, set up inside OBS in about ten minutes. No installer, no extra program, no internet needed.</p>
-      <ul class="facts" aria-label="What you need">
-        <li><span class="dot"></span>OBS Studio 31 or newer</li>
-        <li><span class="dot"></span>Windows or macOS</li>
-        <li><span class="dot"></span>The Live Counter folder</li>
-        <li><span class="dot"></span>About 10 minutes</li>
-      </ul>
+      <p class="lede">A live on-screen counter, set up inside OBS in about ten minutes.</p>
       <ul class="jump" aria-label="Jump to">
         <li><a href="#before">Before you start</a></li>
         <li><a href="#step-1">Setup steps</a></li>
@@ -379,7 +334,7 @@
 
       <section id="what">
         <h2>What you are installing</h2>
-        <p>Live Counter for OBS puts a big number on your stream that you count up or down live, for example "Hallelujah" shouted 50 times. It runs inside OBS Studio, with nothing to install and no internet needed: a folder of files plus a few clicks, done once. It has three pieces:</p>
+        <p>Live Counter for OBS puts a big number on your stream that you count up or down live, for example "Hallelujah" shouted 50 times. There is no program to install: it is a folder of files that you set up once inside OBS Studio. It has three parts:</p>
         <ul class="plain">
           <li><b>Control panel</b>: a panel inside OBS (a dock) with <b>+1</b>, <b>−1</b>, <b>Undo</b>, <b>Show</b> and <b>Hide</b>.</li>
           <li><b>Overlay</b>: a transparent Browser Source that shows the number on screen.</li>
@@ -388,11 +343,9 @@
         <div class="figs two">
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-live-tab.png"><img src="img/dock-live-tab.png" alt="Live tab with a large number and +1, −1, Undo, Show buttons." loading="lazy" width="840" height="1680" /></a>
-            <figcaption>The control panel during a count. The big number is what your congregation sees.</figcaption>
           </figure>
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/overlay-on-stage.png"><img src="img/overlay-on-stage.png" alt="Large counter number over a dark stage." loading="lazy" width="1280" height="720" /></a>
-            <figcaption>The overlay shows one large number over your scene.</figcaption>
           </figure>
         </div>
       </section>
@@ -401,11 +354,11 @@
         <h2>Before you start</h2>
         <ul class="plain">
           <li>OBS Studio 31 or newer, on Windows or macOS.</li>
-          <li>No internet connection is needed at any point.</li>
+          <li>No internet connection is needed.</li>
           <li>The <code>live-counter-for-obs</code> folder, copied onto the streaming computer.</li>
           <li>About 10 minutes, ideally well before a service.</li>
         </ul>
-        <p>The pictures on this page come from a Mac running OBS 32. OBS menus are identical on Windows; only file addresses differ.</p>
+        <p>The pictures come from a Mac running OBS 32. The OBS menus are the same on Windows; only the file addresses differ.</p>
       </section>
 
       <section class="step" id="step-1">
@@ -420,7 +373,6 @@
         <div class="figs">
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/plugin-setup-page.png"><img src="img/plugin-setup-page.png" alt="Setup page with two addresses and Copy buttons." loading="lazy" width="1800" height="1874" /></a>
-            <figcaption>Each address has its own Copy button. The addresses shown are always the right ones for the computer the page is opened on.</figcaption>
           </figure>
         </div>
       </section>
@@ -428,7 +380,7 @@
       <section class="step" id="step-2">
         <p class="step__num">Step 2</p>
         <h2>Turn on the WebSocket server in OBS</h2>
-        <p>OBS's WebSocket server (a built-in switch that lets the control panel talk to OBS) needs to be on.</p>
+        <p>This built-in OBS setting lets the control panel talk to OBS.</p>
         <ol class="steps">
           <li>Open <b>Tools → WebSocket Server Settings</b>.</li>
           <li>Tick <b>Enable WebSocket server</b>. Leave <b>Enable Authentication</b> ticked.</li>
@@ -439,11 +391,10 @@
         <div class="figs two">
           <figure class="shot shot--menu">
             <a class="frame-img zoom" href="img/obs-tools-menu.png"><img src="img/obs-tools-menu.png" alt="OBS Tools menu showing WebSocket Server Settings and Scripts." loading="lazy" width="396" height="378" /></a>
-            <figcaption>The Tools menu holds WebSocket Server Settings and Scripts.</figcaption>
           </figure>
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-websocket-server-settings.png"><img src="img/obs-websocket-server-settings.png" alt="WebSocket Server Settings dialog with port and password fields." loading="lazy" width="1350" height="1446" /></a>
-            <figcaption>Both Enable boxes are ticked, with Show Connect Info below the password.</figcaption>
+            <figcaption>Show Connect Info is below the Server Password.</figcaption>
           </figure>
         </div>
       </section>
@@ -461,11 +412,9 @@
         <div class="figs two">
           <figure class="shot shot--menu">
             <a class="frame-img zoom" href="img/obs-docks-menu.png"><img src="img/obs-docks-menu.png" alt="OBS Docks menu with Custom Browser Docks highlighted." loading="lazy" width="362" height="614" /></a>
-            <figcaption>The Docks menu opens Custom Browser Docks.</figcaption>
           </figure>
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-custom-browser-docks.png"><img src="img/obs-custom-browser-docks.png" alt="Custom Browser Docks dialog with a Live Counter row." loading="lazy" width="1570" height="770" /></a>
-            <figcaption>Each panel is one row: a Dock Name and a URL.</figcaption>
           </figure>
         </div>
       </section>
@@ -480,14 +429,10 @@
           <li>Click <b>Save</b>.</li>
         </ol>
         <p>The <b>Connection checklist</b> turns green: <b>Storage</b>, <b>OBS WebSocket</b> (showing <b>Connected to OBS</b>) and <b>Transport</b> now, <b>Overlay</b> after Step 5, <b>Hotkeys</b> after Step 6. Any row that is not green names its fix.</p>
-        <div class="note good">
-          <p class="tag">Good to know</p>
-          <p>Even without the password, the panel and the overlay talk to each other directly, so counting still works. The password is what unlocks <b>Add overlay to my scene</b>, the LIVE indicator (showing when you are on air), keyboard shortcuts, and a session backup inside OBS.</p>
-        </div>
+        <p><b>Add overlay to my scene</b>, the LIVE indicator (which shows when you are on air), keyboard shortcuts and the session backup inside OBS all need this connection. Without it, only counting works.</p>
         <div class="figs">
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-diagnostics-connected.png"><img src="img/dock-diagnostics-connected.png" alt="Diagnostics tab with green checklist rows and a password field." loading="lazy" width="840" height="2084" /></a>
-            <figcaption>The checklist is green, with Port and Password under Settings.</figcaption>
           </figure>
         </div>
       </section>
@@ -501,11 +446,10 @@
           <li>Select the scene for the counter. The overlay goes into the scene in <b>Program</b> (on air).</li>
           <li>On the <b>Diagnostics</b> tab, click <b>Add overlay to my scene</b>.</li>
         </ol>
-        <p>The panel shows <b>Overlay added to</b> and your scene name. It creates a Browser Source named <b>Live Counter Overlay</b> with the recommended settings, and never saves your password into it. If an overlay already exists, the button reads <b>Add overlay to this scene</b> or <b>Fix overlay settings</b> instead.</p>
+        <p>This creates a Browser Source named <b>Live Counter Overlay</b> with the recommended settings, and the panel shows <b>Overlay added to</b> and your scene name. If an overlay already exists, the button reads <b>Add overlay to this scene</b> or <b>Fix overlay settings</b> instead.</p>
         <div class="figs">
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-add-overlay-confirm.png"><img src="img/dock-add-overlay-confirm.png" alt="Diagnostics tab showing an Overlay added to message." loading="lazy" width="840" height="2126" /></a>
-            <figcaption>The panel confirms the overlay and names the scene it went into.</figcaption>
           </figure>
         </div>
 
@@ -521,11 +465,10 @@
         <div class="figs two">
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-add-source-menu.png"><img src="img/obs-add-source-menu.png" alt="OBS Add Source window with Browser in the list of source types." loading="lazy" width="1600" height="1003" /></a>
-            <figcaption>The Add Source window lists Browser near the top.</figcaption>
           </figure>
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-browser-source-properties.png"><img src="img/obs-browser-source-properties.png" alt="Browser Source properties with URL, Width and Height fields." loading="lazy" width="1440" height="1224" /></a>
-            <figcaption>Paste your own Overlay URL into the URL field. Width and height here match a 1920 × 1080 canvas; the two checkboxes are further down.</figcaption>
+            <figcaption>Use your own Overlay URL. This example is for a 1920 × 1080 canvas; the two checkboxes are further down.</figcaption>
           </figure>
         </div>
       </section>
@@ -553,18 +496,18 @@
         <div class="figs two">
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-scripts-window.png"><img src="img/obs-scripts-window.png" alt="OBS Scripts window with a plus button under the loaded scripts list." loading="lazy" width="1550" height="1048" /></a>
-            <figcaption>The + button below the list adds a script. Your list will show <code>counter-hotkeys.lua</code> once it is added.</figcaption>
+            <figcaption>Your list will show <code>counter-hotkeys.lua</code> once it is added.</figcaption>
           </figure>
           <figure class="shot shot--wide">
             <a class="frame-img zoom" href="img/obs-settings-hotkeys.png"><img src="img/obs-settings-hotkeys.png" alt="OBS Settings window open on the Hotkeys page." loading="lazy" width="1600" height="1243" /></a>
-            <figcaption>Hotkeys is in the left-hand list of Settings. The five Live Counter entries appear near the bottom of the page once the script is added.</figcaption>
+            <figcaption>The five Live Counter entries are near the bottom of this page once the script is added.</figcaption>
           </figure>
         </div>
       </section>
 
       <section id="check">
         <h2>Check that everything works</h2>
-        <p>Tick these off. They stay ticked on this computer so you can come back to them.</p>
+        <p>Tick each one off. Ticks stay saved on this computer.</p>
         <ul class="check" id="checklist">
           <li><label><input type="checkbox" data-k="c1" /><span>The panel opens with <b>Presets</b>, <b>Setup</b>, <b>Live</b> and <b>Diagnostics</b> tabs.</span></label></li>
           <li><label><input type="checkbox" data-k="c2" /><span>The Diagnostics <b>Connection checklist</b> is green.</span></label></li>
@@ -580,7 +523,7 @@
         <ol class="steps">
           <li>In <b>Presets</b>, <b>Load</b> or <b>Start</b> a preset. Or set up a count in <b>Setup</b> and click <b>Start session</b>.</li>
           <li>Click <b>Show</b>, then bring the scene to Program as usual.</li>
-          <li>Count with <b>+1</b>, <b>−1</b>, <b>Undo</b> and <b>Jump</b>. At either end of the range the count stops. Nothing breaks.</li>
+          <li>Count with <b>+1</b>, <b>−1</b>, <b>Undo</b> and <b>Jump</b>. At either end of the range the count stops.</li>
           <li>In <b>Automatic</b> mode, use <b>Start counting</b>, <b>Pause</b>, <b>Resume</b>, <b>Faster</b>, <b>Slower</b> and <b>Reverse</b>.</li>
           <li>Finish with <b>Hide</b>, or <b>End</b> and then <b>End, keep overlay</b> or <b>End, hide overlay</b>.</li>
         </ol>
@@ -588,15 +531,12 @@
         <div class="figs three">
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-live-tab.png"><img src="img/dock-live-tab.png" alt="Live tab with a large number and +1, −1, Undo, Show buttons." loading="lazy" width="840" height="1680" /></a>
-            <figcaption>The Live tab shows the number large, with the buttons you use during a service below it.</figcaption>
           </figure>
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-setup-tab.png"><img src="img/dock-setup-tab.png" alt="Setup tab with counting options and a number preview." loading="lazy" width="840" height="3566" /></a>
-            <figcaption>The Setup tab shapes a count and previews how it will look.</figcaption>
           </figure>
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/dock-presets-tab.png"><img src="img/dock-presets-tab.png" alt="Presets tab with saved presets and their buttons." loading="lazy" width="840" height="1680" /></a>
-            <figcaption>The Presets tab lists saved counts, with Export and Import.</figcaption>
           </figure>
         </div>
       </section>
@@ -614,7 +554,6 @@
         <div class="figs">
           <figure class="shot shot--dock">
             <a class="frame-img zoom" href="img/obs-dock-file-not-found.png"><img src="img/obs-dock-file-not-found.png" alt="Live Counter panel showing Couldn't load that page and File not found." loading="lazy" width="720" height="1000" /></a>
-            <figcaption>After a move, the panel shows OBS's error page with the old address.</figcaption>
           </figure>
         </div>
       </section>
@@ -638,14 +577,13 @@
 
       <section id="another">
         <h2>Moving to another computer</h2>
-        <p>Copy the folder to a permanent home on the new computer and repeat Steps 1 to 6. Addresses differ on every computer, and <code>setup.html</code> always shows the right ones.</p>
+        <p>Copy the folder to a permanent place on the new computer and repeat Steps 1 to 6. Addresses differ on every computer, and <code>setup.html</code> always shows the right ones.</p>
         <p>Presets do not travel with the folder. On the old computer, click <b>Export</b> in <b>Presets</b> and paste the result into a text file you can carry across. On the new one, copy that text, then click <b>Import</b>, <b>Paste</b> and <b>Apply</b>.</p>
       </section>
 
     </main>
 
     <footer>
-      <p>Live Counter for OBS, install guide. Screenshots taken on macOS with OBS Studio 32.2.</p>
       <p>Oswald font © The Oswald Project Authors, SIL Open Font License (see <code>fonts/oswald-OFL-LICENSE.txt</code>).</p>
     </footer>
   </div>

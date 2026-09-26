@@ -2,7 +2,7 @@
 
 ## What this is
 
-Live Counter puts a large number on screen that you control from inside OBS. Use it to count up or down live, for example "Hallelujah" shouted 50 times, or any other running count during a service or stream.
+Live Counter puts a large number on screen that you count up or down live from inside OBS, for example "Hallelujah" shouted 50 times.
 
 It has three parts, all inside OBS:
 
@@ -16,9 +16,9 @@ For the same steps with pictures, open `install-guide/index.html` in the Live Co
 
 ## Requirements
 
-- OBS Studio 31 or newer (developed and tested on OBS 32).
+- OBS Studio 31 or newer (tested on OBS 32).
 - Windows or macOS.
-- No internet connection is needed. Everything runs on this computer, inside OBS.
+- No internet connection is needed.
 
 ## One-time setup
 
@@ -52,9 +52,9 @@ Include a modifier key in every shortcut. A bare key such as `+` or `-` can fire
 | Pause / Resume | Ctrl + Alt + P | Ctrl + Option + P |
 | Show / Hide overlay | Ctrl + Alt + H | Ctrl + Option + H |
 
-On a Mac, avoid Cmd + H (it hides OBS) and Cmd + Z (OBS's own Undo). You don't have to use these combinations: any modifier combination that OBS isn't already using works. Each hotkey is optional, so bind only the ones you plan to use.
+On a Mac, avoid Cmd + H (it hides OBS) and Cmd + Z (OBS's own Undo). Any other modifier combination that OBS isn't already using also works. Each hotkey is optional; bind only the ones you use.
 
-Once assigned, these work like any other OBS hotkey, including through a Stream Deck's OBS integration.
+The hotkeys also work through a Stream Deck's OBS integration.
 
 The script, its key assignments and the overlay source are saved in the OBS scene collection you set them up in. If you switch to another scene collection (the **Scene Collection** menu), add the overlay and `counter-hotkeys.lua` there too and assign the keys again.
 
@@ -62,14 +62,14 @@ The script, its key assignments and the overlay source are saved in the OBS scen
 
 1. Load or start a preset in the **Presets** tab, or set up a one-off count in **Setup**, then click **Start session**.
 2. Click **Show** to put the number on the overlay, then bring the scene to Program in OBS as usual.
-3. Count with **+1 / −1 / Undo / Jump to**. At either end of the range the count stops. Nothing breaks.
+3. Count with **+1 / −1 / Undo / Jump to**. At either end of the range the count stops.
 4. In Automatic mode, use **Pause / Resume / Faster / Slower / Reverse**.
 5. When you're done, **Hide** the overlay or **End** the session.
 
 ## If something breaks
 
-- **The dock looks stuck or frozen:** reload it (right-click the dock → Reload, or close and reopen it from Docks). It reads the current count back from storage and carries on. Nothing is lost.
-- **OBS crashes or you have to restart it:** when OBS reopens, the dock restores your last session, paused, so you can check the number before continuing. Nothing is lost.
+- **The dock looks stuck or frozen:** reload it (right-click the dock → Reload, or close and reopen it from Docks). The count is kept.
+- **OBS crashes or you have to restart it:** when OBS reopens, the dock restores your last session, paused, so you can check the number before continuing.
 - **OBS asks "Are you sure you want to exit?" when quitting:** that is OBS's own exit confirmation, not a Live Counter warning. Your session is already saved, so it is safe to confirm.
 - **Something looks wrong (wrong numbers, stuck settings):** open the dock's **Diagnostics** tab and use **Reset everything**. It asks you to confirm and names what it deletes (settings, presets, sessions and logs on this computer). It cannot be undone, so use it only as a last resort.
 - **Still stuck:** click **Copy diagnostics** on the Diagnostics tab and send the result to whoever is helping you.
