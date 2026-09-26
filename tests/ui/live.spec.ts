@@ -389,6 +389,35 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // 2026-09-25 review, item 1: the End confirm needs a way back out, the
+  // same as the Reset confirm's reset-no.
+  test('end session: Cancel closes the confirm and the session keeps running', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const plus = page.getByTestId('btn-plus');
+      await plus.click();
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+
+      await page.getByTestId('btn-end').click();
+      await expect(page.getByTestId('end-confirm')).toBeVisible();
+      await page.getByTestId('end-cancel').click();
+
+      await expect(page.getByTestId('end-confirm')).toHaveCount(0);
+      await expect(page.getByTestId('end-keep')).toHaveCount(0);
+      await expect(page.getByTestId('end-hide')).toHaveCount(0);
+      await expect(page.getByTestId('live-empty')).toHaveCount(0);
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+
+      await plus.click();
+      await expect(page.getByTestId('current-value')).toHaveText('2');
+    } finally {
+      await mock.close();
+    }
+  });
+
   // Task 3.2 EDIT (justification: chipFor's chip logic was replaced wholesale
   // by the locked `chipFrom` decision table — see live-status.ts. The
   // SHOWING/HIDDEN-by-overlayVisible legend this test exercises is now row 6
@@ -1563,6 +1592,49 @@ test.describe('dock Live view', () => {
       await expect(confirm).toBeVisible();
       await page.getByTestId('safety-proceed').click();
       await expect(confirm).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // 2026-09-25 review, item 6: in a short dock the safety confirm renders
+  // below Reset/End, out of sight. Opening it must bring it into view and put
+  // focus on Cancel, without disabling +1/-1.
+  test('Show guard in a short dock: the safety confirm scrolls into view with Cancel focused, and +1 still works', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await page.setViewportSize({ width: 300, height: 260 });
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(page.getByTestId('status-chip')).toHaveText('LIVE', { timeout: 3000 });
+
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide, never guarded
+      await expect(showHide).toHaveText('Show');
+      await showHide.click(); // Show, armed and not yet acknowledged
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      const cancel = page.getByTestId('safety-cancel');
+      await expect(confirm).toBeVisible();
+      await expect(cancel).toBeFocused();
+      await expect(cancel).toBeInViewport({ ratio: 1 });
+      await expect(confirm).toBeInViewport();
+
+      // No backdrop and no lockout: counting still works while it is open.
+      await expect(page.getByTestId('btn-plus')).toBeEnabled();
+      await page.getByTestId('btn-plus').click();
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+      await expect(confirm).toBeVisible();
+
+      await cancel.click();
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Show');
     } finally {
       await mock.close();
     }

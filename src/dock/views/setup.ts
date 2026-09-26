@@ -37,10 +37,12 @@
 // number-only after a recovery.
 //
 // Mid-session guard scope: PRD §8.7's Restart-vs-Keep prompt is implemented
-// only for Presets view's `preset-start` (per the Task 2.6 brief) — this
-// view's `setup-start-session` always immediately replaces any active
-// session, same as `SessionController.startSession()`'s own documented
-// behavior (it unconditionally creates a fresh session).
+// only for Presets view's `preset-start` (per the Task 2.6 brief). This
+// view's `setup-start-session` asks first when a session is active
+// (`setup-start-confirm`, 2026-09-25 review item 2): Replace starts a fresh
+// session, the same as `SessionController.startSession()` always does, and
+// Cancel leaves the running one alone. The prompt points at Update session,
+// which keeps the count.
 //
 // Escaping discipline: template (label) text and titles are operator
 // content — every dynamic string this view renders goes through
@@ -214,6 +216,11 @@ interface SetupUiState {
   // this tab (see refresh()) — never persisted, page-session only, same as
   // every other transient confirm/hint in this codebase.
   saveConfirmText: string | null;
+  // 2026-09-25 review, item 2: true while `setup-start-confirm` ("Replace
+  // the running session?") is open. Set only by a Start click while a
+  // session is active; cleared by Replace, Cancel, or leaving the tab (see
+  // refresh()). Page-session only, like every other confirm here.
+  startConfirmOpen: boolean;
   // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
   // tracking, replacing fix wave 1's single whole-form boolean. Each control
   // adds its own canonical field name (matching the `SetupUiState` property
@@ -353,6 +360,7 @@ function defaultUiState(): SetupUiState {
     error: null,
     titleError: false,
     saveConfirmText: null,
+    startConfirmOpen: false,
     dirtyFields: new Set(),
     baseStyle: null,
   };
@@ -1188,7 +1196,27 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     render();
   }
 
+  // 2026-09-25 review, item 2: Start over a running session throws away
+  // its count (the new session's undo history is empty, so Undo cannot bring
+  // it back). Ask first, the way Presets' preset-start already does; with no
+  // session active, start straight away as before.
   function onStartSession(): void {
+    if (!canStart()) return;
+    if (opts.controller.getState().session !== null) {
+      ui.startConfirmOpen = true;
+      render();
+      // The confirm sits below the form's last row, so it can open out of
+      // sight in a short dock. Bring it into view with focus on Cancel.
+      const box = container.querySelector<HTMLElement>('[data-testid="setup-start-confirm"]');
+      const cancel = container.querySelector<HTMLButtonElement>('[data-testid="setup-start-cancel"]');
+      cancel?.focus({ preventScroll: true });
+      box?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    startSessionNow();
+  }
+
+  function startSessionNow(): void {
     if (!canStart()) return;
     ui.error = null;
     const startValue = parseIntStrict(ui.startValue)!;
@@ -1784,6 +1812,33 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return row;
   }
 
+  // 2026-09-25 review, item 2: see onStartSession(). Same inline
+  // confirm-box pattern as Presets' preset-replace-confirm.
+  function renderStartConfirm(currentValue: number): HTMLElement {
+    const box = el('div', { 'data-testid': 'setup-start-confirm', class: 'confirm-box' });
+    box.appendChild(
+      el(
+        'span',
+        {},
+        `Replace the running session? The current count (${currentValue}) will be lost. ` +
+          'To apply these settings and keep the count, use Update session instead.',
+      ),
+    );
+    const replace = button('setup-start-replace', 'Replace', { disabled: !canStart() });
+    replace.addEventListener('click', () => {
+      ui.startConfirmOpen = false;
+      startSessionNow();
+    });
+    const cancel = button('setup-start-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      ui.startConfirmOpen = false;
+      render();
+    });
+    box.appendChild(replace);
+    box.appendChild(cancel);
+    return box;
+  }
+
   function render(): void {
     if (destroyed) return;
     const focusSnapshot = captureFocus(container);
@@ -2143,6 +2198,10 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     root.appendChild(actions);
 
+    if (ui.startConfirmOpen && activeSession !== null) {
+      root.appendChild(renderStartConfirm(activeSession.currentValue));
+    }
+
     // Task 2.19 (operator feedback: "there is no confirmation dialogue or
     // any message to notify me") — right below the actions row, matching the
     // "confirm sits next to the button that produced it" pattern already
@@ -2290,6 +2349,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // switch) — leaving Setup and coming back must not still show a
       // "saved ✓" from a visit that's now over.
       ui.saveConfirmText = null;
+      ui.startConfirmOpen = false;
       if (ui.editing === null) {
         const state = opts.controller.getState();
         if (state.session) prefillFromSession(state.session, state.presentation);

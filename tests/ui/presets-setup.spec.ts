@@ -369,10 +369,9 @@ test.describe('dock Setup + Presets views', () => {
 
   // Gate fix wave (I-1) — the other half of the same fix: "Update session"
   // (reconfigure) continues the SAME session on purpose and must NOT re-arm
-  // the ack, while Setup's own "Start session" — which always immediately
-  // replaces any active session, per this file's own doc comment at the top
-  // — genuinely starts a new one and MUST re-arm it, even with no End in
-  // between.
+  // the ack, while Setup's own "Start session" (Replace, over an active
+  // session) genuinely starts a new one and MUST re-arm it, even with no End
+  // in between.
   test('Update session (reconfigure) keeps the safety ack; Setup Start session over an active session re-arms it (gate fix I-1)', async ({
     page,
   }) => {
@@ -406,12 +405,13 @@ test.describe('dock Setup + Presets views', () => {
       await showHide.click(); // Show — still acknowledged, no confirm
       await expect(confirm).toHaveCount(0);
 
-      // Setup "Start session" ALWAYS replaces, even over this still-active
-      // session — a genuinely new session, must re-arm.
+      // Setup "Start session" over this still-active session (confirmed with
+      // Replace) is a genuinely new session, so it must re-arm.
       await page.getByTestId('tab-setup').click();
       await page.getByTestId('setup-start').fill('0');
       await page.getByTestId('setup-finish').fill('20');
       await page.getByTestId('setup-start-session').click();
+      await page.getByTestId('setup-start-replace').click();
       await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
 
       await showHide.click(); // Hide
@@ -3346,7 +3346,10 @@ test.describe('dock Setup + Presets views', () => {
       }
     });
 
-    test('Start session from Setup still replaces an active session immediately, with no confirmation prompt (existing behaviour intact)', async ({
+    // 2026-09-25 review, item 2. Start session over a running session throws
+    // the current count away (the new session's undo history starts empty),
+    // so Setup now asks first and points at Update session, which keeps it.
+    test('Start session from Setup over an active session asks first; Replace starts the new session at its start value', async ({
       page,
     }) => {
       const mock = await startMockObs();
@@ -3368,10 +3371,67 @@ test.describe('dock Setup + Presets views', () => {
         await page.getByTestId('setup-finish').fill('20');
         await page.getByTestId('setup-start-session').click();
 
-        // No confirmation dialog anywhere — replaces immediately at the new
-        // start value, exactly as before this task.
+        const confirm = page.getByTestId('setup-start-confirm');
+        await expect(confirm).toBeVisible();
+        await expect(confirm).toContainText('Replace the running session? The current count (2) will be lost.');
+        await expect(confirm).toContainText('Update session');
+        await expect(page.getByTestId('setup-start-cancel')).toBeFocused();
+        // Nothing has been replaced while the question is on screen.
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await page.getByTestId('setup-start-replace').click();
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
         await expect(page.getByTestId('current-value')).toHaveText('5');
+        await expect(page.getByTestId('progress-line')).toContainText('of 20');
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('Cancel on the Setup start confirm leaves the running session and its count untouched', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('0');
+        await page.getByTestId('setup-finish').fill('50');
+        await page.getByTestId('setup-start-session').click();
+        await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
+
+        const plus = page.getByTestId('btn-plus');
+        await plus.click();
+        await plus.click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        await page.getByTestId('setup-finish').fill('20');
+        await page.getByTestId('setup-start-session').click();
+
+        const confirm = page.getByTestId('setup-start-confirm');
+        await expect(confirm).toBeVisible();
+
+        // Leaving the tab drops the question; it does not linger for later.
+        await page.getByTestId('tab-live').click();
+        await page.getByTestId('tab-setup').click();
+        await expect(confirm).toHaveCount(0);
+
+        await page.getByTestId('setup-start-session').click();
+        await expect(confirm).toBeVisible();
+        await page.getByTestId('setup-start-cancel').click();
+        await expect(confirm).toHaveCount(0);
+        await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
+
+        await page.getByTestId('tab-live').click();
+        await expect(page.getByTestId('current-value')).toHaveText('2');
+        await expect(page.getByTestId('progress-line')).toContainText('of 50');
+        // Same session, so its undo history is still there.
+        await expect(page.getByTestId('btn-undo')).toBeEnabled();
+        const stored = await page.evaluate(
+          () => JSON.parse(window.localStorage.getItem('lc.session.v1') ?? '{}') as { startValue: number; currentValue: number },
+        );
+        expect(stored.startValue).toBe(0);
+        expect(stored.currentValue).toBe(2);
       } finally {
         await mock.close();
       }
@@ -4126,6 +4186,7 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('setup-mode-mismatch-note')).toBeVisible();
 
         await page.getByTestId('setup-start-session').click();
+        await page.getByTestId('setup-start-replace').click();
         await expect(page.getByTestId('tab-live')).toHaveClass(/active/);
 
         // The brand-new session is AUTOMATIC — what the visible control said

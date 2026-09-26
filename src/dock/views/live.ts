@@ -257,8 +257,8 @@ export function mountLiveView(
   // render() on either of two transitions: the session IDENTITY changing
   // (`state.sessionEpoch` — see controller.ts's own doc comment on that
   // field — ticks up only inside `startSession()`, i.e. a genuinely NEW
-  // session: Presets' Restart-over-an-active-session, Setup's
-  // always-replaces "Start session", the devhook) or the session ENDING
+  // session: Presets' Restart-over-an-active-session, Setup's "Start
+  // session" (Replace, over an active one), the devhook) or the session ENDING
   // (non-null -> null). Neither a plain null -> non-null check (the OLD
   // rule, I-1) nor object identity can tell "still this session" from "a new
   // one" on their own: Presets' Restart and Setup's Start both replace an
@@ -401,6 +401,14 @@ export function mountLiveView(
       pendingSafetyAction = action;
       ui.safetyConfirmOpen = true;
       render();
+      // 2026-09-25 review, item 6: the box renders last, below Reset/End, so
+      // in a short dock it can open out of sight. Bring it into view and put
+      // focus on Cancel. render()'s focus restore keeps Cancel focused across
+      // later re-renders. No backdrop, and +1/-1 stay usable (PRD §8.11).
+      const box = container.querySelector<HTMLElement>('[data-testid="live-safety-confirm"]');
+      const cancel = container.querySelector<HTMLButtonElement>('[data-testid="safety-cancel"]');
+      cancel?.focus({ preventScroll: true });
+      box?.scrollIntoView({ block: 'nearest' });
       return;
     }
     action();
@@ -1192,8 +1200,15 @@ export function mountLiveView(
       ui.endConfirmOpen = false;
       dispatch({ type: 'endSession', keepOverlay: false, nonce: generateNonce() });
     });
+    // 2026-09-25 review, item 1: a way back out, same as reset-no.
+    const cancel = button('end-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      ui.endConfirmOpen = false;
+      render();
+    });
     box.appendChild(keep);
     box.appendChild(hide);
+    box.appendChild(cancel);
     return box;
   }
 
