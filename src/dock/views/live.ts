@@ -17,7 +17,14 @@
 // review, Critical 2) — otherwise every re-render silently stole focus back
 // to nothing, dropping keystrokes.
 //
-// The one render trigger that does NOT go through `render()` at all is the
+// The exception is a controller update that only moves the count, which is
+// what an automatic tick does (2026-09-25 review, item 8). Rebuilding the
+// pane on every tick replaced the button under a press that was still held
+// down, so that click never fired. `onControllerUpdate()` patches the
+// count-dependent elements in place for that one case; every other change
+// still goes through `render()`.
+//
+// The other render trigger that does NOT go through `render()` at all is the
 // once-a-second overlay-silence poll (`updateOverlayBanner()`): it toggles
 // only the `banner-overlay` element in place, because a full rebuild purely
 // on a timer — with nothing else about the state having changed — has no
@@ -210,6 +217,33 @@ function button(testid: string, text: string, opts: { disabled?: boolean; extraC
   return b;
 }
 
+// 2026-09-25 review, item 8: true when the only thing that moved between the
+// last full render and this controller update is the count. An automatic
+// tick changes `currentValue` (plus the bookkeeping `revision`/`updatedAt`).
+// `undoStack` is allowed too because the patch keeps Undo's disabled state
+// current. Anything else, from status to visibility to a new session,
+// returns false and gets the full render.
+const COUNT_FIELDS: ReadonlySet<string> = new Set(['currentValue', 'undoStack', 'revision', 'updatedAt']);
+
+function isCountOnlyChange(prev: ControllerState, next: ControllerState): boolean {
+  const a = prev.session;
+  const b = next.session;
+  if (a === null || b === null) return false;
+  if (
+    next.sessionEpoch !== prev.sessionEpoch ||
+    next.lastAction !== prev.lastAction ||
+    next.recovered !== prev.recovered ||
+    next.clamp !== prev.clamp ||
+    next.initializing !== prev.initializing
+  ) {
+    return false;
+  }
+  for (const key of Object.keys(b) as (keyof Session)[]) {
+    if (!COUNT_FIELDS.has(key) && a[key] !== b[key]) return false;
+  }
+  return true;
+}
+
 // Task 3.3 — deliberately NOT exported from live-status.ts (the brief locks
 // that module's exports as-is): `liveSafetyArmed` only ever answers YES/NO,
 // but choosing WHICH of the two locked confirm texts to show needs to know
@@ -305,6 +339,10 @@ export function mountLiveView(
   // (setup.ts's own `destroyed`) adapted to this file's single shared
   // render() entry point.
   let destroyed = false;
+
+  // The controller state the pane currently shows, for onControllerUpdate()'s
+  // count-only check. Set by every full render() and by the in-place patch.
+  let lastRendered: ControllerState | null = null;
 
   // Task 2.12 — Connect card + its Live-empty add-overlay mirror. Whether
   // either feature is even reachable is fixed for this mount's whole
@@ -425,6 +463,7 @@ export function mountLiveView(
     const focusSnapshot = captureFocus();
 
     const state = controller.getState();
+    lastRendered = state;
 
     // Gate fix wave (I-1/I-2) — the ONE place both safety-guard-reset
     // transitions are detected (see `safetyAcked`'s own doc comment above):
@@ -961,15 +1000,22 @@ export function mountLiveView(
     );
   }
 
+  function progressText(session: Session): string {
+    return progressLabel(session) + (session.mode === 'automatic' ? ` · 1 count every ${session.intervalSeconds}s` : '');
+  }
+
+  function jumpPreviewText(session: Session): string {
+    const parsed = parseJumpValue(ui.jumpValue);
+    return `${session.currentValue} → ${parsed !== null ? String(parsed) : '–'}`;
+  }
+
   function renderLive(session: Session, state: ControllerState): HTMLElement {
     const root = el('div', { 'data-testid': 'live-root' });
     const { lo, hi } = rangeOf(session);
 
     root.appendChild(el('div', { 'data-testid': 'current-value', class: 'current-value' }, formatValue(session.currentValue)));
 
-    const progressText =
-      progressLabel(session) + (session.mode === 'automatic' ? ` · 1 count every ${session.intervalSeconds}s` : '');
-    root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText));
+    root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText(session)));
 
     const chip = chipFor(session);
     const chipEl = el('div', { 'data-testid': 'status-chip', class: 'status-chip' });
@@ -1144,8 +1190,7 @@ export function mountLiveView(
 
     const parsed = parseJumpValue(ui.jumpValue);
     const valid = parsed !== null && parsed >= lo && parsed <= hi;
-    const previewTarget = parsed !== null ? String(parsed) : '–';
-    box.appendChild(el('div', { 'data-testid': 'jump-preview' }, `${session.currentValue} → ${previewTarget}`));
+    box.appendChild(el('div', { 'data-testid': 'jump-preview' }, jumpPreviewText(session)));
 
     if (ui.jumpValue.length > 0 && !valid) {
       box.appendChild(el('div', { 'data-testid': 'jump-error', class: 'jump-error' }, `Enter a whole number between ${lo} and ${hi}`));
@@ -1321,7 +1366,47 @@ export function mountLiveView(
     }
   }
 
-  const unsubController = controller.subscribe(() => render());
+  // Item 8's in-place update: every element the count feeds, and nothing
+  // else. Returns false if the pane is missing one of them (it is not showing
+  // this session), so the caller falls back to render().
+  function patchCount(session: Session): boolean {
+    const find = <T extends HTMLElement>(testid: string): T | null =>
+      container.querySelector<T>(`[data-testid="${testid}"]`);
+    const value = find('current-value');
+    const progress = find('progress-line');
+    const undo = find<HTMLButtonElement>('btn-undo');
+    const plus = find<HTMLButtonElement>('btn-plus');
+    const minus = find<HTMLButtonElement>('btn-minus');
+    if (!value || !progress || !undo || !plus || !minus) return false;
+
+    const { lo, hi } = rangeOf(session);
+    value.textContent = formatValue(session.currentValue);
+    progress.textContent = progressText(session);
+    undo.disabled = session.undoStack.length === 0;
+    plus.disabled = session.currentValue === hi;
+    minus.disabled = session.currentValue === lo;
+    const preview = find('jump-preview');
+    if (preview) preview.textContent = jumpPreviewText(session);
+    return true;
+  }
+
+  // The single exception to the full rebuild (see the module doc comment):
+  // an update that only moved the count is patched in place, so a press held
+  // across an automatic tick still ends on the button it started on.
+  function onControllerUpdate(): void {
+    if (destroyed) return;
+    const state = controller.getState();
+    if (lastRendered !== null && isCountOnlyChange(lastRendered, state) && state.session !== null) {
+      refreshConnectTiming();
+      if (patchCount(state.session)) {
+        lastRendered = state;
+        return;
+      }
+    }
+    render();
+  }
+
+  const unsubController = controller.subscribe(() => onControllerUpdate());
   const unsubBus = bus.onMessage((m: BusMessage) => {
     if (m.kind === 'hello' || m.kind === 'overlay-status') {
       lastOverlaySeenAt = Date.now();

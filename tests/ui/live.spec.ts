@@ -349,6 +349,61 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // 2026-09-25 review, item 8 (RUNTIME-2): a real press is held for a moment.
+  // If an automatic tick rebuilt the pane between mouse-down and mouse-up,
+  // the button under the pointer was replaced and the click never fired.
+  // Each Pause here is held for 150ms at the fastest speed, while counting.
+  test('automatic: a held Pause press is not lost to a tick', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+
+      for (let press = 1; press <= 8; press++) {
+        // Wait for the count to move, so every press is made mid-count.
+        const before = await readValue(page);
+        await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(before);
+
+        await page.getByTestId('auto-pause').click({ delay: 150 });
+
+        // A lost click leaves the count running with Pause still enabled.
+        await expect(page.getByTestId('auto-pause'), `press ${press} was lost`).toBeDisabled();
+        await expect(page.getByTestId('auto-start')).toHaveText('Resume');
+        const paused = await readValue(page);
+        await page.waitForTimeout(400); // longer than one 0.25s tick
+        expect(await readValue(page), `press ${press} did not stop the count`).toBe(paused);
+
+        await page.getByTestId('auto-start').click();
+        await expect(page.getByTestId('auto-pause')).toBeEnabled();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Item 8 updates the count in place on a tick. The Jump preview shows the
+  // count too, so it has to move with it.
+  test('automatic: the jump preview follows the count between renders', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+      await page.getByTestId('btn-jump').click();
+
+      await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(1);
+      // Read both in one go, while it is still counting.
+      const [value, preview] = await page.evaluate(() => [
+        document.querySelector('[data-testid="current-value"]')?.textContent,
+        document.querySelector('[data-testid="jump-preview"]')?.textContent,
+      ]);
+      expect(preview).toBe(`${value} → –`);
+    } finally {
+      await mock.close();
+    }
+  });
+
   // Task 3.3 EDIT (justification: same as the jump test above — establishes
   // a not-armed baseline so this Reset isn't intercepted by the new
   // live-safety confirm; Reset's own confirmation flow is this test's actual
