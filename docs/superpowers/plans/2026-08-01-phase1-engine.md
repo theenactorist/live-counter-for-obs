@@ -6,7 +6,7 @@
 
 **Architecture:** One pure function `applyCommand(session, command, nowMs) → ApplyResult` owns every behaviour rule from PRD §8; a side-effect-free `AutoTimer` (injected clock/scheduler) drives automatic ticks; `migrate.ts` guards every byte read from storage. Nothing in `src/engine/` or `src/dock/timer.ts` may import browser or OBS APIs.
 
-**Tech Stack:** TypeScript (strict) · vitest · fast-check. Node 22 present. Repo: `/Users/olumide/Documents/Vibe coding/OBS Plugin`.
+**Tech Stack:** TypeScript (strict) · vitest · fast-check. Node 22 present. Repo: `/Users/olumide/Documents/Vibe coding/OBS Plugins/Countdown Plugin`.
 
 ## Global Constraints (from PRD v1.1 + roadmap)
 
