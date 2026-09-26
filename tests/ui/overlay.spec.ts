@@ -169,6 +169,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         await bus.send('state', {
@@ -212,6 +213,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         await bus.send('state', {
@@ -314,6 +316,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const visible = sessionFixture({ currentValue: 4, overlayVisible: true });
@@ -358,6 +361,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const snapshot: OverlaySnapshot = {
@@ -401,6 +405,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 1000 };
@@ -438,6 +443,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         let heartbeat = 1;
@@ -537,6 +543,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port, { watchdogMs: '500' });
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         await bus.send('state', {
@@ -576,6 +583,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         // Track every color the number element is ever painted with, via a
@@ -635,6 +643,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const presetSession = sessionFixture({ currentValue: 11, presetId: 'preset-2' });
@@ -667,6 +676,7 @@ test.describe('overlay renderer', () => {
     try {
       await page.setViewportSize({ width: 1000, height: 600 });
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         await bus.send('state', {
@@ -716,6 +726,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const presetSession = sessionFixture({ currentValue: 20, presetId: 'preset-3' });
@@ -768,6 +779,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const presetSession = sessionFixture({ currentValue: 40, presetId: 'preset-reconnect' });
@@ -839,6 +851,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const presetSession = sessionFixture({ currentValue: 50, presetId: 'preset-hide-while-buffering', overlayVisible: true });
@@ -886,6 +899,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         // Preset A gets styled (green) and cached.
@@ -940,6 +954,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port, { watchdogMs: '500' });
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         // The ONLY broadcast this overlay ever sees is a null-style
@@ -970,6 +985,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port, { watchdogMs: '500' });
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const session = sessionFixture({ currentValue: 9, overlayVisible: true });
@@ -1010,6 +1026,7 @@ test.describe('overlay renderer', () => {
     const mock = await startMockObs();
     try {
       await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
       const { bus, close } = await connectTestBus(mock.port);
       try {
         const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 5000 };
@@ -1067,6 +1084,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1101,6 +1119,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1217,6 +1236,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1245,6 +1265,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           // Simulates a stale overlay.html paired with a newer dock.html that
@@ -1274,6 +1295,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1306,6 +1328,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1341,6 +1364,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1365,6 +1389,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1419,6 +1444,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1461,6 +1487,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           // 'pop' (scale, symmetric around the element's own center) rather
@@ -1524,6 +1551,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           const animation: AnimationConfig = { type: 'pop', target: 'both', durationMs: 2000 };
@@ -1572,6 +1600,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           await bus.send('state', {
@@ -1615,6 +1644,7 @@ test.describe('overlay renderer', () => {
       const mock = await startMockObs();
       try {
         await openOverlay(page, mock.port);
+        await waitForOverlayHello(mock);
         const { bus, close } = await connectTestBus(mock.port);
         try {
           const animation: AnimationConfig = { type: 'pop', target: 'number', durationMs: 5000 };

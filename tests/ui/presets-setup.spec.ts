@@ -1180,6 +1180,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
 
       // Import the SAME export back in without wiping storage first — the
@@ -1211,6 +1212,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
 
       // First reimport collides with the original "Collide" -> "(imported)".
@@ -1282,6 +1284,7 @@ test.describe('dock Setup + Presets views', () => {
 
       await page.getByTestId('tab-presets').click();
       await page.getByTestId('presets-export').click();
+      await expect(page.getByTestId('export-confirm')).toBeVisible();
       const clip = await page.evaluate(() => navigator.clipboard.readText());
       const originalEnvelope = JSON.parse(clip) as { presets: Array<{ id: string }> };
       const originalId = originalEnvelope.presets[0]!.id;
@@ -4811,6 +4814,7 @@ test.describe('dock Setup + Presets views', () => {
 
         await page.getByTestId('tab-presets').click();
         await page.getByTestId('presets-export').click();
+        await expect(page.getByTestId('export-confirm')).toBeVisible();
         const clip = await page.evaluate(() => navigator.clipboard.readText());
         const exported = JSON.parse(clip) as { presets: Array<{ style: Record<string, unknown> }> };
         const style = exported.presets[0]!.style;
