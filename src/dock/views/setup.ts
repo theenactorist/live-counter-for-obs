@@ -131,6 +131,14 @@ const DEFAULT_NUMBER_SIZE_PX = 96;
 // (whose textSizePx is already 24) round-trips with no visible change.
 const DEFAULT_TEXT_SIZE_PX = 24;
 
+// 2026-09-25 review, OVERLAY-2: the preview shrinks anything to fit the
+// dock, but the overlay cuts off whatever falls outside the OBS canvas. When
+// the preview's full-size box is bigger than the canvas, one line says so.
+// The canvas size comes from Diagnostics' overlay scan when OBS is
+// connected, otherwise 1920x1080.
+const FALLBACK_CANVAS = { width: 1920, height: 1080 } as const;
+const PREVIEW_OVERFLOW_TEXT = 'Wider or taller than your canvas: it will be cut off on air';
+
 // Which variant of the `setup-conflict` box to render, or null for none.
 //  - 'stale':   the stored preset changed since editing began (Task 2.6's
 //               original stale-edit guard).
@@ -159,6 +167,10 @@ export interface MountSetupViewOptions {
   controller: SessionController;
   storage: DockStorage;
   onSessionStarted: () => void;
+  /** OVERLAY-2: the OBS canvas size, or null when it has not been read. */
+  canvasSize?: () => { width: number; height: number } | null;
+  /** OVERLAY-2: fires when `canvasSize()` may have changed; returns an unsubscribe. */
+  onCanvasSizeChange?: (fn: () => void) => () => void;
 }
 
 interface EditingState {
@@ -459,6 +471,15 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   //    exactly big enough for everything inside it.
   let previewScaleBox: HTMLElement | null = null;
   let previewScaleInner: HTMLElement | null = null;
+  // OVERLAY-2 note, also rebuilt by `renderPreviewBlock()` on every render.
+  let previewOverflowNote: HTMLElement | null = null;
+
+  function canvasSize(): { width: number; height: number } {
+    const size = opts.canvasSize?.() ?? null;
+    if (size === null) return FALLBACK_CANVAS;
+    const valid = (n: number): boolean => Number.isFinite(n) && n > 0;
+    return valid(size.width) && valid(size.height) ? size : FALLBACK_CANVAS;
+  }
 
   // Scales `previewScaleInner` down (uniformly, preserving aspect ratio) just
   // enough that the preview's TRUE, unwrapped width fits the footprint box's
@@ -518,6 +539,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
     const unionWidth = right - left;
     const unionHeight = bottom - top;
+
+    // OVERLAY-2: the union is measured before any scaling, so it is the size
+    // the overlay draws at. A hidden pane measures 0 and shows no note.
+    if (previewOverflowNote) {
+      const canvas = canvasSize();
+      previewOverflowNote.hidden = !(unionWidth > canvas.width || unionHeight > canvas.height);
+    }
     // How far the union extends ABOVE/LEFT of contentRoot's own origin —
     // i.e. exactly how far contentRoot has to move down/right inside `inner`
     // for the whole ghost to sit at non-negative local coordinates, which is
@@ -566,6 +594,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     previewResizeObserver = new ResizeObserver(() => fitPreviewToScale());
     previewResizeObserver.observe(container);
   }
+  // OVERLAY-2: re-check the note when a new canvas size arrives.
+  const unsubCanvasSize = opts.onCanvasSizeChange?.(() => fitPreviewToScale()) ?? null;
 
   // Assigns 'setup-preview-label'/'setup-preview-label-after' to whichever
   // node is actually carrying the label for the CURRENT layout — mirrors the
@@ -1781,6 +1811,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     scaleBox.appendChild(scaleInner);
     wrap.appendChild(scaleBox);
     section.appendChild(wrap);
+
+    // OVERLAY-2: shown or hidden by fitPreviewToScale(), which can only
+    // measure once this tree is attached.
+    const overflowNote = el('div', { 'data-testid': 'setup-preview-overflow', class: 'field-hint' }, PREVIEW_OVERFLOW_TEXT);
+    overflowNote.hidden = true;
+    previewOverflowNote = overflowNote;
+    section.appendChild(overflowNote);
     return section;
   }
 
@@ -2225,11 +2262,13 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
 
   return {
     destroy(): void {
-      // No subscriptions of its own (this view only reads controller/storage
-      // on demand) — but an in-flight performSave() must not repaint this
-      // torn-down mount over its replacement (code-quality:P2-Q-03).
+      // The canvas-size subscription (OVERLAY-2) is this view's only one; it
+      // otherwise reads controller/storage on demand. An in-flight
+      // performSave() must not repaint this torn-down mount over its
+      // replacement (code-quality:P2-Q-03).
       destroyed = true;
       previewResizeObserver?.disconnect();
+      unsubCanvasSize?.();
     },
     loadPreset(preset: Preset): void {
       ui.title = preset.title;

@@ -2331,6 +2331,76 @@ test.describe('dock Setup + Presets views', () => {
     }
   });
 
+  // 2026-09-25 review, OVERLAY-2: the preview shrinks anything to fit the
+  // dock, but the overlay cuts off whatever falls outside the OBS canvas.
+  // When the counter at full size is wider or taller than the canvas, Setup
+  // says so in one line. The preview is never framed or shrunk further.
+  test.describe('preview overflow note (OVERLAY-2)', () => {
+    const NOTE = 'Wider or taller than your canvas: it will be cut off on air';
+
+    test('shows when the counter is wider or taller than a 1920x1080 canvas, and clears when it fits', async ({ page }) => {
+      const mock = await startMockObs();
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        const note = page.getByTestId('setup-preview-overflow');
+        await expect(page.getByTestId('setup-preview-number')).toHaveText('5');
+        await expect(note).toBeHidden();
+
+        // Wider: a long background label at the largest number size.
+        await page.getByTestId('setup-layout-textBehind').click();
+        await page.getByTestId('setup-template').fill('HALLELUJAH');
+        await page.getByTestId('setup-number-size').fill('512');
+        await expect(note).toBeVisible();
+        await expect(note).toHaveText(NOTE);
+        await expect(page.getByTestId('setup-preview-label')).toBeVisible();
+
+        // About 1450 px wide at the default 96 px: inside the canvas.
+        await page.getByTestId('setup-number-size').fill('96');
+        await expect(note).toBeHidden();
+
+        // Taller: a short stacked label, both sizes at the maximum.
+        await page.getByTestId('setup-layout-textAbove').click();
+        await page.getByTestId('setup-template').fill('Hi');
+        await page.getByTestId('setup-number-size').fill('512');
+        await page.getByTestId('setup-text-size').fill('512');
+        await expect(note).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('uses the canvas size OBS reports', async ({ page }) => {
+      const mock = await startMockObs({ videoSettings: { baseWidth: 1280, baseHeight: 720 } });
+      try {
+        await openDock(page, { port: mock.port, devhook: false });
+        await page.getByTestId('tab-setup').click();
+        await page.getByTestId('setup-start').fill('5');
+        await page.getByTestId('setup-layout-textBehind').click();
+        await page.getByTestId('setup-template').fill('HALLELUJAH');
+        // Fits 1920 at 96 px (test above), but not this 1280 px canvas.
+        await expect(page.getByTestId('setup-preview-overflow')).toBeVisible();
+      } finally {
+        await mock.close();
+      }
+    });
+
+    test('falls back to 1920x1080 with no OBS connection', async ({ page }) => {
+      // Nothing listens on this port, so no canvas size is ever read.
+      await openDock(page, { port: 39218, devhook: false });
+      await page.getByTestId('tab-setup').click();
+      await page.getByTestId('setup-start').fill('5');
+      await page.getByTestId('setup-layout-textBehind').click();
+      await page.getByTestId('setup-template').fill('HALLELUJAH');
+      const note = page.getByTestId('setup-preview-overflow');
+      await expect(page.getByTestId('setup-preview-label')).toHaveText('HALLELUJAH');
+      await expect(note).toBeHidden();
+      await page.getByTestId('setup-number-size').fill('512');
+      await expect(note).toBeVisible();
+    });
+  });
+
   test('preview liveness: typing in the label field updates the WYSIWYG preview on every keystroke, with no state broadcast', async ({
     page,
   }) => {

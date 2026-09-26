@@ -20,7 +20,13 @@ import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
-import { mountDiagnosticsView, type DiagnosticsViewHandle, overlaySourceNames } from './diagnostics.js';
+import {
+  mountDiagnosticsView,
+  type DiagnosticsViewHandle,
+  overlaySourceNames,
+  getOverlayScan,
+  onOverlayScanChange,
+} from './diagnostics.js';
 import { LiveStatusTracker, liveSafetyArmed } from './live-status.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
@@ -629,6 +635,13 @@ function main(): void {
       controller,
       storage,
       onSessionStarted: () => tabs.activate('live'),
+      // OVERLAY-2: the canvas size Diagnostics' overlay scan already reads,
+      // for the preview's "cut off on air" note.
+      canvasSize: () => {
+        const scan = getOverlayScan(bootedClient);
+        return scan === null || scan.status === 'unknown' ? null : { width: scan.baseWidth, height: scan.baseHeight };
+      },
+      onCanvasSizeChange: onOverlayScanChange,
     });
     presetsHandle = mountPresetsView(shell.panes.presets, {
       controller,

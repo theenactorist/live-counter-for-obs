@@ -110,6 +110,20 @@ test.describe('overlay renderer', () => {
     }
   });
 
+  // 2026-09-25 review, RUNTIME-7: the overlay only reads CustomEvent, which
+  // obs-websocket sends in the General category, so General (1) is all it
+  // subscribes to. Only overlays opened with ?port or ?pw connect at all.
+  test('Identify subscribes to General events only (RUNTIME-7)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      await expect.poll(() => mock.lastIdentify !== null).toBe(true);
+      expect(mock.lastIdentify?.eventSubscriptions).toBe(1);
+    } finally {
+      await mock.close();
+    }
+  });
+
   // Task 3.2 — the overlay relay: a real CEF Browser Source is expected to
   // dispatch (or, belt-and-braces, drive window.obsstudio's own callbacks —
   // src/overlay/main.ts) window CustomEvents when OBS changes this source's
@@ -228,6 +242,66 @@ test.describe('overlay renderer', () => {
 
         const variantNumeric = await page.getByTestId('overlay-number').evaluate((el) => getComputedStyle(el).fontVariantNumeric);
         expect(variantNumeric).toContain('tabular-nums');
+      } finally {
+        close();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // 2026-09-25 review, OVERLAY-1: the bundled Oswald files have no tabular
+  // figures, so a "1" is much narrower than a "0" and the label beside the
+  // number moved on every tick. With Oswald, every two-digit value must be
+  // the same width. The counter never shows "00", so 10, 20, 40 and 88 stand
+  // in for the wide digits next to "11". Inter already has tabular digits and
+  // keeps plain text.
+  test('Oswald digits keep a fixed width; Inter keeps plain text (OVERLAY-1)', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openOverlay(page, mock.port);
+      await waitForOverlayHello(mock);
+      const { bus, close } = await connectTestBus(mock.port);
+      try {
+        let heartbeat = 0;
+        const paint = async (value: number, fontFamily: string): Promise<void> => {
+          heartbeat += 1;
+          await bus.send('state', {
+            session: sessionFixture({ currentValue: value }),
+            snapshot: null,
+            style: styleFixture({ fontFamily, layout: 'numberOnly' }),
+            template: null,
+            animation: null,
+            heartbeat,
+          } satisfies StatePayload);
+          await expect(page.getByTestId('overlay-number')).toHaveText(String(value));
+        };
+        const numberWidth = async (): Promise<number> => {
+          const box = await page.getByTestId('overlay-number').boundingBox();
+          expect(box).not.toBeNull();
+          return box!.width;
+        };
+        const digitSpans = (): Promise<number> =>
+          page.getByTestId('overlay-number').evaluate((el) => el.querySelectorAll('span').length);
+
+        // Measure only once Oswald has loaded: until then the browser lays
+        // the text out with an invisible fallback font.
+        await paint(11, 'Oswald');
+        await expect.poll(() => page.evaluate(() => document.fonts.check('bold 96px Oswald'))).toBe(true);
+        const elevenWidth = await numberWidth();
+        expect(elevenWidth).toBeGreaterThan(0);
+        for (const value of [10, 20, 40, 88]) {
+          await paint(value, 'Oswald');
+          expect(Math.abs((await numberWidth()) - elevenWidth)).toBeLessThan(0.5);
+        }
+        await paint(11, 'Oswald');
+        expect(Math.abs((await numberWidth()) - elevenWidth)).toBeLessThan(0.5);
+
+        // Inter: no digit boxes, the plain text node only.
+        await paint(11, 'Inter');
+        expect(await digitSpans()).toBe(0);
+        await paint(88, 'Inter');
+        expect(await digitSpans()).toBe(0);
       } finally {
         close();
       }

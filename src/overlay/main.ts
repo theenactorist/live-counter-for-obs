@@ -1,14 +1,15 @@
 import '../styles/fonts.css';
 import './overlay.css';
-import { ObsWsClient } from '../protocol/obsws-client.js';
+import { ObsWsClient, EventSub } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
 import { mountOverlayRenderer } from './renderer.js';
 
-// General | Inputs — same subscription set the dock uses (src/dock/main.ts);
-// the overlay only ever READS 'state' broadcasts, but events flow over the
-// same identified connection so the subscription bitmask must still be
-// something obs-websocket accepts.
-const EVENT_SUBSCRIPTIONS = 9;
+// General only. The overlay reads nothing but CustomEvent (the bus's
+// BroadcastCustomEvent messages, src/protocol/bus.ts), and obs-websocket
+// sends CustomEvent in the General category. The dock subscribes to more
+// (src/dock/main.ts) because its LIVE-status tracker needs input and UI
+// events; the overlay does not.
+const EVENT_SUBSCRIPTIONS = EventSub.General;
 const DEFAULT_PORT = 4455;
 
 // Phase 2 final-review fix (live-safety:F1 / contracts:overlay-presence-one-
