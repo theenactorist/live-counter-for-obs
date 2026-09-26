@@ -64,6 +64,7 @@ import {
 // settings-paste-only usage of them.
 import { pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
 import { CONNECTION_GRACE_MS } from '../connection-grace.js';
+import { el, button, captureFocus, restoreFocus, parsePort, DEFAULT_WS_PORT } from './dom.js';
 
 export interface LiveViewHandle {
   destroy(): void;
@@ -93,7 +94,6 @@ const CONNECT_GRACE_MS = CONNECTION_GRACE_MS;
 const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry';
 const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from Show Connect Info";
 const CONNECT_CONNECTING_TEXT = 'Connecting…';
-const DEFAULT_CONNECT_PORT = 4455;
 
 // Task 3.3 (AC 14) — the live-safety confirm's two locked variants (brief).
 // Which one shows is entirely a property of the CURRENT liveSafetyArmed
@@ -189,32 +189,6 @@ export interface MountLiveViewOptions {
    * at all) — main.ts always passes one in production.
    */
   liveStatus?: LiveStatusTracker;
-}
-
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string, opts: { disabled?: boolean; extraClass?: string } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: `ctl${opts.extraClass ? ' ' + opts.extraClass : ''}` }, text);
-  b.disabled = opts.disabled ?? false;
-  return b;
 }
 
 // 2026-09-25 review, item 8: true when the only thing that moved between the
@@ -352,7 +326,7 @@ export function mountLiveView(
   const client = opts.client;
 
   const connectUi: ConnectUiState = {
-    portRaw: String(opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT),
+    portRaw: String(opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT),
     password: opts.initialSettings?.wsPassword ?? '',
     pasteErrorVisible: false,
     portErrorVisible: false,
@@ -406,11 +380,6 @@ export function mountLiveView(
     return Date.now() - connectSince >= CONNECT_GRACE_MS ? 'unreachable' : 'connecting';
   }
 
-  function parseConnectPort(raw: string): number | null {
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
-  }
-
   function dispatch(cmd: Command): void {
     controller.dispatch(cmd);
     // controller.dispatch() calls notify() synchronously on any accepted OR
@@ -460,7 +429,7 @@ export function mountLiveView(
     // replacement.
     if (destroyed) return;
     refreshConnectTiming();
-    const focusSnapshot = captureFocus();
+    const focusSnapshot = captureFocus(container);
 
     const state = controller.getState();
     lastRendered = state;
@@ -547,7 +516,7 @@ export function mountLiveView(
       }
     }
 
-    restoreFocus(focusSnapshot);
+    restoreFocus(container, focusSnapshot);
   }
 
   // Ruling C — the persistent way back to the card the operator dismissed.
@@ -678,7 +647,7 @@ export function mountLiveView(
     // Review fold-in: the written URL's port now comes from the SAME live
     // mirror the Connect card edits, not a value frozen at mount — so what
     // the operator last typed and what gets written can no longer diverge.
-    const port = parseConnectPort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT;
+    const port = parsePort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT;
     // runAddOverlay() flips the shared busy lock synchronously before
     // returning (see diagnostics.ts) — render() right after already paints
     // this button disabled, with no separate flag needed.
@@ -772,7 +741,7 @@ export function mountLiveView(
 
     const submitBtn = button('connect-submit', 'Connect');
     submitBtn.addEventListener('click', () => {
-      const port = parseConnectPort(portInput.value);
+      const port = parsePort(portInput.value);
       if (port === null) {
         connectUi.portErrorVisible = true;
         render();
@@ -822,44 +791,6 @@ export function mountLiveView(
     }
 
     return card;
-  }
-
-  // Captures the currently-focused element's data-testid (+ text selection,
-  // for an input/textarea) so a full rebuild can restore it afterward.
-  // Returns null when nothing inside this view is focused, or the focused
-  // element carries no testid to re-find it by.
-  function captureFocus(): FocusSnapshot | null {
-    const active = document.activeElement;
-    if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-    const testid = active.getAttribute('data-testid');
-    if (!testid) return null;
-    let selectionStart: number | null = null;
-    let selectionEnd: number | null = null;
-    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-      selectionStart = active.selectionStart;
-      selectionEnd = active.selectionEnd;
-    }
-    return { testid, selectionStart, selectionEnd };
-  }
-
-  function restoreFocus(snapshot: FocusSnapshot | null): void {
-    if (!snapshot) return;
-    const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-    if (!target) return;
-    target.focus();
-    if (
-      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-      snapshot.selectionStart !== null &&
-      snapshot.selectionEnd !== null
-    ) {
-      try {
-        target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-      } catch {
-        // Some input types (e.g. a future numeric-only variant) don't
-        // support selection ranges — restoring focus alone is still
-        // strictly better than nothing, so swallow and move on.
-      }
-    }
   }
 
   function overlaySilent(): boolean {

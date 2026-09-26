@@ -30,6 +30,7 @@ import { VERSION } from '../shared/version.js';
 // consumer) now imports directly from clipboard-keys.ts instead of
 // indirecting through this module's settings-paste-only usage of them.
 import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
+import { el, button, parsePort, DEFAULT_WS_PORT } from './views/dom.js';
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
@@ -182,11 +183,6 @@ const NAME_TAKEN_CODE_MATCH = 'code 601';
 // Guards against a pathological/looping server response — no real scene
 // will ever have this many same-prefixed inputs.
 const MAX_NAME_SUFFIX_ATTEMPTS = 50;
-
-// The port an untouched install talks to (obs-websocket's own default). Used
-// by `overlaySourceUrlFor` below to decide whether the written URL needs a
-// `?port=` at all.
-const DEFAULT_WS_PORT = 4455;
 
 export const ADD_OVERLAY_CREATE_LABEL = 'Add overlay to my scene';
 export const ADD_OVERLAY_FIX_LABEL = 'Fix overlay settings';
@@ -815,29 +811,6 @@ async function performOverlayAction(client: ObsWsClient, intent: OverlayIntent, 
   } catch (err) {
     return { ok: false, message: errorText(err) };
   }
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string): HTMLButtonElement {
-  return el('button', { 'data-testid': testid, class: 'ctl' }, text);
-}
-
-function parsePort(raw: string): number | null {
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
 }
 
 // Derives overlay.html's absolute URL from the DOCK's own location: both are

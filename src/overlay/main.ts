@@ -3,6 +3,7 @@ import './overlay.css';
 import { ObsWsClient, EventSub } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
 import { mountOverlayRenderer } from './renderer.js';
+import { DEFAULT_WS_PORT } from '../dock/views/dom.js';
 
 // General only. The overlay reads nothing but CustomEvent (the bus's
 // BroadcastCustomEvent messages, src/protocol/bus.ts), and obs-websocket
@@ -10,7 +11,6 @@ import { mountOverlayRenderer } from './renderer.js';
 // (src/dock/main.ts) because its LIVE-status tracker needs input and UI
 // events; the overlay does not.
 const EVENT_SUBSCRIPTIONS = EventSub.General;
-const DEFAULT_PORT = 4455;
 
 // Phase 2 final-review fix (live-safety:F1 / contracts:overlay-presence-one-
 // shot / code-quality:P2-Q-02) — overlay LIVENESS heartbeat.
@@ -76,9 +76,9 @@ function renderOverlayRoot(): HTMLElement | null {
 // range) falls back to the default rather than handing ObsWsClient a
 // nonsense URL.
 function parsePort(raw: string | null): number {
-  if (raw === null) return DEFAULT_PORT;
+  if (raw === null) return DEFAULT_WS_PORT;
   const n = Number(raw);
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_PORT;
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_WS_PORT;
 }
 
 function main(): void {

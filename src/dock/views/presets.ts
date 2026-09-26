@@ -30,6 +30,7 @@ import type { DockStorage } from '../../protocol/persistence.js';
 import { generateNonce } from '../../protocol/bus.js';
 import { loadPresets as engineLoadPresets, serializePresets } from '../../engine/migrate.js';
 import { CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
+import { el, button, captureFocus, restoreFocus } from './dom.js';
 
 export interface PresetsViewHandle {
   destroy(): void;
@@ -116,63 +117,6 @@ function uniqueTitle(base: string, seen: ReadonlySet<string>): string {
     n += 1;
   }
   return candidate;
-}
-
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string, opts: { extraClass?: string } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: `ctl${opts.extraClass ? ' ' + opts.extraClass : ''}` }, text);
-  return b;
-}
-
-function captureFocus(container: HTMLElement): FocusSnapshot | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-  const testid = active.getAttribute('data-testid');
-  if (!testid) return null;
-  let selectionStart: number | null = null;
-  let selectionEnd: number | null = null;
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    selectionStart = active.selectionStart;
-    selectionEnd = active.selectionEnd;
-  }
-  return { testid, selectionStart, selectionEnd };
-}
-
-function restoreFocus(container: HTMLElement, snapshot: FocusSnapshot | null): void {
-  if (!snapshot) return;
-  const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-  if (!target) return;
-  target.focus();
-  if (
-    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-    snapshot.selectionStart !== null &&
-    snapshot.selectionEnd !== null
-  ) {
-    try {
-      target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-    } catch {
-      // Not every input type supports selection ranges.
-    }
-  }
 }
 
 export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewOptions): PresetsViewHandle {

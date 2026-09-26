@@ -15,6 +15,7 @@ import {
   type LoadResult,
   type StoredSession,
 } from '../engine/migrate.js';
+import { DEFAULT_WS_PORT } from '../dock/views/dom.js';
 
 export interface StorageLike {
   getItem(k: string): string | null;
@@ -96,7 +97,7 @@ const MIRROR_SLOT_PRESETS = 'live-counter/presets';
 
 const LOG_MAX_ENTRIES = 500;
 
-const DEFAULT_SETTINGS: DockSettings = { wsPort: 4455, wsPassword: '', schemaVersion: 1 };
+const DEFAULT_SETTINGS: DockSettings = { wsPort: DEFAULT_WS_PORT, wsPassword: '', schemaVersion: 1 };
 
 /**
  * Every `lc.*` key currently held by `store` — the local half of Task 2.14's

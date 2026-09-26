@@ -56,6 +56,7 @@ import { generateNonce } from '../../protocol/bus.js';
 import { keyframesFor, ANIMATION_EASING } from '../../shared/animation-keyframes.js';
 import { createPresentationNodes, applyPresentation, animationTargets, type PresentationNodes } from '../../shared/overlay-presentation.js';
 import { unsupportedGlyphs } from '../../shared/glyphs.js';
+import { el, button, captureFocus, restoreFocus } from './dom.js';
 
 const ANIMATION_TYPES = ['none', 'pop', 'fade', 'slideUp', 'flip'] as const;
 const ANIMATION_TARGETS = ['number', 'text', 'both'] as const;
@@ -182,6 +183,28 @@ interface EditingState {
   editingSince: string;
 }
 
+// The form fields tracked in `SetupUiState.dirtyFields`. Each name is the
+// `SetupUiState` property that field's control writes. 'mode' is left out on
+// purpose: Setup never applies a mode change to a running session (see
+// `loadPreset()`).
+type SetupField =
+  | 'title'
+  | 'startValue'
+  | 'finishValue'
+  | 'intervalSeconds'
+  | 'template'
+  | 'layout'
+  | 'numberSizePx'
+  | 'numberColor'
+  | 'textSizePx'
+  | 'textColor'
+  | 'fontFamily'
+  | 'animType'
+  | 'animTarget'
+  | 'animDurationMs'
+  | 'completionKind'
+  | 'completionSeconds';
+
 interface SetupUiState {
   title: string;
   startValue: string;
@@ -236,7 +259,7 @@ interface SetupUiState {
   // Fix wave 2 (coordinator re-review, Important) — PER-FIELD dirty
   // tracking, replacing fix wave 1's single whole-form boolean. Each control
   // adds its own canonical field name (matching the `SetupUiState` property
-  // it writes — 'startValue', 'mode', 'intervalSeconds', etc.) when the
+  // it writes; see `SetupField` for the full list) when the
   // operator changes it. `refresh()` (tab-activation) re-prefills every field
   // NOT in this set from the live session and leaves fields that ARE in it
   // untouched — so an unrelated edit elsewhere in the form no longer freezes
@@ -260,7 +283,7 @@ interface SetupUiState {
   // number of tab round-trips until the operator explicitly commits or
   // discards them — clearing markers there would silently revert an edit on
   // the SECOND round-trip even though nothing was ever applied.
-  dirtyFields: Set<string>;
+  dirtyFields: Set<SetupField>;
   // Task 3.0 (carry-forward fix wave, parked ruling) — the FULL `StyleConfig`
   // of the most recently loaded preset, set only by `loadPreset()`. This form
   // has never modelled seven of `StyleConfig`'s thirteen fields (fontWeight/
@@ -276,66 +299,6 @@ interface SetupUiState {
   // session's live `presentation.style`, already threaded into
   // `resolvePresentation` as its `presentation` parameter.
   baseStyle: StyleConfig | null;
-}
-
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
-
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
-  }
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(testid: string, text: string, opts: { disabled?: boolean } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: 'ctl' }, text);
-  b.disabled = opts.disabled ?? false;
-  return b;
-}
-
-function captureFocus(container: HTMLElement): FocusSnapshot | null {
-  const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-  const testid = active.getAttribute('data-testid');
-  if (!testid) return null;
-  let selectionStart: number | null = null;
-  let selectionEnd: number | null = null;
-  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-    selectionStart = active.selectionStart;
-    selectionEnd = active.selectionEnd;
-  }
-  return { testid, selectionStart, selectionEnd };
-}
-
-function restoreFocus(container: HTMLElement, snapshot: FocusSnapshot | null): void {
-  if (!snapshot) return;
-  const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-  if (!target) return;
-  target.focus();
-  if (
-    (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-    snapshot.selectionStart !== null &&
-    snapshot.selectionEnd !== null
-  ) {
-    try {
-      target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-    } catch {
-      // Not every input type supports selection ranges (e.g. type=number in
-      // some browsers) — restoring focus alone is still strictly better than
-      // nothing.
-    }
-  }
 }
 
 function parseIntStrict(raw: string): number | null {
@@ -857,7 +820,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
   // input/change handler below calls this (with ITS OWN canonical field
   // name, matching the `SetupUiState` property it writes) instead of
   // `render()` directly, marking that one field dirty before repainting.
-  function markDirty(field: string): void {
+  function markDirty(field: SetupField): void {
     ui.dirtyFields.add(field);
     // Task 2.19 — nearly every field's onChange already runs through this
     // one choke point, so it doubles as "clear the stale save confirmation
@@ -1440,7 +1403,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     testid: string,
     value: string,
     onChange: (v: string) => void,
-    field: string,
+    field: SetupField,
     type: 'text' | 'number' = 'text',
     extraAttrs: Record<string, string> = {},
   ): HTMLInputElement {
@@ -1454,7 +1417,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
     return input;
   }
 
-  function colorField(testid: string, value: string, onChange: (v: string) => void, field: string): HTMLInputElement {
+  function colorField(testid: string, value: string, onChange: (v: string) => void, field: SetupField): HTMLInputElement {
     const input = el('input', { 'data-testid': testid, type: 'color' }) as HTMLInputElement;
     input.value = value;
     input.addEventListener('input', () => {
@@ -2337,7 +2300,7 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // is still written above (for the mismatch note, and for a future
       // Start), just not tracked as "dirty" — that concept no longer
       // applies to this field.
-      const dirtyFromPreset = new Set([
+      const dirtyFromPreset = new Set<SetupField>([
         'title', 'startValue', 'finishValue', 'intervalSeconds', 'template', 'layout',
         'numberSizePx', 'numberColor', 'textSizePx', 'textColor', 'fontFamily',
         'animType', 'animTarget', 'animDurationMs', 'completionKind', 'completionSeconds',
