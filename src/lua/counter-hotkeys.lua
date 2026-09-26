@@ -40,19 +40,33 @@ local CHANNEL_NAME = "LiveCounterCommandChannel"
 local HELLO_INTERVAL_MS = 30000
 
 -- Preference order for the scene-less channel source's input kind (locked,
--- Task 3.1 brief). The settings this script writes are a single schemaless
--- "text" string field, which ANY input kind can carry -- this list just picks
--- the least conspicuous kind actually available in this OBS build/OS/plugin
--- set, falling back to whatever obs_enum_input_types() enumerates first when
--- none of the preferred kinds exist.
+-- Task 3.1 brief: colour source, then GDI+ text, then FreeType 2 text). The
+-- settings this script writes are a single schemaless "text" string field,
+-- which ANY input kind can carry -- this list just picks the least
+-- conspicuous kind actually registered in this OBS build/OS/plugin set.
+--
+-- 2026-09-26 real-OBS fix: these are UNVERSIONED ids. pick_kind() resolves
+-- each one to its currently registered versioned id (e.g. "color_source" ->
+-- "color_source_v3") with obs_get_latest_input_type_id, which returns nil
+-- when no plugin registered that kind (text_gdiplus is Windows-only;
+-- text_ft2_source is the macOS/Linux text kind). The first version of this
+-- script walked obs_enum_input_types instead, and OBS 32.2.2 aborted
+-- script_load with "Error in obs_enum_input_types expected 2..2 args, got 1":
+-- obslua's SWIG binding has no typemap for that function's `const char **id`
+-- out-parameter, so it demands a raw pointer as a second argument and only
+-- ever returns the bool -- the id can never reach Lua. Every
+-- obs_enum_*_types sibling has the same shape, so none of them may be used
+-- here (tests/protocol/lua-script.test.ts enforces this). By contrast
+-- obs_get_latest_input_type_id takes one string and returns one string,
+-- which obslua marshals directly (a C NULL comes back as nil).
 local KIND_PREFERENCE = {
-  "color_source_v3",
-  "color_source_v2",
   "color_source",
-  "text_gdiplus_v3",
-  "text_gdiplus_v2",
-  "text_ft2_source_v2",
+  "text_gdiplus",
+  "text_ft2_source",
 }
+
+-- Only used when none of KIND_PREFERENCE resolves (see pick_kind()).
+local FALLBACK_KIND = "text_ft2_source"
 
 local channel_source = nil
 local send_counter = 0
@@ -75,24 +89,38 @@ local hotkey_ids = {
   lc_show_hide = obs.OBS_INVALID_HOTKEY_ID,
 }
 
+-- Resolves one unversioned kind to its registered versioned id, or nil when
+-- this OBS build has not registered it. The binding was checked against the
+-- obslua.so shipped with OBS 32.2.2 (exactly one string argument; returns a
+-- string, or nil for "not registered"); pcall is belt-and-braces so that a
+-- build which lacks or rejects it degrades to the fallback below instead of
+-- aborting script_load the way the old enumeration did.
+local function latest_kind(unversioned)
+  local ok, id = pcall(obs.obs_get_latest_input_type_id, unversioned)
+  if not ok then
+    print("Live Counter: obs_get_latest_input_type_id('" .. unversioned .. "') failed: " .. tostring(id))
+    return nil
+  end
+  if type(id) == "string" and id ~= "" then return id end
+  return nil
+end
+
 local function pick_kind()
-  local available = {}
-  local i = 0
-  while true do
-    local kind = obs.obs_enum_input_types(i)
-    if kind == nil then break end
-    available[kind] = true
-    i = i + 1
+  for _, unversioned in ipairs(KIND_PREFERENCE) do
+    local id = latest_kind(unversioned)
+    if id ~= nil then return id end
   end
 
-  for _, preferred in ipairs(KIND_PREFERENCE) do
-    if available[preferred] then return preferred end
-  end
-
-  -- Nothing on the preference list exists in this build -- fall back to
-  -- whatever obs_enum_input_types() enumerates first (nil only if this OBS
-  -- build has registered no input kinds at all).
-  return obs.obs_enum_input_types(0)
+  -- Nothing on the preference list resolved. Gate fix wave (M-6) rule: never
+  -- fail silently -- print() surfaces in Tools -> Scripts' own log. Still
+  -- attempt a channel with a plain FreeType 2 text id rather than giving up;
+  -- if OBS really has no such kind it logs "Source ID ... not found" and
+  -- hands back a disabled placeholder that will not deliver commands, which
+  -- the warning tells the operator to look for.
+  print("Live Counter: WARNING -- none of the input kinds " .. table.concat(KIND_PREFERENCE, ", ")
+    .. " is registered in this OBS build; creating the hotkey command channel as '" .. FALLBACK_KIND
+    .. "' anyway. If the OBS log says that source ID was not found, hotkeys will not reach the dock.")
+  return FALLBACK_KIND
 end
 
 local function ensure_channel()
@@ -101,29 +129,21 @@ local function ensure_channel()
   local existing = obs.obs_get_source_by_name(CHANNEL_NAME)
   if existing ~= nil then
     channel_source = existing
+    print("Live Counter: using the existing hotkey command channel '" .. CHANNEL_NAME .. "'")
     return
   end
 
   local kind = pick_kind()
-  if kind == nil then
-    -- Gate fix wave (M-6) — previously silent: every hotkey press (and the
-    -- 30s hello beat) would keep calling ensure_channel(), keep finding
-    -- channel_source nil, and keep doing nothing, with no trace anywhere of
-    -- WHY. This OBS build has registered no input kinds at all (the
-    -- obs_enum_input_types() enumeration pick_kind() walks came back empty) --
-    -- print() surfaces in Tools -> Scripts' own log so an operator (or anyone
-    -- helping them debug) can actually see the reason instead of guessing.
-    print("Live Counter: no input kind available -- cannot create the hotkey command channel")
-    return
-  end
-
   channel_source = obs.obs_source_create(kind, CHANNEL_NAME, nil, nil)
   if channel_source == nil then
     -- Gate fix wave (M-6) — obs_source_create() itself failed for the
-    -- chosen kind (a plugin providing it in obs_enum_input_types() but
-    -- unable to actually instantiate one, or a name collision obs_source_create
-    -- itself rejects). Same reasoning as above: make the failure visible.
+    -- chosen kind (a plugin registering it but unable to actually
+    -- instantiate one, or a name collision obs_source_create itself
+    -- rejects). Make the failure visible instead of silently doing nothing
+    -- on every later hotkey press and hello beat.
     print("Live Counter: failed to create the hotkey command channel (kind '" .. kind .. "')")
+  else
+    print("Live Counter: created the hotkey command channel '" .. CHANNEL_NAME .. "' (kind '" .. kind .. "')")
   end
 end
 
