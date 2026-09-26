@@ -765,7 +765,7 @@ export function mountLiveView(
       el(
         'div',
         { 'data-testid': 'connect-optional-note', class: 'connect-optional-note' },
-        'You can count without OBS — create a session in Setup. Connecting adds session persistence, LIVE status and Add overlay.',
+        'You can count without OBS. Create a session in Setup. Connecting adds session persistence, LIVE status, Add overlay, keyboard shortcuts and Stream Deck.',
       ),
     );
 

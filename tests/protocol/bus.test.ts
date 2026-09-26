@@ -463,6 +463,8 @@ describe('transportRowState (diag-row-transport)', () => {
     expect(row.state).toBe('warn');
     expect(row.text).toContain('OBS only');
     expect(row.text).toContain('still require the OBS WebSocket connection');
+    // Hotkeys ride the same connection (Lua script -> InputSettingsChanged).
+    expect(row.text).toContain('keyboard shortcuts and Stream Deck');
   });
 
   it("neither transport available is a fail reading 'not connected'", () => {

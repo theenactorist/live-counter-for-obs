@@ -168,6 +168,9 @@ test.describe('Diagnostics view', () => {
     try {
       await openDock(page, { port: mock.port, devhook: false });
       await page.getByTestId('tab-diagnostics').click();
+      // Connected first: the install hint below only applies once the dock
+      // can hear the script at all (see the not-connected test after this).
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
       const row = page.getByTestId('diag-row-hotkeys');
       // Nothing has actually been verified yet — a green "ok" would
       // misrepresent a bridge that has never been seen this boot.
@@ -182,6 +185,19 @@ test.describe('Diagnostics view', () => {
     } finally {
       await mock.close();
     }
+  });
+
+  test('hotkeys row: not connected says shortcuts need the OBS connection, not the install hint', async ({ page }) => {
+    // Nothing listens on this port. Hotkey presses reach the dock only
+    // through obs-websocket, so telling the operator to add the script
+    // (which may already be installed) would send them the wrong way.
+    await openDock(page, { port: 39453, devhook: false });
+    await page.getByTestId('tab-diagnostics').click();
+    await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'fail', { timeout: 5000 });
+    const row = page.getByTestId('diag-row-hotkeys');
+    await expect(row).toHaveAttribute('data-state', 'warn');
+    await expect(row).toContainText('Keyboard shortcuts need the OBS connection above');
+    await expect(row).not.toContainText('counter-hotkeys.lua');
   });
 
   test('hotkeys row: flips to ok once a hello arrives, then to warn once it goes stale', async ({ page }) => {

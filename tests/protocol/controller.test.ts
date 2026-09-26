@@ -1678,6 +1678,70 @@ describe('SessionController — adoptPresentation()', () => {
   });
 });
 
+// Improvement review item 7 — a freshly (re)loaded overlay says 'hello' and
+// then waited for the next 2s heartbeat before it drew anything. main.ts now
+// answers a hello with rebroadcast(): the current state, sent exactly the way
+// a command result is, so the overlay paints right away.
+describe('SessionController — rebroadcast()', () => {
+  it('re-sends the current state with the same payload as the last command broadcast', async () => {
+    const { bus, controller } = await setup();
+    await controller.init();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), 'Count {count}', null);
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    controller.dispatch({ type: 'increment', nonce: 'rb-1' });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const commandPayload = sendSpy.mock.calls[0]![1];
+
+    const listener = vi.fn();
+    controller.subscribe(listener);
+    controller.rebroadcast();
+
+    expect(sendSpy).toHaveBeenCalledTimes(2);
+    expect(sendSpy.mock.calls[1]![0]).toBe('state');
+    const payload = sendSpy.mock.calls[1]![1] as { session: { currentValue: number }; heartbeat: number };
+    expect(payload).toEqual(commandPayload);
+    expect(payload.session.currentValue).toBe(1);
+    // Nothing changed, so nobody in the dock is told anything changed.
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('does not touch the heartbeat counter or its schedule', async () => {
+    const { bus, controller, scheduler } = await setup();
+    await controller.init(); // heartbeat 0 broadcast, one pending re-arm
+    const pendingBefore = scheduler.pendingCount();
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    controller.rebroadcast();
+    scheduler.fireNext(); // heartbeat 1
+
+    const heartbeats = sendSpy.mock.calls.map(([, p]) => (p as { heartbeat: number }).heartbeat);
+    expect(heartbeats).toEqual([0, 1]);
+    expect(scheduler.pendingCount()).toBe(pendingBefore);
+  });
+
+  it('is a no-op while init() has not finished: a null session would blank an overlay already on air', async () => {
+    const { bus, controller } = await setup();
+    const sendSpy = vi.spyOn(bus, 'send');
+
+    controller.rebroadcast();
+
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op after dispose()', async () => {
+    const { bus, controller } = await setup();
+    await controller.init();
+    controller.startSession({ startValue: 0, finishValue: 10, mode: 'manual' }, styleFixture(), null, null);
+    controller.dispose();
+
+    const sendSpy = vi.spyOn(bus, 'send');
+    controller.rebroadcast();
+
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
 // Task 2.18 fix wave 5 (ruling 1) — `getState().presentation` exposes this
 // controller instance's own style/template/animation fields (additive to
 // the locked `ControllerState` interface) so a UI consumer can learn what

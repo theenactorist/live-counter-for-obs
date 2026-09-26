@@ -111,7 +111,7 @@ const OVERLAY_NOT_SEEN_TEXT =
 // change with the transport's own state.
 const TRANSPORT_LABEL = 'Panel ↔ overlay';
 const TRANSPORT_HELP_TEXT =
-  'Session persistence, LIVE status, and Add overlay to scene still require the OBS WebSocket connection.';
+  'Session persistence, LIVE status, Add overlay to scene, keyboard shortcuts and Stream Deck still require the OBS WebSocket connection.';
 // Task 3.1 — the hotkey bridge's three real states, driven by
 // `bridgeSeenAt()` (main.ts's `bridgeLastSeenAt` closure, updated by
 // installHotkeyBridge's `onBridgeSeen` on every valid payload including the
@@ -121,6 +121,10 @@ const TRANSPORT_HELP_TEXT =
 // or OBS's Scripts list reloaded without it).
 const HOTKEYS_NEVER_SEEN_TEXT =
   'Hotkey bridge — add counter-hotkeys.lua in OBS Tools → Scripts, then assign keys in Settings → Hotkeys';
+// Hotkey presses reach the dock only as obs-websocket events (Lua script ->
+// the channel input's settings -> InputSettingsChanged), so with no
+// connection the install hint above would point at the wrong fix.
+const HOTKEYS_NEEDS_WS_TEXT = 'Keyboard shortcuts need the OBS connection above';
 const HOTKEYS_OK_TEXT = 'Hotkey bridge connected';
 const HOTKEYS_WARN_TEXT = 'Hotkey bridge silent — was the script removed or OBS Scripts reloaded?';
 const STORAGE_OK_TEXT = 'Local storage is writable';
@@ -901,7 +905,14 @@ function overlayRowState(lastSeenAt: number, silenceMs: number): { state: RowSta
 // boot -> neutral (nothing verified yet, not a failure — distinct from
 // `overlayRowState`'s two-state ok/warn, which always has a real elapsed time
 // to compare against); seen <= staleMs ago -> ok; seen > staleMs ago -> warn.
-function hotkeysRowState(seenAt: number | null, staleMs: number): { state: RowState; text: string } {
+// Checked first: not connected -> warn, since no hotkey can arrive at all
+// until the websocket is up, whatever the bridge's own history.
+function hotkeysRowState(
+  wsState: ObsWsClient['state'],
+  seenAt: number | null,
+  staleMs: number,
+): { state: RowState; text: string } {
+  if (wsState !== 'identified') return { state: 'warn', text: HOTKEYS_NEEDS_WS_TEXT };
   if (seenAt === null) return { state: 'neutral', text: HOTKEYS_NEVER_SEEN_TEXT };
   return Date.now() - seenAt <= staleMs
     ? { state: 'ok', text: HOTKEYS_OK_TEXT }
@@ -1468,7 +1479,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     const overlayResult = overlayRowState(lastOverlaySeenAt, silenceMs);
     setRow(rowOverlay, overlayResult.state, overlayResult.text);
 
-    const hotkeysResult = hotkeysRowState(opts.bridgeSeenAt(), hotkeyStaleMs);
+    const hotkeysResult = hotkeysRowState(opts.client.state, opts.bridgeSeenAt(), hotkeyStaleMs);
     setRow(rowHotkeys, hotkeysResult.state, hotkeysResult.text);
 
     updateAddOverlayUi();

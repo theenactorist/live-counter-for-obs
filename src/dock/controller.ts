@@ -441,6 +441,17 @@ export class SessionController {
     this.notify();
   }
 
+  // Re-sends the current state exactly as an accepted command does, with no
+  // state change, no notify() and no heartbeat bump. main.ts calls it when an
+  // overlay says 'hello', so a freshly (re)loaded overlay paints right away
+  // instead of staying blank until the next heartbeat. Skipped until init()
+  // has finished: a null session sent then would blank any overlay already
+  // on air, and init() broadcasts on its own the moment it resolves.
+  rebroadcast(): void {
+    if (this.disposed || this.initializing) return;
+    void this.broadcast();
+  }
+
   // Final gate wave, ruling C — the ONE place this instance's presentation
   // fields are written, so persisting them can never be forgotten by a future
   // third writer. Before this, presentation was instance state with no storage

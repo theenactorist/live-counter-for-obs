@@ -328,6 +328,44 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
     }
   });
 
+  test('6b. overlay reload shows the current value well under 1s, with no new command and no heartbeat wait', async ({
+    context,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      const dock = await context.newPage();
+      const overlay = await context.newPage();
+      await openDock(dock, { port: mock.port });
+      await openOverlay(overlay, mock.port);
+
+      await startSession(dock, { startValue: 0, finishValue: 50, mode: 'manual' });
+      const plus = dock.getByTestId('btn-plus');
+      for (let i = 0; i < 5; i++) await plus.click();
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('5', { timeout: 3000 });
+
+      // Reload right after a heartbeat, so the next one is ~2s away and
+      // cannot be what paints the reloaded overlay. Only the heartbeat loop
+      // raises the `heartbeat` field, so a higher value marks a fresh beat.
+      const lastHeartbeat = (): number => {
+        let max = -1;
+        for (const b of mock.broadcasts) {
+          const e = b.eventData as { source?: string; kind?: string; payload?: { heartbeat?: unknown } } | null;
+          if (e?.source !== 'dock' || e.kind !== 'state') continue;
+          if (typeof e.payload?.heartbeat === 'number') max = Math.max(max, e.payload.heartbeat);
+        }
+        return max;
+      };
+      const seen = lastHeartbeat();
+      await expect.poll(lastHeartbeat, { timeout: 3000, intervals: [10] }).toBeGreaterThan(seen);
+
+      await overlay.reload();
+      await expect(overlay.getByTestId('overlay-number')).toHaveText('5', { timeout: 1000 });
+      await expect(dock.getByTestId('current-value')).toHaveText('5');
+    } finally {
+      await mock.close();
+    }
+  });
+
   test('7. diagnostics end-to-end: ws + overlay show ok with both pages up; killing the server flips ws to fail within ~3s', async ({
     context,
   }) => {
@@ -502,6 +540,8 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
     // The card is what greets an operator with no OBS...
     await expect(dock.getByTestId('connect-card')).toBeVisible();
     await expect(dock.getByTestId('connect-optional-note')).toContainText('count without OBS');
+    // Hotkeys need the connection too, so the note has to say so before "Not now".
+    await expect(dock.getByTestId('connect-optional-note')).toContainText('keyboard shortcuts and Stream Deck');
 
     // ...and "Not now" gets them straight to the working product.
     await dock.getByTestId('connect-dismiss').click();

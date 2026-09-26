@@ -74,6 +74,12 @@ const DEV_DEFAULT_STYLE: StyleConfig = DEFAULT_STYLE;
 // OBS-down boot still puts the operator's session on screen promptly.
 const IDENTIFY_WAIT_MS = 2500;
 
+// How long the dock waits after an overlay's 'hello' before re-sending the
+// current state. One overlay says hello twice (on load, then again once its
+// own websocket identifies) and several can reload together, so a short
+// debounce answers them all with one broadcast.
+const HELLO_REBROADCAST_DEBOUNCE_MS = 250;
+
 class RealScheduler implements Scheduler {
   schedule(ms: number, fn: () => void): unknown {
     return setTimeout(fn, ms);
@@ -288,6 +294,10 @@ function main(): void {
   // live bridge look freshly "never seen" again.
   let bridgeTeardown: (() => void) | null = null;
   let bridgeLastSeenAt: number | null = null;
+  // Per-boot 'hello' listener and its pending debounce (see the wiring next
+  // to the controller in boot()).
+  let helloTeardown: (() => void) | null = null;
+  let helloRebroadcastTimer: ReturnType<typeof setTimeout> | null = null;
   // Task 3.2 — per-boot LIVE-status tracker (mirrors bridgeTeardown's own
   // per-boot lifecycle immediately above: constructed after `bus`, disposed
   // at the top of the NEXT boot() call before it's reassigned) and the
@@ -371,6 +381,16 @@ function main(): void {
       liveStatus.dispose();
       liveStatus = null;
     }
+    // Same again: the hello listener sits on THIS boot's bus, and a pending
+    // debounce would call THIS boot's controller.
+    if (helloTeardown) {
+      helloTeardown();
+      helloTeardown = null;
+    }
+    if (helloRebroadcastTimer !== null) {
+      clearTimeout(helloRebroadcastTimer);
+      helloRebroadcastTimer = null;
+    }
 
     // Fix round 1 (Task 2.5 review, Critical 1): tear down the PREVIOUS
     // stack, if any, before building a new one. `controller`/`client` are
@@ -439,6 +459,21 @@ function main(): void {
     const timer = new AutoTimer(() => performance.now());
     const scheduler = new RealScheduler();
     controller = new SessionController({ storage, bus, timer, scheduler });
+
+    // An overlay says 'hello' when it loads or reloads (OBS Refresh,
+    // Diagnostics' Fix) and draws nothing until state arrives, which used to
+    // mean waiting for the next 2s heartbeat. Answer the hello with the
+    // current state instead. Only 'hello': the 2s 'overlay-status' ping from
+    // every overlay would otherwise double the broadcast rate for nothing.
+    const helloController = controller;
+    helloTeardown = bus.onMessage((m) => {
+      if (m.kind !== 'hello') return;
+      if (helloRebroadcastTimer !== null) clearTimeout(helloRebroadcastTimer);
+      helloRebroadcastTimer = setTimeout(() => {
+        helloRebroadcastTimer = null;
+        helloController.rebroadcast();
+      }, HELLO_REBROADCAST_DEBOUNCE_MS);
+    });
 
     // Task 3.1 — installed fresh against THIS boot's client/controller (per-
     // boot, per installHotkeyBridge's own contract); torn down at the top of
