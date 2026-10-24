@@ -1,6 +1,6 @@
 // Guard for the planning files that live only on this Mac: `npm run check:local`.
-// HANDOVER.md, AGENTS.md, docs/audit/, docs/archive/ and Claude outputs/ are
-// listed in .git/info/exclude, but `git add -f` or a changed exclude can still
+// HANDOVER.md, AGENTS.md, docs/audit/, docs/archive/, Claude outputs/ and
+// .claude/ (local tooling such as cdp.mjs) are listed in .git/info/exclude, but `git add -f` or a changed exclude can still
 // slip one into a commit. This fails if any of them is tracked or staged, and
 // names the file. It prints paths only, never file contents.
 //
@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LOCAL_ONLY_FILES = ['HANDOVER.md', 'AGENTS.md'];
-export const LOCAL_ONLY_DIRS = ['docs/audit/', 'docs/archive/', 'Claude outputs/'];
+export const LOCAL_ONLY_DIRS = ['docs/audit/', 'docs/archive/', 'Claude outputs/', '.claude/'];
 
 export function isLocalOnly(filePath) {
   const p = filePath.replace(/\\/g, '/');
