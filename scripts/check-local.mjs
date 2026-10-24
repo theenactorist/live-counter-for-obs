@@ -4,6 +4,11 @@
 // slip one into a commit. This fails if any of them is tracked or staged, and
 // names the file. It prints paths only, never file contents.
 //
+// T2: live-counter-config.js (the installer's dock connection file, which
+// holds the OBS WebSocket password) is guarded too, at any depth. It is in
+// .gitignore rather than the exclude file, because it can turn up beside any
+// built dock.html.
+//
 // The matching mirrors the exclude lines: a bare file name matches at any
 // depth (git treats a pattern without a slash that way), and a folder pattern
 // with a slash in it is anchored to the repo root.
@@ -11,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const LOCAL_ONLY_FILES = ['HANDOVER.md', 'AGENTS.md'];
+export const LOCAL_ONLY_FILES = ['HANDOVER.md', 'AGENTS.md', 'live-counter-config.js'];
 export const LOCAL_ONLY_DIRS = ['docs/audit/', 'docs/archive/', 'Claude outputs/', '.claude/'];
 
 export function isLocalOnly(filePath) {

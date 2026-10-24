@@ -13,8 +13,12 @@
 //
 // Uses the system `zip` command (Node has no built-in zip writer) and stops
 // with an error if it is missing. release/ is git-ignored.
+//
+// T2: stops before zipping if a live-counter-config.js (the installer's dock
+// connection file, which holds the WebSocket password) would be shipped.
+// Only the installer writes that file, on the operator's machine.
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -79,6 +83,17 @@ for (const [from, to] of DIRS) {
     recursive: true,
     filter: (p) => !path.basename(p).startsWith('.'),
   });
+}
+
+const CONFIG_FILE_NAME = 'live-counter-config.js';
+const shippedConfigs = readdirSync(outDir, { recursive: true }).filter(
+  (p) => path.basename(String(p)) === CONFIG_FILE_NAME,
+);
+if (shippedConfigs.length > 0) {
+  fail(
+    `${shippedConfigs.map((p) => path.join(FOLDER_NAME, String(p))).join(', ')} would be shipped. ` +
+      `${CONFIG_FILE_NAME} holds a WebSocket password and must never be in the release; remove it and run again.`,
+  );
 }
 
 // -r recurse, -X leave out extra file attributes, -q quiet. Run from release/

@@ -31,6 +31,7 @@ import { VERSION } from '../shared/version.js';
 // indirecting through this module's settings-paste-only usage of them.
 import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
 import { el, button, parsePort, DEFAULT_WS_PORT } from './views/dom.js';
+import { connectionSourceLine } from './installer-config.js';
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
@@ -1381,6 +1382,9 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       `Live Counter diagnostics — v${VERSION}`,
       '',
       checklistText,
+      // T2: whether the port and password came from the installer's
+      // connection file or were typed here. Never the password itself.
+      connectionSourceLine(opts.storage.loadSettings()),
       ...(overlayDiagLines.length > 0 ? ['', ...overlayDiagLines] : []),
       '',
       '--- Event log (most recent first, up to 100 lines) ---',

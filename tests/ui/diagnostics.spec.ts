@@ -416,6 +416,9 @@ test.describe('Diagnostics view', () => {
       // 'neutral', never a false "ok".
       expect(clipboardText).toContain('Hotkeys: neutral —');
       expect(clipboardText).not.toContain('Hotkeys: ok');
+
+      // T2: no installer file here, so the settings count as typed.
+      expect(clipboardText).toContain('Connection: typed in this panel');
     } finally {
       await mock.close();
     }

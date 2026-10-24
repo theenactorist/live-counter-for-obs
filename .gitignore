@@ -7,3 +7,6 @@ coverage/
 test-results/
 playwright-report/
 release/
+# T2: the installer's dock connection file. It holds the OBS WebSocket
+# password and is only ever written on the operator's machine.
+live-counter-config.js

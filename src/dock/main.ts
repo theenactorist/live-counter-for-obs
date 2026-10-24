@@ -14,7 +14,7 @@ import '../styles/fonts.css';
  */
 import { ObsWsClient, awaitIdentified, EventSub } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
-import { DockStorage } from '../protocol/persistence.js';
+import { DockStorage, type DockSettings } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
 import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
@@ -34,6 +34,7 @@ import { DEFAULT_STYLE } from '../shared/default-style.js';
 import { CONNECTION_GRACE_MS } from './connection-grace.js';
 import { installClipboardKeyboardHandler } from './clipboard-keys.js';
 import { installHotkeyBridge } from './hotkey-bridge.js';
+import { resolveInstallerConfig, panelSettings } from './installer-config.js';
 
 // Task 3.2 — General | Inputs | Ui | InputActiveStateChanged |
 // InputShowStateChanged (394249). `Ui` is needed for StudioModeStateChanged
@@ -277,7 +278,21 @@ function main(): void {
   // safe; DockStorage's client-backed mirror is only consulted by
   // loadSession()/loadPresets(), neither of which run here.
   const bootStorage = new DockStorage(window.localStorage, null);
-  const initialSettings = bootStorage.loadSettings();
+
+  // T2: the settings to boot with, once the installer's connection file
+  // (live-counter-config.js, see installer-config.ts) has had its say: a new
+  // revision is adopted and saved, the same revision leaves the saved
+  // settings alone, a bad shape is ignored with one log line. Used at startup
+  // and again after Reset everything, so a reset dock on an installed machine
+  // reconnects with the installer's values instead of an empty password.
+  function loadBootSettings(): DockSettings {
+    const outcome = resolveInstallerConfig(window.LIVE_COUNTER_CONFIG, bootStorage.loadSettings());
+    if (outcome.kind === 'adopted') bootStorage.saveSettings(outcome.settings);
+    if (outcome.kind !== 'kept') bootStorage.log(outcome.event, outcome.detail);
+    return outcome.settings;
+  }
+
+  const initialSettings = loadBootSettings();
   const initialPort = portOverride !== null ? Number(portOverride) : initialSettings.wsPort;
 
   let client: ObsWsClient;
@@ -554,7 +569,9 @@ function main(): void {
     // this function's `void` return before.
     const onSaveSettings = (port: number, password: string): string | null => {
       if (resetInFlight) return 'Reset in progress — try again in a moment';
-      storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
+      // T2: panelSettings keeps the installer revision already applied, so
+      // a password typed here is not overwritten on the next launch.
+      storageForSave.saveSettings(panelSettings(port, password, storageForSave.loadSettings()));
       boot(port, password);
       return null;
     };
@@ -601,11 +618,12 @@ function main(): void {
 
         // `bootStorage.loadSettings()` now finds nothing on disk (just
         // cleared above) and returns its own built-in defaults — the same
-        // path a genuinely fresh install takes. Never `location.reload()`
+        // path a genuinely fresh install takes (T2: plus the installer's
+        // connection file, when there is one). Never `location.reload()`
         // (brief): Playwright cannot drive a real page navigation from
         // inside the page that is reloading, and a reload would also discard
         // the one-time `justReset` flag below.
-        const freshSettings = bootStorage.loadSettings();
+        const freshSettings = loadBootSettings();
         boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
       } finally {
         resetInFlight = false;

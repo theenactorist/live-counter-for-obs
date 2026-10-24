@@ -811,6 +811,12 @@
         <div data-testid="pane-diagnostics" class="pane" hidden></div>
       </div>
     </div>
+    <!-- T2: the installer writes live-counter-config.js beside this page with
+         the WebSocket port and password (see src/dock/installer-config.ts).
+         A classic script, so it runs before the module below. It must stay an
+         external file in dist/dock.html (scripts/copy-static.mjs checks), and
+         a missing file is normal: the dock then uses its saved settings. -->
+    <script src="./live-counter-config.js"></script>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>
