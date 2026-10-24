@@ -180,6 +180,16 @@ describe.skipIf(process.platform !== 'darwin')('Mac installer (install.sh)', () 
     expect(conn.revision).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
 
+  it('keeps the permissions of the WebSocket settings file it rewrites', async () => {
+    const f = setup();
+    const file = path.join(f.cfg, 'plugin_config/obs-websocket/config.json');
+    chmodSync(file, 0o644);
+    const r = await run(installSh, f);
+    expect(r.code, r.out).toBe(0);
+    expect(websocketConfig(f).server_enabled).toBe(true);
+    expect(statSync(file).mode & 0o777).toBe(0o644);
+  });
+
   it('generates a 16-character password when it is empty, with auth on', async () => {
     const f = setup({
       websocket: {
