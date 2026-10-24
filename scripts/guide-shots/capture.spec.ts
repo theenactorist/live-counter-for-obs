@@ -107,9 +107,6 @@ test('capture guide screenshots', async ({ browser }) => {
       clip: { x: 320, y: 180, width: 1280, height: 720 },
     });
 
-    console.log('overlay shows:', await overlay.getByTestId('overlay-number').textContent().catch(() => '(none)'));
-    console.log('dock shows:', await dock.getByTestId('current-value').textContent().catch(() => '(none)'));
-
     await dockCtx.close();
     await overlayCtx.close();
   } finally {
