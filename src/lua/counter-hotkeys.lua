@@ -14,9 +14,12 @@
 -- HOW TO INSTALL
 -- --------------
 -- 1. In OBS: Tools -> Scripts -> "+" -> select this file (counter-hotkeys.lua).
--- 2. Settings -> Hotkeys -> scroll down to the five "Live Counter: ..."
---    entries and assign whichever keys you want (each is independent and
---    optional -- bind only the ones you plan to use).
+--    (The installer adds it to every scene collection for you.)
+-- 2. The five keys come pre-set: Ctrl+Option on a Mac, Ctrl+Alt on Windows,
+--    with = for +1, - for -1, Z for Undo, P for Pause/Resume and H for
+--    Show/Hide overlay. To change or clear one, open Settings -> Hotkeys and
+--    scroll to the five "Live Counter: ..." entries. A key you clear stays
+--    cleared (see DEFAULT KEYS below).
 -- 3. That's it. No scene setup is needed: this script creates its own hidden
 --    command-channel source the first time it runs, and you never add it to
 --    a scene or touch it directly.
@@ -33,6 +36,17 @@
 -- existing scene) instead -- the source itself, its settings shape, and the
 -- dock's receiving code all stay identical; only its scene membership would
 -- change.
+--
+-- DEFAULT KEYS (T2)
+-- -----------------
+-- In script_load, a hotkey with NO saved value in this collection gets the
+-- suggested key from DEFAULT_KEYS. The test is obs_data_has_user_value, not
+-- "the saved array is empty": OBS saves a cleared key as an empty array, so
+-- an empty-array test would bring a cleared key back on every launch. Once
+-- OBS quits, script_save writes the defaults into the collection like any
+-- other key, so they are only ever applied once per collection. Proven on
+-- OBS 32.2.2 and 33.0.0 in the T1 spike (docs/installer-spike.md, row 6b).
+-- "control" plus "alt" is Ctrl+Option on a Mac and Ctrl+Alt on Windows.
 
 local obs = obslua
 
@@ -87,6 +101,17 @@ local hotkey_ids = {
   lc_undo = obs.OBS_INVALID_HOTKEY_ID,
   lc_pause_resume = obs.OBS_INVALID_HOTKEY_ID,
   lc_show_hide = obs.OBS_INVALID_HOTKEY_ID,
+}
+
+-- T2: the suggested key for each hotkey, applied only when the collection has
+-- no saved value for it (see DEFAULT KEYS above). `setting` is the key
+-- script_save writes the binding under.
+local DEFAULT_KEYS = {
+  { id = "lc_inc", setting = "lc_inc_hotkey", key = "OBS_KEY_EQUAL" },
+  { id = "lc_dec", setting = "lc_dec_hotkey", key = "OBS_KEY_MINUS" },
+  { id = "lc_undo", setting = "lc_undo_hotkey", key = "OBS_KEY_Z" },
+  { id = "lc_pause_resume", setting = "lc_pause_resume_hotkey", key = "OBS_KEY_P" },
+  { id = "lc_show_hide", setting = "lc_show_hide_hotkey", key = "OBS_KEY_H" },
 }
 
 -- Resolves one unversioned kind to its registered versioned id, or nil when
@@ -180,8 +205,30 @@ local function hello_beat()
   send("hello")
 end
 
+-- T2: loads the suggested key into every hotkey that has no saved value in
+-- this collection, and returns how many it set. Runs after the saved
+-- bindings are loaded, so it only ever fills gaps.
+local function apply_default_keys(settings)
+  local applied = 0
+  for _, entry in ipairs(DEFAULT_KEYS) do
+    if not obs.obs_data_has_user_value(settings, entry.setting) then
+      local binding = obs.obs_data_create()
+      obs.obs_data_set_bool(binding, "control", true)
+      obs.obs_data_set_bool(binding, "alt", true)
+      obs.obs_data_set_string(binding, "key", entry.key)
+      local array = obs.obs_data_array_create()
+      obs.obs_data_array_push_back(array, binding)
+      obs.obs_hotkey_load(hotkey_ids[entry.id], array)
+      obs.obs_data_array_release(array)
+      obs.obs_data_release(binding)
+      applied = applied + 1
+    end
+  end
+  return applied
+end
+
 function script_description()
-  return "Live Counter for OBS: relays five hotkeys (+1, -1, Undo, Pause/Resume, Show/Hide overlay) to the Live Counter dock. Assign keys under Settings -> Hotkeys after loading this script -- no scene setup required."
+  return "Live Counter for OBS: relays five hotkeys (+1, -1, Undo, Pause/Resume, Show/Hide overlay) to the Live Counter dock. The keys come pre-set to Ctrl+Option (Mac) or Ctrl+Alt (Windows) with = - Z P H; change them under Settings -> Hotkeys. No scene setup required."
 end
 
 function script_load(settings)
@@ -223,6 +270,8 @@ function script_load(settings)
   local show_hide_array = obs.obs_data_get_array(settings, "lc_show_hide_hotkey")
   obs.obs_hotkey_load(hotkey_ids.lc_show_hide, show_hide_array)
   obs.obs_data_array_release(show_hide_array)
+
+  print("Live Counter: default keys applied to " .. apply_default_keys(settings) .. " of 5")
 
   ensure_channel()
   send("hello")

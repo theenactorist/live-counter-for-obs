@@ -10,6 +10,11 @@ import { BRIDGE_CHANNEL_INPUT, BRIDGE_SETTINGS_KEY } from '../../src/shared/brid
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
+// T2: an overlay Browser Source in the SAME folder as the dock under test, so
+// fixtures only show the "old copy" note when a test means them to (those
+// use OLD_COPY_OVERLAY_URL instead).
+const OVERLAY_SOURCE_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
+const OLD_COPY_OVERLAY_URL = 'file:///Users/someone/Desktop/OBS%20Plugin/dist/overlay.html';
 
 async function openDock(
   page: Page,
@@ -416,6 +421,9 @@ test.describe('Diagnostics view', () => {
       // 'neutral', never a false "ok".
       expect(clipboardText).toContain('Hotkeys: neutral —');
       expect(clipboardText).not.toContain('Hotkeys: ok');
+
+      // T2: no installer file here, so the settings count as typed.
+      expect(clipboardText).toContain('Connection: typed in this panel');
     } finally {
       await mock.close();
     }
@@ -755,7 +763,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Hand-added counter',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///somewhere/overlay.html?port=4455', width: 800, height: 600 },
+          inputSettings: { url: `${OVERLAY_SOURCE_URL}?port=4455`, width: 800, height: 600 },
         },
       ],
     });
@@ -791,7 +799,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'My own counter source',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1280, height: 720 },
         },
       ],
     });
@@ -827,7 +835,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
           scenes: ['Main'], // NOT in the program scene
         },
       ],
@@ -869,7 +877,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
           scenes: ['Main'],
         },
       ],
@@ -901,7 +909,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
         },
       ],
     });
@@ -1606,7 +1614,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720, shutdown: true },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1280, height: 720, shutdown: true },
         },
       ],
     });
@@ -1642,7 +1650,7 @@ test.describe('Diagnostics view', () => {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
           inputSettings: {
-            url: 'file:///wherever/overlay.html',
+            url: OVERLAY_SOURCE_URL,
             width: 1920,
             height: 1080,
             restart_when_active: true,
@@ -1670,7 +1678,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
         },
       ],
     });
@@ -1692,7 +1700,7 @@ test.describe('Diagnostics view', () => {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
           inputSettings: {
-            url: 'file:///wherever/overlay.html',
+            url: OVERLAY_SOURCE_URL,
             width: 1920,
             height: 1080,
             fps_custom: true,
@@ -1718,7 +1726,7 @@ test.describe('Diagnostics view', () => {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
           inputSettings: {
-            url: 'file:///wherever/overlay.html',
+            url: OVERLAY_SOURCE_URL,
             width: 1920,
             height: 1080,
             fps_custom: true,
@@ -1743,7 +1751,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1280, height: 720 },
         },
       ],
     });
@@ -1764,7 +1772,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
           sceneItemEnabled: false,
         },
       ],
@@ -1787,7 +1795,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
         },
       ],
     });
@@ -1812,12 +1820,12 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
         },
         {
           inputName: 'Duplicate Overlay Source',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html?port=4455', width: 1920, height: 1080 },
+          inputSettings: { url: `${OVERLAY_SOURCE_URL}?port=4455`, width: 1920, height: 1080 },
           // A second scene item so it doesn't collide with the program
           // scene's own item list ordering — membership doesn't matter for
           // this warning (it counts every match in the collection).
@@ -1845,7 +1853,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
         },
       ],
     });
@@ -1870,7 +1878,7 @@ test.describe('Diagnostics view', () => {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
           inputSettings: {
-            url: 'file:///wherever/overlay.html?port=4455&pw=super-secret',
+            url: `${OVERLAY_SOURCE_URL}?port=4455&pw=super-secret`,
             width: 1280,
             height: 720,
           },
@@ -1896,7 +1904,7 @@ test.describe('Diagnostics view', () => {
         {
           inputName: 'Live Counter Overlay',
           inputKind: 'browser_source',
-          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1280, height: 720 },
         },
       ],
     });
@@ -1911,6 +1919,106 @@ test.describe('Diagnostics view', () => {
       await expect(fixConfirm).not.toContainText('websocket password');
     } finally {
       await mockClean.close();
+    }
+  });
+});
+
+// T2: the overlay address check (improvement review INSTALL-5, T1 Q4). The
+// installer moves Live Counter into obs-studio/live-counter/ and leaves
+// Browser Sources alone, so an existing overlay can still point at the old
+// folder. The note sits in its own slot in both views, apart from the
+// "Overlay not rendering" banner and the scan-failed error.
+test.describe('overlay address check (T2)', () => {
+  function oldCopyMock(): Promise<MockObs> {
+    return startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: OLD_COPY_OVERLAY_URL, width: 1920, height: 1080 },
+        },
+      ],
+    });
+  }
+
+  test('an overlay in another folder shows the note in Diagnostics, Live and Copy diagnostics', async ({
+    page,
+    context,
+  }) => {
+    const mock = await oldCopyMock();
+    try {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await openDock(page, { port: mock.port, devhook: false });
+
+      // Live (no session): the note sits under the Fix button.
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay-old-copy')).toHaveText(
+        'The overlay points at an old copy of Live Counter.',
+      );
+
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
+      await expect(page.getByTestId('add-overlay-old-copy')).toBeVisible();
+      await expect(page.getByTestId('add-overlay-old-copy')).toHaveText('The overlay points at an old copy of Live Counter.');
+      // Its own slot: the size is right here, so no settings issue shows.
+      await expect(page.getByTestId('add-overlay-settings-issues')).toBeHidden();
+      await expect(page.getByTestId('add-overlay-error')).toBeHidden();
+
+      await page.getByTestId('diag-copy-log').click();
+      await expect(page.getByTestId('copy-confirm')).toBeVisible();
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      expect(copied).toContain('The overlay points at an old copy of Live Counter.');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('Fix names the new address, repoints the source, and the note clears', async ({ page }) => {
+    const mock = await oldCopyMock();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay-old-copy')).toBeVisible({ timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      const fixText = page.getByTestId('add-overlay-fix-text');
+      // The mock listens on a non-default port, which the written URL keeps.
+      const newAddress = `${OVERLAY_SOURCE_URL}?port=${mock.port}`;
+      await expect(fixText).toContainText(`point it at ${newAddress} and`);
+      await expect(fixText).toContainText('reload it on air');
+      await page.getByTestId('add-overlay-fix-apply').click();
+
+      await expect(page.getByTestId('add-overlay-confirm')).toHaveText('Overlay settings updated', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-old-copy')).toBeHidden();
+      expect(String(mock.inputs.get('Live Counter Overlay')?.inputSettings.url)).toBe(newAddress);
+
+      await page.getByTestId('tab-live').click();
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings');
+      await expect(page.getByTestId('live-add-overlay-old-copy')).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('an overlay in the dock folder shows no note', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: OVERLAY_SOURCE_URL, width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay-old-copy')).toHaveCount(0);
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
+      await expect(page.getByTestId('add-overlay-old-copy')).toBeHidden();
+    } finally {
+      await mock.close();
     }
   });
 });

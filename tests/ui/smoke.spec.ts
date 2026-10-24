@@ -10,11 +10,22 @@ const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).
 const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
 const LUA_DIST_PATH = path.resolve(__dirname, '../../dist/counter-hotkeys.lua');
 
-/** Collects console errors + page errors for a page. */
+/**
+ * Collects console errors + page errors for a page.
+ *
+ * T2: one console error is expected and skipped: dock.html loads the
+ * installer's optional `live-counter-config.js`, and when there is no such
+ * file (every manual install, and this build) Chromium reports the failed
+ * file:// load as "Failed to load resource". Nothing reaches the operator: no
+ * banner, no event-log line. Matched by the failing file's own URL, so any
+ * other failed load still fails the test.
+ */
 function trackConsoleErrors(page: Page): string[] {
   const errors: string[] = [];
   page.on('console', (msg) => {
-    if (msg.type() === 'error') errors.push(msg.text());
+    if (msg.type() !== 'error') return;
+    if (msg.location().url.endsWith('/live-counter-config.js')) return;
+    errors.push(msg.text());
   });
   page.on('pageerror', (err) => errors.push(String(err)));
   return errors;

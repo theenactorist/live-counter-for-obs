@@ -58,6 +58,16 @@ export interface DockSettings {
   wsPort: number;
   wsPassword: string;
   schemaVersion: 1;
+  /**
+   * T2: the `revision` of the last installer connection file
+   * (`live-counter-config.js`) the dock adopted. Kept when the operator types
+   * new settings, so the same file is never applied twice. Absent until a
+   * file is first adopted. Optional, so settings saved before T2 still load
+   * at schemaVersion 1.
+   */
+  configRevision?: string;
+  /** T2: where wsPort/wsPassword came from, for Copy diagnostics. Absent means typed in the panel. */
+  connectionSource?: 'installer' | 'panel';
 }
 
 /**
@@ -173,7 +183,9 @@ function isStoredPresentation(x: unknown): x is StoredPresentation {
 
 function isDockSettings(x: unknown): x is DockSettings {
   if (!isPlainObject(x)) return false;
-  const { wsPort, wsPassword, schemaVersion } = x;
+  const { wsPort, wsPassword, schemaVersion, configRevision, connectionSource } = x;
+  if (configRevision !== undefined && typeof configRevision !== 'string') return false;
+  if (connectionSource !== undefined && connectionSource !== 'installer' && connectionSource !== 'panel') return false;
   return typeof wsPort === 'number' && typeof wsPassword === 'string' && schemaVersion === 1;
 }
 

@@ -10,7 +10,7 @@
 // applies), distinct from `[]`.
 import { afterEach, describe, expect, it } from 'vitest';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
-import { overlaySourceNames } from '../../src/dock/diagnostics.js';
+import { overlaySourceNames, overlayPointsElsewhere } from '../../src/dock/diagnostics.js';
 import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 
 const mockServers: MockObs[] = [];
@@ -86,5 +86,54 @@ describe('overlaySourceNames (gate fix M-1)', () => {
     wsClients.push(client);
 
     await expect(overlaySourceNames(client)).resolves.toBeNull();
+  });
+});
+
+// T2: the overlay address check. Folder only, decoded, case-insensitive; an
+// unparseable URL is never flagged.
+describe('overlayPointsElsewhere', () => {
+  const DOCK = 'file:///Users/op/Library/Application%20Support/obs-studio/live-counter/dock.html';
+
+  it('same folder: not flagged, whatever the file name, query or hash', () => {
+    const same = 'file:///Users/op/Library/Application%20Support/obs-studio/live-counter/';
+    expect(overlayPointsElsewhere(`${same}overlay.html`, DOCK)).toBe(false);
+    expect(overlayPointsElsewhere(`${same}overlay.html?port=4460`, DOCK)).toBe(false);
+    expect(overlayPointsElsewhere(`${same}overlay.html?port=4455&pw=x#y`, DOCK)).toBe(false);
+    expect(overlayPointsElsewhere(`${same}overlay.html`, `${DOCK}?wsPort=4455`)).toBe(false);
+  });
+
+  it('same folder spelled differently: a literal space, or different letter case', () => {
+    expect(
+      overlayPointsElsewhere('file:///Users/op/Library/Application Support/obs-studio/live-counter/overlay.html', DOCK),
+    ).toBe(false);
+    expect(
+      overlayPointsElsewhere('file:///users/OP/library/application%20support/OBS-studio/Live-Counter/overlay.html', DOCK),
+    ).toBe(false);
+  });
+
+  it('another folder: flagged (the manual install left behind, or a sibling folder)', () => {
+    expect(overlayPointsElsewhere('file:///Users/op/Desktop/OBS%20Plugin/dist/overlay.html', DOCK)).toBe(true);
+    expect(
+      overlayPointsElsewhere('file:///Users/op/Library/Application%20Support/obs-studio/live-counter-old/overlay.html', DOCK),
+    ).toBe(true);
+    expect(
+      overlayPointsElsewhere('file:///Users/op/Library/Application%20Support/obs-studio/overlay.html', DOCK),
+    ).toBe(true);
+  });
+
+  it('Windows drive letters compare without case', () => {
+    const winDock = 'file:///C:/Users/op/AppData/Roaming/obs-studio/live-counter/dock.html';
+    expect(overlayPointsElsewhere('file:///c:/Users/op/AppData/Roaming/obs-studio/live-counter/overlay.html', winDock)).toBe(false);
+    expect(overlayPointsElsewhere('file:///D:/Live%20Counter/overlay.html', winDock)).toBe(true);
+  });
+
+  it('a different scheme or host is another place', () => {
+    expect(overlayPointsElsewhere('http://localhost:5173/overlay.html', DOCK)).toBe(true);
+  });
+
+  it('never flags a URL it cannot parse', () => {
+    expect(overlayPointsElsewhere('', DOCK)).toBe(false);
+    expect(overlayPointsElsewhere('overlay.html', DOCK)).toBe(false);
+    expect(overlayPointsElsewhere('file:///Users/op/x/overlay.html', 'not a url')).toBe(false);
   });
 });

@@ -1,10 +1,11 @@
 # Product Requirements Document: Live Counter for OBS
 
-**Status:** v1.1 — Phase 0 feasibility gate **passed** 2026-08-01 (see `docs/phase0-results.md`); architecture confirmed
+**Status:** v1.2 (2026-10-24): one-action install amendment. v1.1: Phase 0 feasibility gate **passed** 2026-08-01 (see `docs/phase0-results.md`); architecture confirmed
 **Supersedes:** v1.0 (`~/Downloads/obs-live-counter-prd.md`)
-**Platforms:** Windows and macOS (OBS 31+; developed against OBS 32.1.2)
+**Platforms:** Windows and macOS (OBS 31 to 33; developed against OBS 32.1.2; the installer hooks were checked on OBS 32.2.2 and 33.0.0)
 **Deployment context:** Private use — the owner's church livestream. Not a public release.
 **Changelog from v1.0:** architecture changed from local-server-plus-helper-app to everything-inside-OBS; audience narrowed to private use (drops installers, code signing, public-release gates); all findings from the 2026-08-01 PRD review folded in (see `prd-review-2026-08-01.md`); "Codex" references removed — the implementer is the Claude Code agent.
+**Changelog from v1.1 (2026-10-24):** a script installer is now in scope (one pasted command, or a double-click file in the release zip; §5, §7.1a), backed by the T1 installer spike (`docs/installer-spike.md`); OBS 31 to 33; the hotkey script pre-sets its five keys when none are saved (§8.12); the dock reads an installer connection file and flags an overlay that points at an old copy (§8.13); ACs 33 to 39 added. The manual install (§7.1, AC 32) is unchanged.
 
 ## 1. Product summary
 
@@ -43,14 +44,14 @@ Prior art informing this design: upgradeQ/Counter (OBS-native hotkeys via script
 
 - No separate helper application, local web server, or system-tray process.
 - No native C++ OBS plugin.
-- No installers, code signing, or notarization (private use; files are copied, not downloaded per-machine from the internet).
+- No signed or native installers, code signing, or notarization (private use). A script installer is in scope (v1.2): one command pasted into Terminal or PowerShell, or a double-click file inside the release zip (§7.1a). It is plain text the operator can read, it needs no admin rights, and the README explains the one-time Gatekeeper or SmartScreen prompt for the double-click files.
 - No cloud accounts, sync, or remote/phone control.
 - No voice/keyword detection.
 - No multiple simultaneous counters.
 - No arbitrary operator-supplied HTML.
 - No audio, confetti, or particle effects.
 - No automatic looping at completion.
-- No auto-update mechanism (manual file replacement; version visible in the dock).
+- No auto-update mechanism (update by running the installer again, or by replacing the files by hand; version visible in the dock).
 
 ## 6. Architecture
 
@@ -83,10 +84,30 @@ Three artifacts, all loaded by OBS itself:
 3. In OBS: Docks → Custom Browser Docks → add the dock URL (a `file://` URL shown in the README and copyable from `setup.html` — a static helper page that sits beside the dock and overlay pages, in `dist/` for the repo build and at the top of the release folder; opened by double-clicking it in any browser, it derives the correct absolute dock URL and the password-free overlay source URL from its own location).
 4. In the dock's first-run screen: paste the websocket password (stored in the dock's local storage; shown as ●●●, editable in Settings).
 5. In OBS: add a Browser Source pointing at `overlay.html` — the dock's Diagnostics view and `setup.html` state the exact recommended settings: width/height = canvas resolution, FPS 30 (or 60 to match the project), **"Shutdown source when not visible" unchecked**, **"Refresh browser when scene becomes active" unchecked**. When connected, the diagnostic compares the actual Browser Source settings against these recommendations and names each mismatch with its expected value.
-6. In OBS: Tools → Scripts → add `counter-hotkeys.lua`; assign keys in Settings → Hotkeys (modifier combinations recommended, e.g. Ctrl+Alt+= on Windows, Ctrl+Option+= on Mac, so bare keys typed into input fields never collide).
+6. In OBS: Tools → Scripts → add `counter-hotkeys.lua`; assign keys in Settings → Hotkeys (modifier combinations recommended, e.g. Ctrl+Alt+= on Windows, Ctrl+Option+= on Mac, so bare keys typed into input fields never collide). From v1.2 the script pre-sets these keys when none are saved (§8.12), so this step is only needed to change them.
 7. The dock's **diagnostic panel** confirms each link with a named status: controller storage ✓ / websocket connected ✓ / overlay connected ✓ / hotkey bridge ✓ — each failure state names the exact fix ("WebSocket server is disabled — Tools → WebSocket Server Settings → Enable").
 
 Setup target: under 10 minutes for a first-time user following the README.
+
+### 7.1a One-action install (v1.2)
+
+The main install path from v1.2. The manual steps in §7.1 keep working (AC 32). The exact files, keys and shapes behind each step are proven in `docs/installer-spike.md` (T1).
+
+1. The operator quits OBS, then either pastes one command (Mac Terminal: `curl -fsSL <install page>/install.sh | bash`; Windows PowerShell: `irm <install page>/install.ps1 | iex`) or double-clicks `Install Live Counter.command` (Mac) or `Install Live Counter.bat` (Windows) inside the downloaded zip.
+2. The installer, in this order:
+   1. Preflight, changing nothing: OBS 31 or later is installed; the OBS settings folder and `user.ini` exist (if not: "Open OBS once, quit it, then run this again."); OBS is not running. If OBS is running, the installer asks the operator to quit it and checks again. It never force-quits OBS, because OBS rewrites its settings when it quits.
+   2. Copies the Live Counter files into one fixed folder inside the OBS settings folder, `obs-studio/live-counter/` (Mac `~/Library/Application Support/obs-studio/live-counter/`, Windows `%APPDATA%\obs-studio\live-counter\`). Running again replaces the folder's contents, so the dock URL, the overlay URL and the script path never change.
+   3. Saves a timestamped copy next to each OBS file it is about to change.
+   4. obs-websocket: server on, authentication on, the existing password kept (one is generated only when there is none), every other setting kept. Authentication is never turned off.
+   5. Writes `live-counter-config.js` beside the dock with the port, the password and a revision (§8.13).
+   6. Adds the hotkey script to every scene collection, not only the current one. An existing `counter-hotkeys.lua` entry is repointed to the fixed folder with its saved keys kept; each collection ends with one entry.
+   7. Adds the `Live Counter` dock last, or repoints an existing one, because it is the change the operator sees.
+   8. Reads every changed file back. On any failure it puts the saved copies back and names the fix; on success it prints "Done. Open OBS."
+3. The operator opens OBS. The dock is there and connected with no typing, the five hotkeys are pre-set (§8.12), and one click in the dock adds the overlay to the scene the operator chooses. The installer never adds or changes a Browser Source; an overlay left from an earlier manual install is flagged in the dock and fixed with one click (§8.13).
+4. Rules: the Mac installer uses bash and built-in macOS tools only (never Python, Homebrew or Node); the Windows installer is PowerShell 5.1 compatible and needs no admin rights. The operator sees plain progress lines, and every failure names the fix. Running the installer again updates in place and never adds duplicates.
+5. The uninstaller (OBS closed, backups first) removes only what the installer added: the `Live Counter` dock entry, the script entries that point into the install folder, and the install folder. It leaves the WebSocket server and Browser Sources alone and says so, one line each.
+
+Setup target with the installer: under 10 minutes from the command to the first +1.
 
 ### 7.2 Create and save a preset
 
@@ -227,6 +248,7 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 - Each bridge command carries a nonce; the dock deduplicates, so a command is never double-applied.
 - Pause/Resume maps to the automatic timer only: the dock resolves the toggle against the current status (`running` → pause, `paused` → resume); in a manual-mode session, or with no session, the bridge command is rejected as invalid and logged (§8.13) — it never switches modes. Show/Hide is likewise a toggle the dock resolves against the current `overlayVisible`.
 - Setup documentation recommends modifier-key combinations to avoid collisions with typing and native OBS bindings.
+- Suggested keys (v1.2): when `counter-hotkeys.lua` loads into a scene collection that has no saved value for a Live Counter hotkey, it assigns that hotkey's suggested key: Ctrl+Option on a Mac, Ctrl+Alt on Windows, with = − Z P H for +1, −1, Undo, Pause/Resume, Show/Hide. A key the operator cleared is a saved (empty) value, so it stays cleared; saved keys are never replaced. This lives in the script itself, so the manual install gets the same keys. OBS allows one key on two hotkeys, so a suggested key the operator already uses elsewhere fires both; the README says how to change it.
 - In-dock keyboard shortcuts (when the dock has focus) are a bonus, suppressed while any input field is focused.
 
 ### 8.13 Storage and diagnostics
@@ -234,6 +256,8 @@ Typeface (bundled, OFL-licensed set with license files shipped — e.g. Inter, O
 - Writes go to `localStorage` (primary) and obs-websocket persistent data (mirror) with `schemaVersion` on every record; newer code reads all older schema versions or refuses non-destructively. Corrupt records are quarantined with a visible warning — never silently wiped.
 - A rotating in-storage event log (bounded) records lifecycle events, connects/disconnects, every rejected command with its reason, and websocket status changes. The diagnostic panel shows version, connection states, and offers one-click **Copy diagnostics** for support.
 - Storage write failure: the in-memory session keeps running, a persistent warning shows, and the event log records the failure.
+- Installer connection file (v1.2): `dock.html` loads an optional `live-counter-config.js` from its own folder, written only by the installer, setting `window.LIVE_COUNTER_CONFIG = { port, password, revision }`. When `revision` differs from the last revision the dock applied (saved with the dock's settings), the dock adopts `port` and `password`, saves them, and records the revision; when it is the same, the settings saved in the dock win, so a password typed in the panel after an install is not overwritten. A missing file is normal (the manual install has none): no banner and no event-log line. A malformed file is ignored with one event-log line that names what was wrong. The password never appears in the event log, Copy diagnostics, any URL or any screenshot; the file is never tracked in git and never shipped in the release zip. Copy diagnostics adds `Connection: from installer (revision <revision>)` or `Connection: typed in this panel`.
+- Overlay address check (v1.2): when connected, if the overlay Browser Source in the current program scene has a URL in a different folder from the dock, Diagnostics and the Live view (beside its add-overlay button, shown while no session is running) show "The overlay points at an old copy of Live Counter." next to **Fix overlay settings**, whose confirmation names the address it will write. After Fix the note clears.
 
 ## 9. Interface structure
 
@@ -274,8 +298,8 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 1. **Reliability:** no count command silently lost or double-applied; the dock processes commands serially against a single state owner; a seeded 1,000-action randomized soak (mix of all commands, bursty timing, injected page reloads and websocket reconnects, oracle = replaying the seed through the pure engine) passes with no out-of-range value, no lost/duplicated command, and dock/overlay convergence.
 2. **Responsiveness:** command-to-overlay update ≤ 100 ms on the same machine (excluding configured animation time); dock acknowledges each command immediately from the authoritative state.
 3. **Performance:** overlay animation work stays on the compositor; running the heaviest animation at the fastest interval for 60 s in a 1080p60 project adds no OBS render-lag frame skips.
-4. **Security/privacy:** localhost websocket only; authentication on. The password is stored in the dock's local storage and embedded as a query parameter in the overlay URL that the dock's Diagnostics view generates (the static `setup.html` and the auto-created Browser Source use the password-free URL form) (the overlay must authenticate too but has no input UI; that URL lives in OBS's scene collection on the same local disk where OBS itself stores the websocket password in plaintext — same trust domain, verified in Phase 0). All operator text escaped; no internet-loaded assets; no telemetry.
-5. **Compatibility:** OBS current stable (32.x) and previous major (31.x); macOS (Apple Silicon dev machine) and Windows x64 (validated on the church machine or a Windows VM during Phase 4).
+4. **Security/privacy:** localhost websocket only; authentication on. The password is stored in the dock's local storage and embedded as a query parameter in the overlay URL that the dock's Diagnostics view generates (the static `setup.html` and the auto-created Browser Source use the password-free URL form) (the overlay must authenticate too but has no input UI; that URL lives in OBS's scene collection on the same local disk where OBS itself stores the websocket password in plaintext — same trust domain, verified in Phase 0). From v1.2 the installer also writes the password into `live-counter-config.js` in the install folder, inside the same OBS settings folder as obs-websocket's own `config.json`; it is never put in a URL, in `user.ini` or in the scene collection. All operator text escaped; no internet-loaded assets; no telemetry.
+5. **Compatibility:** OBS 31.x to 33.x (v1.2; 33.0.0 is the current stable); macOS (Apple Silicon dev machine) and Windows x64 (validated on the church machine or a Windows VM during Phase 4).
 6. **Accessibility:** keyboard accessible dock; status never colour-only; WCAG 2.2 AA contrast; dock respects `prefers-reduced-motion` (overlay animation is content and is operator-chosen).
 
 ## 11. Acceptance criteria
@@ -312,6 +336,13 @@ The Live view remains fully usable at 300 px dock width; primary controls never 
 30. With the overlay URL present in two sources, the diagnostic shows the multiple-source warning naming both; with one source, no warning.
 31. Typing a label character outside the bundled fonts' Latin repertoire (e.g. `→` or `あ`) shows a non-blocking glyph-coverage warning in Setup naming the character; plain Latin text shows none; the warning never blocks Save or Start.
 32. Opening `setup.html` (at the top of the release folder; `dist/setup.html` in the repo build) by double-clicking it in a normal browser shows the correct absolute `file://` dock URL and password-free overlay URL for its location, each with a working copy control, plus the recommended Browser Source settings — with no network access.
+33. On a machine with OBS 31 or later installed and opened once, one installer action with OBS closed (the pasted command or the double-click file) is enough: on the next OBS launch the `Live Counter` dock is present and connected without typing a password, the hotkey script is loaded in every scene collection, and the five suggested keys are assigned. With OBS running, the installer changes nothing until the operator has quit OBS.
+34. Before changing any OBS file the installer saves a timestamped copy beside it; a failure midway puts every copy back and names the fix. WebSocket authentication is never turned off, and an existing password is reused.
+35. Running the installer a second time updates in place: no second dock, no second script entry in any collection, the same dock and overlay addresses, and the session, presets and saved keys kept.
+36. The uninstaller removes only what the installer added (the dock entry, the script entries that point into the install folder, the install folder) and leaves the WebSocket server, Browser Sources and everything else as they were.
+37. Loading `counter-hotkeys.lua` into a scene collection with no saved Live Counter keys assigns Ctrl+Option (Mac) or Ctrl+Alt (Windows) with = − Z P H to +1, −1, Undo, Pause/Resume and Show/Hide, and the script log reads `Live Counter: default keys applied to 5 of 5`. A key the operator clears stays cleared after OBS restarts, and saved keys are never replaced. The manual install gets the same keys.
+38. With `live-counter-config.js` beside the dock carrying a revision the dock has not applied, the dock adopts its port and password and connects with no typing; on the next launch with the same revision, the settings saved in the dock win. A malformed file is ignored with one event-log line; a missing file shows nothing and logs nothing. The password appears in no event-log line, no Copy diagnostics text and no URL, and Copy diagnostics names the connection's source.
+39. When connected, an overlay Browser Source in the current program scene whose URL is in another folder than the dock shows "The overlay points at an old copy of Live Counter." in Diagnostics and on the Live tab while no session is running; **Fix overlay settings** names the new address before it writes, and after Fix the note clears. An overlay in the dock's own folder shows no note.
 
 ## 12. Test plan
 

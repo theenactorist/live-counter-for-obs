@@ -15,6 +15,9 @@ describe('check-local path matcher', () => {
       'Claude outputs/notes.md',
       'docs\\audit\\t1\\REPORT.md',
       '.claude/cdp.mjs',
+      // T2: the installer's connection file holds the WebSocket password.
+      'live-counter-config.js',
+      'dist/live-counter-config.js',
     ]) {
       expect(isLocalOnly(p), p).toBe(true);
     }
@@ -33,6 +36,8 @@ describe('check-local path matcher', () => {
       'scripts/check-local.mjs',
       '.claudeish/x',
       'src/.claude-notes.md',
+      'src/dock/installer-config.ts',
+      'live-counter-config.js.example',
     ]) {
       expect(isLocalOnly(p), p).toBe(false);
     }

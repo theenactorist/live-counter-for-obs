@@ -31,6 +31,7 @@ import { VERSION } from '../shared/version.js';
 // indirecting through this module's settings-paste-only usage of them.
 import { CLIPBOARD_BLOCKED_TEXT, pasteIntoField } from './clipboard-keys.js';
 import { el, button, parsePort, DEFAULT_WS_PORT } from './views/dom.js';
+import { connectionSourceLine } from './installer-config.js';
 
 export interface DiagnosticsViewHandle {
   destroy(): void;
@@ -239,6 +240,8 @@ export type OverlayScan =
       eyeEnabled: boolean | null;
       /** Task 3.4 — the source's CURRENT settings URL (before any Fix), so the Fix confirmation can tell whether it carries the websocket password. */
       currentUrl: string;
+      /** T2: true when `currentUrl` is in a different folder from this dock (an old copy, for example the manual install's folder after the installer moved Live Counter). */
+      pointsElsewhere: boolean;
     }
   | {
       status: 'other-scene';
@@ -292,6 +295,43 @@ const MULTI_SOURCE_TAIL = 'LIVE detection assumes one; remove duplicates.';
 function multiSourceWarningFor(matches: string[]): string | null {
   if (matches.length <= 1) return null;
   return `Overlay URL found in ${matches.length} sources: ${matches.join(', ')} — ${MULTI_SOURCE_TAIL}`;
+}
+
+// T2 (improvement review INSTALL-5, T1 Q4): shown when the in-scene overlay
+// source's URL is in a different folder from this dock. The installer moves
+// Live Counter into obs-studio/live-counter/ but leaves Browser Sources alone
+// (the scene stays the operator's choice), so an existing overlay keeps
+// pointing at the old copy until the operator clicks Fix overlay settings.
+export const OVERLAY_OLD_COPY_TEXT = 'The overlay points at an old copy of Live Counter.';
+
+/**
+ * T2: whether an overlay source URL lives in a different folder from the
+ * dock at `dockUrl`. Compares the folder only (file name, query and hash
+ * ignored), percent-decoded and case-insensitive, because both macOS and
+ * Windows treat paths that differ only in case as the same folder, and OBS
+ * keeps whatever spelling was pasted. A URL that cannot be parsed is never
+ * flagged: the note must not appear on a guess.
+ */
+export function overlayPointsElsewhere(sourceUrl: string, dockUrl: string): boolean {
+  let source: URL;
+  let dock: URL;
+  try {
+    source = new URL(sourceUrl);
+    dock = new URL(dockUrl);
+  } catch {
+    return false;
+  }
+  const folder = (u: URL): string => {
+    const dir = new URL('.', u);
+    let pathname = dir.pathname;
+    try {
+      pathname = decodeURIComponent(pathname);
+    } catch {
+      // A stray % in a hand-typed URL: compare it as written.
+    }
+    return `${dir.protocol}//${dir.host}${pathname}`.toLowerCase();
+  };
+  return folder(source) !== folder(dock);
 }
 
 // Task 3.4 — exact copy for the in-scene source's eye toggle being off
@@ -583,6 +623,7 @@ async function performOverlayScan(client: ObsWsClient): Promise<OverlayScan> {
     const inProgramMatch = matches.find((m) => programItems.some((item) => item.sourceName === m.inputName));
     if (inProgramMatch !== undefined) {
       const sceneItem = programItems.find((item) => item.sourceName === inProgramMatch.inputName);
+      const currentUrl = String(inProgramMatch.settings.url ?? '');
       return {
         status: 'in-scene',
         sceneName,
@@ -592,7 +633,8 @@ async function performOverlayScan(client: ObsWsClient): Promise<OverlayScan> {
         allMatches,
         settingsIssues: computeSettingsIssues(inProgramMatch.settings, baseWidth, baseHeight),
         eyeEnabled: sceneItem ? sceneItem.sceneItemEnabled : null,
-        currentUrl: String(inProgramMatch.settings.url ?? ''),
+        currentUrl,
+        pointsElsewhere: overlayPointsElsewhere(currentUrl, location.href),
       };
     }
 
@@ -622,6 +664,8 @@ export interface AddOverlayButtonState {
   eyeOff: boolean;
   /** Task 3.4 (AC 30) — set whenever more than one overlay-matching browser_source exists anywhere in the collection, naming every one. */
   multiSourceWarning: string | null;
+  /** T2: true only when there IS an in-scene source and its URL is in another folder (`OVERLAY_OLD_COPY_TEXT`); Fix repoints it. */
+  oldCopy: boolean;
 }
 
 /**
@@ -645,6 +689,7 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
     settingsIssues: [],
     eyeOff: false,
     multiSourceWarning: null,
+    oldCopy: false,
   };
   if (client.state !== 'identified') {
     // Nothing can be scanned, and nothing can be clicked either — the label
@@ -672,6 +717,7 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
         settingsIssues: [],
         eyeOff: false,
         multiSourceWarning,
+        oldCopy: false,
       };
     case 'in-scene':
       return {
@@ -684,6 +730,7 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
         settingsIssues: scan.settingsIssues,
         eyeOff: scan.eyeEnabled === false,
         multiSourceWarning,
+        oldCopy: scan.pointsElsewhere,
       };
     case 'other-scene':
     default:
@@ -700,6 +747,7 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
         settingsIssues: [],
         eyeOff: false,
         multiSourceWarning,
+        oldCopy: false,
       };
   }
 }
@@ -717,10 +765,15 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
 const FIX_CONFIRM_PASSWORD_SENTENCE =
   'This replaces the existing URL, which contained the websocket password — the saved one is password-free.';
 
-/** Names EXACTLY what the Fix action will change, shown BEFORE any request goes out (Ruling A item 3). */
-export function fixOverlayConfirmText(scan: OverlayScan): string {
+/**
+ * Names EXACTLY what the Fix action will change, shown BEFORE any request goes
+ * out (Ruling A item 3). T2: including the address Fix writes, built from the
+ * same `overlaySourceUrlFor(port)` the write uses, so an operator fixing an
+ * old copy sees where the overlay will point from now on.
+ */
+export function fixOverlayConfirmText(scan: OverlayScan, port: number): string {
   if (scan.status !== 'in-scene') return '';
-  const base = `This will set '${scan.inputName}' to ${scan.baseWidth}×${scan.baseHeight} and reload it on air.`;
+  const base = `This will set '${scan.inputName}' to ${scan.baseWidth}×${scan.baseHeight}, point it at ${overlaySourceUrlFor(port)} and reload it on air.`;
   return scan.currentUrl.includes('pw=') ? `${base} ${FIX_CONFIRM_PASSWORD_SENTENCE}` : base;
 }
 
@@ -1113,6 +1166,12 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   const addOverlayNote = el('div', { 'data-testid': 'add-overlay-note', class: 'diag-note' });
   addOverlayNote.hidden = true;
   root.appendChild(addOverlayNote);
+  // T2: its own slot, like the three below, because it can be true with
+  // any of them, and it must never be folded into the "Overlay not rendering"
+  // banner or the scan-failed error, which mean different things.
+  const addOverlayOldCopy = el('div', { 'data-testid': 'add-overlay-old-copy', class: 'diag-note' }, OVERLAY_OLD_COPY_TEXT);
+  addOverlayOldCopy.hidden = true;
+  root.appendChild(addOverlayOldCopy);
   // Task 3.4 (AC 29/30) — three more note slots, each with its own stable
   // testid, alongside the existing single-string `add-overlay-note` above
   // (which stays reserved for the `attach` case's "already exists in X"
@@ -1166,6 +1225,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     addOverlayBtn.disabled = state.disabled;
     addOverlayNote.hidden = state.note === null;
     addOverlayNote.textContent = state.note ?? '';
+    addOverlayOldCopy.hidden = !state.oldCopy;
     // Task 3.4 (AC 29/30) — same shared-state derivation the button label
     // itself comes from, so this note can never disagree with what the
     // button is about to do.
@@ -1233,7 +1293,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       const scan = getOverlayScan(opts.client);
       addOverlayConfirm.hidden = true;
       addOverlayError.hidden = true;
-      fixConfirmText.textContent = scan ? fixOverlayConfirmText(scan) : '';
+      fixConfirmText.textContent = scan ? fixOverlayConfirmText(scan, currentPort()) : '';
       fixConfirmBox.hidden = false;
       return;
     }
@@ -1371,6 +1431,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     // the operator sees on screen.
     const addOverlayState = addOverlayButtonState(opts.client);
     const overlayDiagLines: string[] = [];
+    if (addOverlayState.oldCopy) overlayDiagLines.push(OVERLAY_OLD_COPY_TEXT);
     if (addOverlayState.settingsIssues.length > 0) {
       overlayDiagLines.push(`Overlay settings issues: ${addOverlayState.settingsIssues.join(' · ')}`);
     }
@@ -1381,6 +1442,9 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       `Live Counter diagnostics — v${VERSION}`,
       '',
       checklistText,
+      // T2: whether the port and password came from the installer's
+      // connection file or were typed here. Never the password itself.
+      connectionSourceLine(opts.storage.loadSettings()),
       ...(overlayDiagLines.length > 0 ? ['', ...overlayDiagLines] : []),
       '',
       '--- Event log (most recent first, up to 100 lines) ---',

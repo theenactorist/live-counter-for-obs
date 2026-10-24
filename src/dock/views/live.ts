@@ -56,6 +56,7 @@ import {
   refreshOverlayScan,
   runAddOverlay,
   OVERLAY_EYE_OFF_TEXT,
+  OVERLAY_OLD_COPY_TEXT,
   type AddOverlayResult,
   type OverlayIntent,
 } from '../diagnostics.js';
@@ -580,6 +581,11 @@ export function mountLiveView(
       if (state.note !== null) {
         wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-note', class: 'diag-note' }, state.note));
       }
+      // T2: mirrors Diagnostics' `add-overlay-old-copy` slot, from the same
+      // shared state, with the Fix button above as the way out.
+      if (state.oldCopy) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-old-copy', class: 'diag-note' }, OVERLAY_OLD_COPY_TEXT));
+      }
       // Task 3.4 (AC 29/30) — mirrors Diagnostics' own three note slots
       // (settings-issues/eye-off/multi-source), driven by the SAME shared
       // `addOverlayButtonState` this whole block already reads `state` from,
@@ -615,7 +621,7 @@ export function mountLiveView(
       if (addOverlayUi.fixConfirmOpen && state.intent === 'fix') {
         const scan = getOverlayScan(client);
         const box = el('div', { 'data-testid': 'live-add-overlay-fix-confirm', class: 'confirm-box' });
-        box.appendChild(el('span', {}, scan ? fixOverlayConfirmText(scan) : ''));
+        box.appendChild(el('span', {}, scan ? fixOverlayConfirmText(scan, currentAddOverlayPort()) : ''));
         const apply = button('live-add-overlay-fix-apply', 'Apply');
         apply.addEventListener('click', () => {
           addOverlayUi.fixConfirmOpen = false;
@@ -641,13 +647,18 @@ export function mountLiveView(
     return wrap;
   }
 
+  /** The port the overlay URL is written with (T2: the Fix confirm names that same URL). */
+  function currentAddOverlayPort(): number {
+    return parsePort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT;
+  }
+
   /** Fires one of the three explicit actions and paints its outcome (Ruling A). */
   function startAddOverlay(intent: OverlayIntent): void {
     if (client === undefined) return;
     // Review fold-in: the written URL's port now comes from the SAME live
     // mirror the Connect card edits, not a value frozen at mount — so what
     // the operator last typed and what gets written can no longer diverge.
-    const port = parsePort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT;
+    const port = currentAddOverlayPort();
     // runAddOverlay() flips the shared busy lock synchronously before
     // returning (see diagnostics.ts) — render() right after already paints
     // this button disabled, with no separate flag needed.
