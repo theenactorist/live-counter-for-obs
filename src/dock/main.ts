@@ -273,19 +273,23 @@ function main(): void {
   const liveFreshnessMsParam = params.get('liveFreshnessMs');
   const liveFreshnessMsOverride = liveFreshnessMsParam !== null ? Number(liveFreshnessMsParam) : undefined;
 
-  // loadSettings() only ever touches localStorage — reading it before a
-  // client exists (to learn what port/password to build the client with) is
-  // safe; DockStorage's client-backed mirror is only consulted by
-  // loadSession()/loadPresets(), neither of which run here.
-  const bootStorage = new DockStorage(window.localStorage, null);
-
   // T2: the settings to boot with, once the installer's connection file
   // (live-counter-config.js, see installer-config.ts) has had its say: a new
   // revision is adopted and saved, the same revision leaves the saved
   // settings alone, a bad shape is ignored with one log line. Used at startup
   // and again after Reset everything, so a reset dock on an installed machine
   // reconnects with the installer's values instead of an empty password.
+  //
+  // loadSettings() only ever touches localStorage — reading it before a
+  // client exists (to learn what port/password to build the client with) is
+  // safe; DockStorage's client-backed mirror is only consulted by
+  // loadSession()/loadPresets(), neither of which run here. A FRESH
+  // DockStorage on every call, never one kept for the page's lifetime:
+  // log() caches the whole event log in memory on first use, so a kept
+  // instance would write the pre-reset log back the moment Reset everything
+  // re-adopts the file (AC 26 says Reset clears the log).
   function loadBootSettings(): DockSettings {
+    const bootStorage = new DockStorage(window.localStorage, null);
     const outcome = resolveInstallerConfig(window.LIVE_COUNTER_CONFIG, bootStorage.loadSettings());
     if (outcome.kind === 'adopted') bootStorage.saveSettings(outcome.settings);
     if (outcome.kind !== 'kept') bootStorage.log(outcome.event, outcome.detail);
@@ -616,7 +620,7 @@ function main(): void {
         // against the fresh boot's own GetPersistentData read.
         await storageForReset.resetPersistentMirror();
 
-        // `bootStorage.loadSettings()` now finds nothing on disk (just
+        // `loadBootSettings()` now finds nothing on disk (just
         // cleared above) and returns its own built-in defaults — the same
         // path a genuinely fresh install takes (T2: plus the installer's
         // connection file, when there is one). Never `location.reload()`

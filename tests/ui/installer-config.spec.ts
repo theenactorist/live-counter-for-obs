@@ -147,6 +147,31 @@ test.describe('installer connection file (live-counter-config.js)', () => {
     }
   });
 
+  test('Reset everything clears the log, then re-adopts the file and reconnects', async ({ page }) => {
+    const mock = await startMockObs({ password: PASSWORD });
+    const folder = makeInstallFolder();
+    try {
+      folder.writeConfig(configJs(mock.port, PASSWORD, 'r-reset'));
+      await page.goto(folder.dockUrl);
+      await expect(page.getByTestId('live-empty')).toBeVisible({ timeout: 5000 });
+      expect((await eventLog(page)).match(/installer-config-applied/g)).toHaveLength(1);
+
+      await page.getByTestId('tab-diagnostics').click();
+      await page.getByTestId('diag-reset-all').click();
+      await page.getByTestId('reset-all-confirm').click();
+      await expect(page.getByTestId('diag-reset-done')).toBeVisible({ timeout: 5000 });
+
+      // The pre-reset log must not come back with the new line: exactly one
+      // applied line, the one written after the reset.
+      expect((await eventLog(page)).match(/installer-config-applied/g)).toHaveLength(1);
+      expect(await savedSettings(page)).toMatchObject({ configRevision: 'r-reset', connectionSource: 'installer' });
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+    } finally {
+      folder.remove();
+      await mock.close();
+    }
+  });
+
   test('a bad shape is ignored with one log line and no password', async ({ page }) => {
     const mock = await startMockObs();
     const folder = makeInstallFolder();
