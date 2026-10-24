@@ -50,4 +50,52 @@ describe('counter-hotkeys.lua', () => {
   it('resolves the channel input kind through obs_get_latest_input_type_id (single string in, string or nil out)', () => {
     expect(code).toMatch(/obs\.obs_get_latest_input_type_id\b/);
   });
+
+  // T2: the suggested keys (Ctrl+Option on a Mac, Ctrl+Alt on Windows, with
+  // = - Z P H). Each hotkey id is pinned to its saved-settings key and its
+  // OBS key name, in one DEFAULT_KEYS row.
+  describe('default keys (T2)', () => {
+    const DEFAULTS = [
+      { id: 'lc_inc', setting: 'lc_inc_hotkey', key: 'OBS_KEY_EQUAL' },
+      { id: 'lc_dec', setting: 'lc_dec_hotkey', key: 'OBS_KEY_MINUS' },
+      { id: 'lc_undo', setting: 'lc_undo_hotkey', key: 'OBS_KEY_Z' },
+      { id: 'lc_pause_resume', setting: 'lc_pause_resume_hotkey', key: 'OBS_KEY_P' },
+      { id: 'lc_show_hide', setting: 'lc_show_hide_hotkey', key: 'OBS_KEY_H' },
+    ];
+
+    it('pins each hotkey id to its setting and key name', () => {
+      for (const d of DEFAULTS) {
+        expect(code).toContain(`{ id = "${d.id}", setting = "${d.setting}", key = "${d.key}" }`);
+        // The same id is registered with OBS and the same setting is saved.
+        expect(code).toContain(`obs.obs_hotkey_register_frontend("${d.id}"`);
+        expect(code).toContain(`obs.obs_data_set_array(settings, "${d.setting}"`);
+      }
+      expect(code.match(/\{ id = "lc_\w+", setting = "lc_\w+_hotkey", key = "OBS_KEY_\w+" \}/g)).toHaveLength(5);
+    });
+
+    it('sets control and alt on every default binding', () => {
+      expect(code).toContain('obs.obs_data_set_bool(binding, "control", true)');
+      expect(code).toContain('obs.obs_data_set_bool(binding, "alt", true)');
+      expect(code).not.toMatch(/obs_data_set_bool\(binding, "(shift|command)"/);
+    });
+
+    it('applies a default only when the collection has no saved value (a cleared key stays cleared)', () => {
+      expect(code).toContain('if not obs.obs_data_has_user_value(settings, entry.setting) then');
+      // An empty-array test would bring a cleared key back on every launch.
+      expect(code).not.toMatch(/obs_data_array_count/);
+    });
+
+    it('applies the defaults after the saved bindings load, and logs the count', () => {
+      const lastSavedLoad = code.lastIndexOf('obs.obs_hotkey_load(hotkey_ids.lc_show_hide, show_hide_array)');
+      const defaultsCall = code.indexOf('.. apply_default_keys(settings) ..');
+      expect(lastSavedLoad).toBeGreaterThan(-1);
+      expect(defaultsCall).toBeGreaterThan(lastSavedLoad);
+      expect(code).toContain('print("Live Counter: default keys applied to " .. apply_default_keys(settings) .. " of 5")');
+    });
+
+    it('says in the header that the keys come pre-set', () => {
+      const header = source.slice(source.indexOf('HOW TO INSTALL'), source.indexOf('FALLBACK NOTE'));
+      expect(header).toContain('The five keys come pre-set');
+    });
+  });
 });
