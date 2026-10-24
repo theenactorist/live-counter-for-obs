@@ -15,7 +15,9 @@
     "package": "node scripts/package-release.mjs",
     "pretest:ui": "npm run build",
     "test:ui": "playwright test",
-    "shots:guide": "playwright test -c scripts/guide-shots/playwright.config.ts"
+    "shots:guide": "playwright test -c scripts/guide-shots/playwright.config.ts",
+    "check:local": "node scripts/check-local.mjs",
+    "check": "npm run typecheck && npm test && npm run check:local"
   },
   "devDependencies": {
     "@fontsource/inter": "^5.3.0",
