@@ -29,6 +29,12 @@ export interface MockInputSeed {
    * pre-existing single-scene test assumes.
    */
   scenes?: string[];
+  /**
+   * Task 3.4 — this scene item's "eye" toggle (obs-websocket's
+   * `sceneItemEnabled`), applied to every scene item this seed creates.
+   * Omitted = true (visible), matching a freshly-added source in real OBS.
+   */
+  sceneItemEnabled?: boolean;
 }
 
 export interface MockObsOptions {
@@ -47,6 +53,8 @@ export interface MockObsOptions {
 export interface MockSceneItem {
   sceneItemId: number;
   sourceName: string;
+  /** Task 3.4 — the eye toggle (`sceneItemEnabled`); defaults to true (visible) wherever a caller doesn't specify it. */
+  sceneItemEnabled?: boolean;
 }
 
 export interface MockObs {
@@ -76,6 +84,34 @@ export interface MockObs {
    * below). Consumed after one use, same convention as `swallowNext()`.
    */
   failNext(requestType: string, code?: number, comment?: string): void;
+  /**
+   * Task 3.2 — updates a source's active/showing state and fires the
+   * corresponding real obs-websocket event(s) to every identified client:
+   * `InputActiveStateChanged{inputName,videoActive}` when `s.active` is
+   * given, `InputShowStateChanged{inputName,videoShowing}` when `s.showing`
+   * is given (either or both independently). Also becomes the value a later
+   * `GetSourceActive` request for this `inputName` resolves with. The name
+   * must already be a known input (seeded via `opts.inputs` or created via
+   * `CreateInput`) for GetSourceActive to succeed — an unknown name rejects
+   * with code 600, mirroring real obs-websocket.
+   */
+  setSourceActive(inputName: string, s: { active?: boolean; showing?: boolean }): void;
+  /**
+   * D4 (real-OBS walkthrough) — what obs-websocket's `RemoveInput` does in
+   * real OBS: the input and its scene items are gone (so `GetInputList` no
+   * longer lists it and `GetSourceActive` rejects with code 600), and the
+   * events arrive in real OBS order: `InputRemoved{inputName}` first
+   * (libobs's "source_remove" signal fires inside obs_source_remove), THEN
+   * `InputActiveStateChanged{videoActive:false}` / `InputShowStateChanged
+   * {videoShowing:false}` for the same name if it was active/showing (libobs
+   * only prunes the removed source's scene items on the next video tick,
+   * which deactivates/hides it after the removal was already announced).
+   */
+  removeInput(inputName: string): void;
+  /** Task 3.2 — sets Studio Mode and fires `StudioModeStateChanged{studioModeEnabled}` to every identified client; also becomes GetStudioModeEnabled's response. */
+  setStudioMode(enabled: boolean): void;
+  /** Task 3.2 — the most recent Identify (op 1) message's full `d` payload, or `null` before any client has identified — lets a test assert the exact `eventSubscriptions` mask a real dock/overlay boot sent. */
+  readonly lastIdentify: Record<string, unknown> | null;
   persistent: Map<string, unknown>;
   broadcasts: Array<{ from: number; eventData: unknown }>;
   /** Every requestType this server has ever received, in arrival order — lets a test assert NO scene/source-mutation request type was ever sent (only BroadcastCustomEvent/SetPersistentData/GetPersistentData). */
@@ -126,6 +162,15 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   let nextResponseDelayMs = 0;
   const perTypeDelayMs = new Map<string, number>();
   const forcedFailures = new Map<string, { code: number; comment: string }>();
+  // Task 3.2 — the most recent Identify message's `d` payload (assertable via
+  // MockObs.lastIdentify below).
+  let lastIdentifyPayload: Record<string, unknown> | null = null;
+  // Task 3.2 — per-input active/showing state for GetSourceActive/
+  // setSourceActive; a name with no entry yet defaults to false/false (a
+  // freshly-created source with no established activity), same convention
+  // as the rest of this mock's "seeded or default" fields.
+  const sourceActiveState = new Map<string, { active: boolean; showing: boolean }>();
+  let studioModeEnabled = false;
 
   // Task 2.12 — scene/input state for the add-overlay-to-scene flow.
   const videoSettings = opts.videoSettings ?? { baseWidth: 1920, baseHeight: 1080 };
@@ -149,7 +194,11 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
   for (const seed of opts.inputs ?? []) {
     inputs.set(seed.inputName, { inputKind: seed.inputKind, inputSettings: { ...seed.inputSettings } });
     for (const sceneName of seed.scenes ?? [programScene]) {
-      ensureScene(sceneName).push({ sceneItemId: nextSceneItemId++, sourceName: seed.inputName });
+      ensureScene(sceneName).push({
+        sceneItemId: nextSceneItemId++,
+        sourceName: seed.inputName,
+        sceneItemEnabled: seed.sceneItemEnabled ?? true,
+      });
     }
   }
 
@@ -200,6 +249,23 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
           responseData = { slotValue: value === undefined ? null : value };
           break;
         }
+        // --- Task 3.2: LIVE status layers ---------------------------------
+        case 'GetSourceActive': {
+          const sourceName = requestData?.sourceName as string;
+          if (!inputs.has(sourceName)) {
+            result = false;
+            code = 600; // OBS_WEBSOCKET_ERROR_RESOURCE_NOT_FOUND semantics
+            comment = `No source was found by the name of \`${sourceName}\`.`;
+          } else {
+            const state = sourceActiveState.get(sourceName) ?? { active: false, showing: false };
+            responseData = { videoActive: state.active, videoShowing: state.showing };
+          }
+          break;
+        }
+        case 'GetStudioModeEnabled': {
+          responseData = { studioModeEnabled };
+          break;
+        }
         // --- Task 2.12: add-overlay-to-scene ------------------------------
         case 'GetVideoSettings': {
           responseData = { baseWidth: videoSettings.baseWidth, baseHeight: videoSettings.baseHeight };
@@ -230,6 +296,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
                 sourceName: item.sourceName,
                 inputKind: inputs.get(item.sourceName)?.inputKind ?? null,
                 isGroup: false,
+                sceneItemEnabled: item.sceneItemEnabled ?? true,
               })),
             };
           }
@@ -362,6 +429,7 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
 
       if (msg.op === OP_IDENTIFY) {
         const identify = msg as IdentifyMessage;
+        lastIdentifyPayload = identify.d;
         if (opts.password !== undefined) {
           const expected = computeAuthString(opts.password, salt as string, challenge as string);
           if (identify.d.authentication !== expected) {
@@ -427,6 +495,45 @@ export async function startMockObs(opts: MockObsOptions = {}): Promise<MockObs> 
     },
     failNext(requestType, code = 500, comment = 'forced failure (test)') {
       forcedFailures.set(requestType, { code, comment });
+    },
+    setSourceActive(inputName, s) {
+      const prev = sourceActiveState.get(inputName) ?? { active: false, showing: false };
+      const next = { active: s.active ?? prev.active, showing: s.showing ?? prev.showing };
+      sourceActiveState.set(inputName, next);
+      for (const c of identifiedClients) {
+        if (s.active !== undefined) {
+          send(c, OP_EVENT, { eventType: 'InputActiveStateChanged', eventData: { inputName, videoActive: next.active } });
+        }
+        if (s.showing !== undefined) {
+          send(c, OP_EVENT, { eventType: 'InputShowStateChanged', eventData: { inputName, videoShowing: next.showing } });
+        }
+      }
+    },
+    removeInput(inputName) {
+      const prev = sourceActiveState.get(inputName) ?? { active: false, showing: false };
+      inputs.delete(inputName);
+      sourceActiveState.delete(inputName);
+      for (const [sceneName, items] of sceneItems) {
+        sceneItems.set(sceneName, items.filter((item) => item.sourceName !== inputName));
+      }
+      for (const c of identifiedClients) {
+        send(c, OP_EVENT, { eventType: 'InputRemoved', eventData: { inputName } });
+        if (prev.active) {
+          send(c, OP_EVENT, { eventType: 'InputActiveStateChanged', eventData: { inputName, videoActive: false } });
+        }
+        if (prev.showing) {
+          send(c, OP_EVENT, { eventType: 'InputShowStateChanged', eventData: { inputName, videoShowing: false } });
+        }
+      }
+    },
+    setStudioMode(enabled) {
+      studioModeEnabled = enabled;
+      for (const c of identifiedClients) {
+        send(c, OP_EVENT, { eventType: 'StudioModeStateChanged', eventData: { studioModeEnabled: enabled } });
+      }
+    },
+    get lastIdentify() {
+      return lastIdentifyPayload;
     },
     persistent,
     broadcasts,

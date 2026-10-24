@@ -6,20 +6,36 @@ import { startMockObs, type MockObs } from '../helpers/mock-obsws.js';
 import { ObsWsClient } from '../../src/protocol/obsws-client.js';
 import { Bus } from '../../src/protocol/bus.js';
 import { VERSION } from '../../src/shared/version.js';
+import { BRIDGE_CHANNEL_INPUT, BRIDGE_SETTINGS_KEY } from '../../src/shared/bridge-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; diagRefreshMs?: number },
+  opts: {
+    port: number;
+    devhook?: boolean;
+    overlaySilenceMs?: number;
+    diagRefreshMs?: number;
+    hotkeyStaleMs?: number;
+  },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
   if (opts.diagRefreshMs !== undefined) params.set('diagRefreshMs', String(opts.diagRefreshMs));
+  if (opts.hotkeyStaleMs !== undefined) params.set('hotkeyStaleMs', String(opts.hotkeyStaleMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+/** Injects a raw InputSettingsChanged event carrying a JSON-encoded hotkey-bridge payload. */
+function injectBridgePayload(mock: MockObs, cmd: string, nonce: string): void {
+  mock.injectEvent('InputSettingsChanged', {
+    inputName: BRIDGE_CHANNEL_INPUT,
+    inputSettings: { [BRIDGE_SETTINGS_KEY]: JSON.stringify({ app: 'live-counter', v: 1, cmd, nonce }) },
+  });
 }
 
 /**
@@ -147,23 +163,62 @@ test.describe('Diagnostics view', () => {
     }
   });
 
-  test('hotkeys row renders neutrally (never ok/warn/fail)', async ({ page }) => {
+  test('hotkeys row: never seen this boot renders neutral (never ok/warn/fail)', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port, devhook: false });
       await page.getByTestId('tab-diagnostics').click();
+      // Connected first: the install hint below only applies once the dock
+      // can hear the script at all (see the not-connected test after this).
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
       const row = page.getByTestId('diag-row-hotkeys');
-      // Review fix (Important 1): must be its own distinct 'neutral' state,
-      // never 'ok' — nothing has actually been verified, so a green "ok"
-      // would misrepresent a bridge that doesn't exist yet.
+      // Nothing has actually been verified yet — a green "ok" would
+      // misrepresent a bridge that has never been seen this boot.
       await expect(row).toHaveAttribute('data-state', 'neutral');
-      await expect(row).toContainText('not built yet');
-      await expect(row).toContainText('Phase 3');
+      await expect(row).toContainText('counter-hotkeys.lua');
+      await expect(row).toContainText('Tools → Scripts');
 
       // Distinct gray styling, not the 'ok' row's green.
       const color = await row.locator('.diag-row-text').evaluate((el) => getComputedStyle(el).color);
       expect(color).toBe('rgb(192, 192, 192)'); // #c0c0c0
       expect(color).not.toBe('rgb(123, 228, 149)'); // #7be495, the 'ok' color
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('hotkeys row: not connected says shortcuts need the OBS connection, not the install hint', async ({ page }) => {
+    // Nothing listens on this port. Hotkey presses reach the dock only
+    // through obs-websocket, so telling the operator to add the script
+    // (which may already be installed) would send them the wrong way.
+    await openDock(page, { port: 39453, devhook: false });
+    await page.getByTestId('tab-diagnostics').click();
+    await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'fail', { timeout: 5000 });
+    const row = page.getByTestId('diag-row-hotkeys');
+    await expect(row).toHaveAttribute('data-state', 'warn');
+    await expect(row).toContainText('Keyboard shortcuts need the OBS connection above');
+    await expect(row).not.toContainText('counter-hotkeys.lua');
+  });
+
+  test('hotkeys row: flips to ok once a hello arrives, then to warn once it goes stale', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      // Same shrink-both-thresholds pattern as the overlay row test above:
+      // hotkeyStaleMs must stay well ABOVE diagRefreshMs (or the "ok" window
+      // is too narrow for any poll tick to land inside it) and small enough
+      // that the "warn" transition doesn't require a real 90s wait.
+      await openDock(page, { port: mock.port, hotkeyStaleMs: 600, diagRefreshMs: 100, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      const row = page.getByTestId('diag-row-hotkeys');
+      await expect(row).toHaveAttribute('data-state', 'neutral');
+
+      injectBridgePayload(mock, 'hello', 'hb-1');
+      await expect(row).toHaveAttribute('data-state', 'ok', { timeout: 1000 });
+      await expect(row).toContainText('Hotkey bridge connected');
+
+      await expect(row).toHaveAttribute('data-state', 'warn', { timeout: 3000 });
+      await expect(row).toContainText('Hotkey bridge silent');
     } finally {
       await mock.close();
     }
@@ -356,9 +411,10 @@ test.describe('Diagnostics view', () => {
       expect(clipboardText).toContain('Storage: ok');
       expect(clipboardText).toContain('Event log');
 
-      // Review fix (Important 1): the Hotkeys line has its own fixed
-      // wording and must never claim "ok" anywhere in the copied text.
-      expect(clipboardText).toContain('Hotkeys: not built yet (Phase 3)');
+      // Task 3.1 — the Hotkeys line now mirrors its real state, same shape
+      // as every other row; nothing has been sent this test, so it must read
+      // 'neutral', never a false "ok".
+      expect(clipboardText).toContain('Hotkeys: neutral —');
       expect(clipboardText).not.toContain('Hotkeys: ok');
     } finally {
       await mock.close();
@@ -486,7 +542,35 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('settings-paste').click();
 
       await expect(page.getByTestId('settings-paste-error')).toBeVisible();
-      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
+      await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Checklist B2 (real OBS 32.2.2, CEF 127 on macOS): the dock's
+  // navigator.clipboard.readText() neither resolves nor rejects there, so
+  // the Paste button used to do nothing at all. It must stop waiting and say
+  // what to do instead.
+  test('settings-paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await page.addInitScript(() => {
+        navigator.clipboard.readText = () => new Promise<string>(() => {});
+      });
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+
+      await page.getByTestId('settings-password').fill('unchanged');
+      await page.getByTestId('settings-paste').click();
+
+      await expect(page.getByTestId('settings-paste-error')).toBeVisible({ timeout: 3000 });
+      await expect(page.getByTestId('settings-paste-error')).toHaveText(
+        'Paste is blocked inside OBS on this computer. Type it instead.',
+      );
       await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -508,7 +592,7 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('settings-paste').click();
 
       await expect(page.getByTestId('settings-paste-error')).toBeVisible();
-      await expect(page.getByTestId('settings-paste-error')).toContainText('Clipboard blocked — type it in manually');
+      await expect(page.getByTestId('settings-paste-error')).toContainText('Paste is blocked inside OBS on this computer. Type it instead.');
       await expect(page.getByTestId('settings-password')).toHaveValue('unchanged');
     } finally {
       await mock.close();
@@ -1465,6 +1549,368 @@ test.describe('Diagnostics view', () => {
       await expect(page.getByTestId('settings-password')).toHaveValue('once-only');
     } finally {
       await mock.close();
+    }
+  });
+
+  // --- Task 3.0: carry-forward fix wave — settings-save during a reset ---
+  test('reset-all: a settings-save attempted while the reset is still in flight is refused, and never writes lc.settings.v1', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('diag-row-ws')).toHaveAttribute('data-state', 'ok', { timeout: 5000 });
+
+      // Widens onResetAll's own resetPersistentMirror() round trip well past
+      // the window this test needs to attempt a save inside — the OLD
+      // Diagnostics view (boot() only tears it down AFTER this await
+      // resolves) is still fully mounted and interactive the whole time.
+      mock.delayResponsesFor('SetPersistentData', 1500);
+
+      await page.getByTestId('diag-reset-all').click();
+      await page.getByTestId('reset-all-confirm').click();
+
+      // A settings-save attempted WHILE the reset is still in flight.
+      await page.getByTestId('settings-port').fill('39999');
+      await page.getByTestId('settings-save').click();
+
+      const error = page.getByTestId('diag-settings-error');
+      await expect(error).toBeVisible();
+      await expect(error).toHaveText('Reset in progress — try again in a moment');
+
+      // Never wrote a fresh lc.settings.v1 during the reset.
+      expect(await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'))).toBeNull();
+
+      // Past the delayed mirror clear: the reset itself completed normally,
+      // and lc.settings.v1 is STILL absent — the refused save left no trace,
+      // not merely a delayed one.
+      await expect(page.getByTestId('diag-reset-done')).toBeVisible({ timeout: 5000 });
+      expect(await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'))).toBeNull();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.4 (AC 29): source-settings mismatch diagnostic -------------
+  // Exactly five checks against the in-scene source: width/height must match
+  // the base canvas, shutdown/restart_when_active must be false, and a
+  // custom fps below 30 warns. Each issue names its expected value.
+
+  test('add-overlay: a mismatched width/height + shutdown:true on a 1920x1080 project names both issues with expected values', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      videoSettings: { baseWidth: 1920, baseHeight: 1080 },
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720, shutdown: true },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('width 1280 — expected 1920');
+      await expect(issues).toContainText('height 720 — expected 1080');
+      await expect(issues).toContainText('Shutdown source when not visible');
+
+      // restart_when_active was never set (absent means false) — not named.
+      await expect(issues).not.toContainText('Refresh browser when scene becomes active');
+
+      // Copy diagnostics includes the same issues.
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+      await page.getByTestId('diag-copy-log').click();
+      const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+      expect(clipboardText).toContain('width 1280 — expected 1920');
+      expect(clipboardText).toContain('height 720 — expected 1080');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: restart_when_active:true is named as its own issue', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            restart_when_active: true,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('Refresh browser when scene becomes active');
+      await expect(issues).not.toContainText('width');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: a source matching every recommended setting shows no issues (all-clear)', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-settings-issues')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: fps_custom + fps below 30 warns; fps_custom + fps 30 does not', async ({ page }) => {
+    const mockLow = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            fps_custom: true,
+            fps: 15,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockLow.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      const issues = page.getByTestId('add-overlay-settings-issues');
+      await expect(issues).toBeVisible();
+      await expect(issues).toContainText('fps 15 — expected 30 or higher');
+    } finally {
+      await mockLow.close();
+    }
+
+    const mockOk = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html',
+            width: 1920,
+            height: 1080,
+            fps_custom: true,
+            fps: 30,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockOk.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-settings-issues')).toBeHidden();
+    } finally {
+      await mockOk.close();
+    }
+  });
+
+  test('add-overlay: the Live tab mirror shows the same settings issues', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('live-add-overlay-settings-issues')).toContainText('width 1280 — expected 1920');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.4: eye-off note ----------------------------------------------
+
+  test("add-overlay: the in-scene source's eye being off in this scene shows a note", async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+          sceneItemEnabled: false,
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-eye-off')).toBeVisible();
+      await expect(page.getByTestId('add-overlay-eye-off')).toContainText("eye is off in this scene");
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('add-overlay: an eye that is ON shows no eye-off note', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await expect(page.getByTestId('add-overlay-eye-off')).toBeHidden();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.4 (AC 30): multi-source warning ------------------------------
+
+  test('add-overlay: two browser_source inputs matching the overlay URL warn, naming both; one input shows no warning', async ({
+    page,
+  }) => {
+    const mockTwo = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+        {
+          inputName: 'Duplicate Overlay Source',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html?port=4455', width: 1920, height: 1080 },
+          // A second scene item so it doesn't collide with the program
+          // scene's own item list ordering — membership doesn't matter for
+          // this warning (it counts every match in the collection).
+          scenes: ['Scene'],
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockTwo.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      const warning = page.getByTestId('add-overlay-multi-source');
+      await expect(warning).toBeVisible();
+      await expect(warning).toContainText('Overlay URL found in 2 sources');
+      await expect(warning).toContainText('Live Counter Overlay');
+      await expect(warning).toContainText('Duplicate Overlay Source');
+      await expect(warning).toContainText('remove duplicates');
+    } finally {
+      await mockTwo.close();
+    }
+
+    const mockOne = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1920, height: 1080 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockOne.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      await expect(page.getByTestId('add-overlay-multi-source')).toBeHidden();
+    } finally {
+      await mockOne.close();
+    }
+  });
+
+  // --- Task 3.4 (Phase 2 deferred): Fix-confirm credential note ------------
+
+  test('add-overlay: Fix confirmation over a pw=-carrying URL appends the password sentence; a clean URL does not', async ({
+    page,
+  }) => {
+    const mockWithPw = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: {
+            url: 'file:///wherever/overlay.html?port=4455&pw=super-secret',
+            width: 1280,
+            height: 720,
+          },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockWithPw.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
+      await expect(fixConfirm).toBeVisible();
+      await expect(fixConfirm).toContainText('websocket password');
+      await expect(fixConfirm).toContainText('password-free');
+    } finally {
+      await mockWithPw.close();
+    }
+
+    const mockClean = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: 'file:///wherever/overlay.html', width: 1280, height: 720 },
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mockClean.port, devhook: false });
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+
+      await page.getByTestId('add-overlay').click();
+      const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
+      await expect(fixConfirm).toBeVisible();
+      await expect(fixConfirm).not.toContainText('websocket password');
+    } finally {
+      await mockClean.close();
     }
   });
 });

@@ -62,7 +62,17 @@
 //    never actually copied.
 //  - I-5: Cmd/Ctrl+A on a number field uses `.select()` (which works
 //    everywhere) instead of `setSelectionRange()` (which throws there).
-export const CLIPBOARD_BLOCKED_TEXT = 'Clipboard blocked — type it in manually';
+//
+// Checklist B2 (real-OBS walkthrough, OBS 32.2.2 / obs-browser CEF 127 on
+// macOS): inside OBS's browser dock `navigator.clipboard.readText()` never
+// settles at all. CEF asks its host for clipboard-read permission and
+// obs-browser never answers, so Chromium leaves the promise pending forever
+// (writing is unaffected). That can't be fixed from the page, so every read
+// goes through `readClipboardText()` below, which stops waiting after
+// CLIPBOARD_READ_TIMEOUT_MS and treats the read as blocked. The hint then
+// tells the operator to type the value instead.
+export const CLIPBOARD_BLOCKED_TEXT = 'Paste is blocked inside OBS on this computer. Type it instead.';
+export const CLIPBOARD_READ_TIMEOUT_MS = 1500;
 // I-1 — shown only when BOTH the async Clipboard API AND the legacy
 // execCommand fallback fail to copy/cut.
 export const CLIPBOARD_COPY_BLOCKED_TEXT = 'Copy blocked — select the text and copy it manually';
@@ -79,6 +89,39 @@ export const CLIPBOARD_PASSWORD_COPY_DISABLED_TEXT = 'Copying the password is di
 export const CLIPBOARD_NUMBER_PASTE_BLOCKED_TEXT = "Can't paste that into a number field";
 
 /**
+ * B2 — the ONE clipboard-read path for the whole dock (Paste buttons,
+ * Cmd/Ctrl+V, Presets import). Resolves to the clipboard text, or `null`
+ * when the read is rejected, the Clipboard API is missing, or the read has
+ * not settled within `timeoutMs` (what OBS's dock does). Never rejects. A
+ * read that settles after the timeout is ignored, so nothing is inserted
+ * late.
+ */
+export function readClipboardText(timeoutMs: number = CLIPBOARD_READ_TIMEOUT_MS): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (text: string | null): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(text);
+    };
+    let pending: Promise<string>;
+    try {
+      pending = navigator.clipboard.readText();
+    } catch {
+      finish(null);
+      return;
+    }
+    timer = setTimeout(() => finish(null), timeoutMs);
+    pending.then(
+      (text) => finish(text),
+      () => finish(null),
+    );
+  });
+}
+
+/**
  * Task 2.10's clipboard-paste mechanism (moved here unchanged) — the
  * mouse-driven Paste BUTTON flow shared by the Diagnostics settings form, the
  * Live tab's Connect card, and Presets' import textarea. On success,
@@ -90,14 +133,8 @@ export async function pasteIntoField(
   input: HTMLInputElement,
   hooks: { onBlocked: () => void; onFilled: () => void },
 ): Promise<void> {
-  let text: string;
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    hooks.onBlocked();
-    return;
-  }
-  if (text.length === 0) {
+  const text = await readClipboardText();
+  if (text === null || text.length === 0) {
     hooks.onBlocked();
     return;
   }
@@ -291,7 +328,7 @@ function showHint(field: HTMLElement, text: string): void {
   hintHideTimer = setTimeout(dismiss, CLIPBOARD_HINT_AUTO_HIDE_MS);
 }
 
-/** Shows the shared "Clipboard blocked" (denied read) hint. */
+/** Shows the shared "Paste is blocked" (denied or timed-out read) hint. */
 export function showClipboardBlockedHint(field: HTMLElement): void {
   showHint(field, CLIPBOARD_BLOCKED_TEXT);
 }
@@ -427,11 +464,13 @@ function pasteIntoNumberField(field: HTMLInputElement, rawText: string): void {
 }
 
 async function handlePaste(field: EditableField): Promise<void> {
-  let text: string;
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    showHint(liveAnchor(field), CLIPBOARD_BLOCKED_TEXT);
+  const text = await readClipboardText();
+  if (text === null) {
+    // B2 — a timed-out read has kept the operator waiting ~1.5 s, long
+    // enough for focus to have moved (liveAnchor() would then pin the hint
+    // to <body>, off-screen). Nothing re-rendered on this path, so the
+    // original field is still the right anchor whenever it is attached.
+    showHint(field.isConnected ? field : liveAnchor(field), CLIPBOARD_BLOCKED_TEXT);
     return;
   }
   if (isNumberField(field)) {

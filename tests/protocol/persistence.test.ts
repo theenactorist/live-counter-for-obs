@@ -399,6 +399,76 @@ describe('DockStorage — session', () => {
     storage.saveSession(null); // operator ends the recovered session
     expect(JSON.parse(local.getItem(KEY_SESSION) as string)).toEqual({ ended: true, revision: 41 });
   });
+
+  // Task 3.0 (ledger: "test the mirror-wins-then-start branch of observe") —
+  // every existing F5 test either has local and mirror agree (no
+  // 'mirror-used' warning at all) or ends the recovered session (a
+  // TOMBSTONE write, a different branch of `saveSession`). None covers the
+  // combination `lastKnownRevision()` actually exists for: the mirror
+  // STRICTLY wins (nothing local to compare against at all), and the very
+  // next write is a fresh SESSION (start, not end) — the exact sequence
+  // `SessionController.startSession()` performs.
+  it('lastKnownRevision reflects a revision learned only via a WINNING mirror candidate, and a subsequent start ranks above it', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage(); // nothing local at all — mirror is the only candidate
+    const storage = new DockStorage(local, client);
+
+    const mirrorSession = { ...createSession({ startValue: 0, finishValue: 20, mode: 'manual' }, 2000), revision: 50 };
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: mirrorSession });
+
+    const outcome = await storage.loadSession();
+    expect(outcome.warning).toBe('mirror-used');
+    expect(storage.lastKnownRevision()).toBe(50);
+
+    // A brand-new session started right after must out-rank the mirror
+    // value this load just observed — exactly the seam
+    // SessionController.startSession relies on.
+    const fresh = { ...createSession({ startValue: 0, finishValue: 5, mode: 'manual' }, 3000), revision: storage.lastKnownRevision() + 1 };
+    storage.saveSession(fresh);
+    expect(storage.lastKnownRevision()).toBe(51);
+  });
+
+  // Task 3.0 (ledger: "Number.isSafeInteger guard in noteRevision") — a
+  // manually-corrupted revision (never reachable through a validated
+  // load — `isSession`'s `isNonNegativeInteger` rejects NaN outright, and
+  // `saveSession`'s local write drops NaN to `null` via JSON) must still
+  // never poison `maxSeenRevision` if some caller passes one directly.
+  it('noteRevision ignores a NaN revision passed to saveSession', () => {
+    const local = new MapStorage();
+    const storage = new DockStorage(local, null);
+    const base = createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000);
+
+    storage.saveSession({ ...base, revision: 5 });
+    expect(storage.lastKnownRevision()).toBe(5);
+
+    storage.saveSession({ ...base, revision: NaN });
+    expect(storage.lastKnownRevision()).toBe(5); // NaN never adopted
+  });
+
+  // Unlike NaN, `2**60` sails straight through `isSession`'s own
+  // `isNonNegativeInteger` check (`Number.isInteger(2**60)` is true — it is
+  // an exact power of two) — so a corrupted-but-schema-valid MIRROR record
+  // is the realistic way this reaches `noteRevision` at all. Seeded via the
+  // mirror only (never written locally) so `localSessionRevision()`'s own,
+  // separate read of the local slot can't mask the guard actually working.
+  it('noteRevision ignores an unsafe-integer revision (2**60) learned only via the mirror', async () => {
+    mock = await startMockObs();
+    const client = await connectedClient(mock.url);
+    clients.push(client);
+
+    const local = new MapStorage(); // nothing local — mirror is the only candidate
+    const storage = new DockStorage(local, client);
+
+    const corrupted = { ...createSession({ startValue: 0, finishValue: 10, mode: 'manual' }, 1000), revision: 2 ** 60 };
+    await client.request('SetPersistentData', { realm: REALM, slotName: SLOT_SESSION, slotValue: corrupted });
+
+    const outcome = await storage.loadSession();
+    expect(outcome.warning).toBe('mirror-used');
+    expect(storage.lastKnownRevision()).toBe(-1); // the absurd revision was never adopted
+  });
 });
 
 describe('DockStorage — presets', () => {

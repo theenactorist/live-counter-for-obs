@@ -17,7 +17,14 @@
 // review, Critical 2) — otherwise every re-render silently stole focus back
 // to nothing, dropping keystrokes.
 //
-// The one render trigger that does NOT go through `render()` at all is the
+// The exception is a controller update that only moves the count, which is
+// what an automatic tick does (2026-09-25 review, item 8). Rebuilding the
+// pane on every tick replaced the button under a press that was still held
+// down, so that click never fired. `onControllerUpdate()` patches the
+// count-dependent elements in place for that one case; every other change
+// still goes through `render()`.
+//
+// The other render trigger that does NOT go through `render()` at all is the
 // once-a-second overlay-silence poll (`updateOverlayBanner()`): it toggles
 // only the `banner-overlay` element in place, because a full rebuild purely
 // on a timer — with nothing else about the state having changed — has no
@@ -39,6 +46,7 @@ import type { Bus, BusMessage } from '../../protocol/bus.js';
 import { generateNonce } from '../../protocol/bus.js';
 import type { ObsWsClient } from '../../protocol/obsws-client.js';
 import type { DockSettings } from '../../protocol/persistence.js';
+import { chipFrom, liveSafetyArmed, type LiveStatusTracker, type LiveStatusSnapshot, type ChipState } from '../live-status.js';
 import {
   addOverlayButtonState,
   fixOverlayConfirmText,
@@ -47,6 +55,7 @@ import {
   onOverlayScanChange,
   refreshOverlayScan,
   runAddOverlay,
+  OVERLAY_EYE_OFF_TEXT,
   type AddOverlayResult,
   type OverlayIntent,
 } from '../diagnostics.js';
@@ -55,6 +64,7 @@ import {
 // settings-paste-only usage of them.
 import { pasteIntoField, CLIPBOARD_BLOCKED_TEXT } from '../clipboard-keys.js';
 import { CONNECTION_GRACE_MS } from '../connection-grace.js';
+import { el, button, captureFocus, restoreFocus, parsePort, DEFAULT_WS_PORT } from './dom.js';
 
 export interface LiveViewHandle {
   destroy(): void;
@@ -84,7 +94,17 @@ const CONNECT_GRACE_MS = CONNECTION_GRACE_MS;
 const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry';
 const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from Show Connect Info";
 const CONNECT_CONNECTING_TEXT = 'Connecting…';
-const DEFAULT_CONNECT_PORT = 4455;
+
+// Task 3.3 (AC 14) — the live-safety confirm's two locked variants (brief).
+// Which one shows is entirely a property of the CURRENT liveSafetyArmed
+// snapshot at render time (see `renderSafetyConfirm` below): the primary
+// variant whenever the merged `active` fact is definitely `true` (the source
+// really is live in Program), the Studio-mode-off variant for the OTHER way
+// `liveSafetyArmed` can be true — nothing can say either way AND Studio Mode
+// itself is off, so "no evidence" cannot be treated as safe.
+const SAFETY_TEXT_LIVE = 'The counter source is live in Program — this change is visible to your audience immediately.';
+const SAFETY_TEXT_STUDIO_OFF =
+  "Studio Mode is off and the counter's live state is unknown — this change may be visible immediately.";
 
 interface LiveUiState {
   jumpOpen: boolean;
@@ -92,6 +112,9 @@ interface LiveUiState {
   resetConfirmOpen: boolean;
   endConfirmOpen: boolean;
   recoveredDismissed: boolean;
+  // Task 3.3 (AC 14) — the live-safety blocking confirm gating Show/Reset/
+  // Jump while `liveSafetyArmed()` and not yet acknowledged this session.
+  safetyConfirmOpen: boolean;
 }
 
 // Task 2.12 — the Connect card's own local form state (kept separate from
@@ -157,32 +180,55 @@ export interface MountLiveViewOptions {
    * implementation, two entry points" — no second reconnect path).
    */
   onSaveSettings?: (port: number, password: string) => void;
+  /**
+   * Task 3.2 — the per-boot LIVE-status tracker (src/dock/live-status.ts):
+   * merges the overlay's own relay layer with obs-websocket's secondary ws
+   * layer into the real six-row status-chip decision table (`chipFrom`),
+   * replacing the Phase 2 SHOWING/HIDDEN-by-connection-only chip. Omitted =
+   * the chip always reads UNKNOWN (no tracker means no known relay/ws state
+   * at all) — main.ts always passes one in production.
+   */
+  liveStatus?: LiveStatusTracker;
 }
 
-interface FocusSnapshot {
-  testid: string;
-  selectionStart: number | null;
-  selectionEnd: number | null;
-}
+// 2026-09-25 review, item 8: true when the only thing that moved between the
+// last full render and this controller update is the count. An automatic
+// tick changes `currentValue` (plus the bookkeeping `revision`/`updatedAt`).
+// `undoStack` is allowed too because the patch keeps Undo's disabled state
+// current. Anything else, from status to visibility to a new session,
+// returns false and gets the full render.
+const COUNT_FIELDS: ReadonlySet<string> = new Set(['currentValue', 'undoStack', 'revision', 'updatedAt']);
 
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else node.setAttribute(k, v);
+function isCountOnlyChange(prev: ControllerState, next: ControllerState): boolean {
+  const a = prev.session;
+  const b = next.session;
+  if (a === null || b === null) return false;
+  if (
+    next.sessionEpoch !== prev.sessionEpoch ||
+    next.lastAction !== prev.lastAction ||
+    next.recovered !== prev.recovered ||
+    next.clamp !== prev.clamp ||
+    next.initializing !== prev.initializing
+  ) {
+    return false;
   }
-  if (text !== undefined) node.textContent = text;
-  return node;
+  for (const key of Object.keys(b) as (keyof Session)[]) {
+    if (!COUNT_FIELDS.has(key) && a[key] !== b[key]) return false;
+  }
+  return true;
 }
 
-function button(testid: string, text: string, opts: { disabled?: boolean; extraClass?: string } = {}): HTMLButtonElement {
-  const b = el('button', { 'data-testid': testid, class: `ctl${opts.extraClass ? ' ' + opts.extraClass : ''}` }, text);
-  b.disabled = opts.disabled ?? false;
-  return b;
+// Task 3.3 — deliberately NOT exported from live-status.ts (the brief locks
+// that module's exports as-is): `liveSafetyArmed` only ever answers YES/NO,
+// but choosing WHICH of the two locked confirm texts to show needs to know
+// which of its two arming conditions actually fired. Mirrors the true>false>
+// null merge live-status.ts's own private `mergeBool` already applies to
+// `active`, restricted to just that one fact — this view has no legitimate
+// reason to see `showing` at all.
+function mergedActiveFromSnapshot(s: LiveStatusSnapshot): boolean | null {
+  if (s.relay.active === true || s.ws.active === true) return true;
+  if (s.relay.active === false || s.ws.active === false) return false;
+  return null;
 }
 
 // Gate fix wave (Ruling C): "remembered for the page session only" — module
@@ -206,7 +252,52 @@ export function mountLiveView(
     resetConfirmOpen: false,
     endConfirmOpen: false,
     recoveredDismissed: false,
+    safetyConfirmOpen: false,
   };
+
+  // Task 3.3 — "acknowledged this session" state (brief: in-memory, never
+  // persisted; a dock reload re-asking is explicitly acceptable/safe-side).
+  // `safetyAcked` starts false on every mount (a reload IS a fresh mount, so
+  // this needs no separate reset story of its own).
+  //
+  // Gate fix wave (I-1/I-2) — reset (along with `ui.safetyConfirmOpen` and
+  // `pendingSafetyAction` just below) by `resetSafetyState()`, called from
+  // render() on either of two transitions: the session IDENTITY changing
+  // (`state.sessionEpoch` — see controller.ts's own doc comment on that
+  // field — ticks up only inside `startSession()`, i.e. a genuinely NEW
+  // session: Presets' Restart-over-an-active-session, Setup's "Start
+  // session" (Replace, over an active one), the devhook) or the session ENDING
+  // (non-null -> null). Neither a plain null -> non-null check (the OLD
+  // rule, I-1) nor object identity can tell "still this session" from "a new
+  // one" on their own: Presets' Restart and Setup's Start both replace an
+  // ALREADY-active session without ever passing through null, and every
+  // accepted dispatch (reconfigure included) replaces the `Session` object
+  // wholesale regardless of whether it's the same session or not — Session
+  // itself carries no id to compare (engine/types.ts). The session-END half
+  // additionally clears `ui.safetyConfirmOpen`/`pendingSafetyAction` (I-2):
+  // without it, a guarded action opened but never resolved (Continue/Cancel)
+  // before an unguarded End stayed pending — the NEXT session's first render
+  // would re-open that stale confirm unprompted, and Continuing it would
+  // both replay the PRIOR session's captured dispatch closure into the new
+  // one and silently grant the new session's own ack.
+  //
+  // `sessionWasActive`/`lastSeenSessionEpoch` both seed from whatever the
+  // CONTROLLER's state already is at this exact mount (recovered session and
+  // all), so a mount that starts with a session already live does not
+  // mistake its own first render for either transition.
+  let safetyAcked = false;
+  let pendingSafetyAction: (() => void) | null = null;
+  let sessionWasActive = controller.getState().session !== null;
+  let lastSeenSessionEpoch = controller.getState().sessionEpoch;
+
+  // Gate fix wave (I-1/I-2) — the one place every guard-state field resets;
+  // see the doc comment on `safetyAcked` just above for exactly which two
+  // transitions call this and why both fixes live in the same seam.
+  function resetSafetyState(): void {
+    safetyAcked = false;
+    ui.safetyConfirmOpen = false;
+    pendingSafetyAction = null;
+  }
 
   // Review fix (Important 2): a settings-save reconnect (main.ts's boot())
   // tears this mount down and immediately mounts a fresh LiveViewHandle into
@@ -223,6 +314,10 @@ export function mountLiveView(
   // render() entry point.
   let destroyed = false;
 
+  // The controller state the pane currently shows, for onControllerUpdate()'s
+  // count-only check. Set by every full render() and by the in-place patch.
+  let lastRendered: ControllerState | null = null;
+
   // Task 2.12 — Connect card + its Live-empty add-overlay mirror. Whether
   // either feature is even reachable is fixed for this mount's whole
   // lifetime (main.ts always passes all three together in production; a
@@ -231,7 +326,7 @@ export function mountLiveView(
   const client = opts.client;
 
   const connectUi: ConnectUiState = {
-    portRaw: String(opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT),
+    portRaw: String(opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT),
     password: opts.initialSettings?.wsPassword ?? '',
     pasteErrorVisible: false,
     portErrorVisible: false,
@@ -285,11 +380,6 @@ export function mountLiveView(
     return Date.now() - connectSince >= CONNECT_GRACE_MS ? 'unreachable' : 'connecting';
   }
 
-  function parseConnectPort(raw: string): number | null {
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
-  }
-
   function dispatch(cmd: Command): void {
     controller.dispatch(cmd);
     // controller.dispatch() calls notify() synchronously on any accepted OR
@@ -302,6 +392,35 @@ export function mountLiveView(
     render();
   }
 
+  // Task 3.3 (AC 14) — the ONE gate every guarded action (Show, Reset, Jump)
+  // routes through. Armed (per the locked `liveSafetyArmed`) and not yet
+  // acknowledged this session: hold `action` as the pending continuation,
+  // open the confirm, and stop — `action` runs only once `safety-proceed`
+  // fires it (see `renderSafetyConfirm`). Anything else (not armed; no
+  // tracker at all; already acknowledged this session) runs `action`
+  // immediately, exactly as if this guard were not here. No tracker
+  // (`opts.liveStatus` omitted) can never be "armed" — the same
+  // fail-safe-as-absent posture every other `opts.liveStatus?.` call site in
+  // this file already takes.
+  function guardLiveSafety(action: () => void): void {
+    const snap = opts.liveStatus?.snapshot();
+    if (snap && liveSafetyArmed(snap) && !safetyAcked) {
+      pendingSafetyAction = action;
+      ui.safetyConfirmOpen = true;
+      render();
+      // 2026-09-25 review, item 6: the box renders last, below Reset/End, so
+      // in a short dock it can open out of sight. Bring it into view and put
+      // focus on Cancel. render()'s focus restore keeps Cancel focused across
+      // later re-renders. No backdrop, and +1/-1 stay usable (PRD §8.11).
+      const box = container.querySelector<HTMLElement>('[data-testid="live-safety-confirm"]');
+      const cancel = container.querySelector<HTMLButtonElement>('[data-testid="safety-cancel"]');
+      cancel?.focus({ preventScroll: true });
+      box?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    action();
+  }
+
   function render(): void {
     // Review fix (Important 2) — see the `destroyed` declaration above: a
     // stale async continuation (add-overlay's `.then()`, a clipboard-paste
@@ -310,9 +429,29 @@ export function mountLiveView(
     // replacement.
     if (destroyed) return;
     refreshConnectTiming();
-    const focusSnapshot = captureFocus();
+    const focusSnapshot = captureFocus(container);
 
     const state = controller.getState();
+    lastRendered = state;
+
+    // Gate fix wave (I-1/I-2) — the ONE place both safety-guard-reset
+    // transitions are detected (see `safetyAcked`'s own doc comment above):
+    // every full render() reads controller.getState() here anyway, so this
+    // is a free, always-current check rather than a second subscription.
+    // `sessionIdentityChanged` fires on a genuinely NEW session (Presets
+    // Restart, Setup Start, the devhook — anything that bumps
+    // `sessionEpoch`), NOT on an ordinary dispatch continuing the same one
+    // (reconfigure included — those replace `session` with a new object too,
+    // but never bump the epoch). `sessionEnded` fires on the non-null ->
+    // null transition (End) — the I-2 half, clearing a still-pending guarded
+    // action/confirm before it can leak into whatever session starts next.
+    const sessionIsActiveNow = state.session !== null;
+    const sessionIdentityChanged = state.sessionEpoch !== lastSeenSessionEpoch;
+    const sessionEnded = sessionWasActive && !sessionIsActiveNow;
+    if (sessionIdentityChanged || sessionEnded) resetSafetyState();
+    lastSeenSessionEpoch = state.sessionEpoch;
+    sessionWasActive = sessionIsActiveNow;
+
     container.innerHTML = '';
 
     if (state.recovered && !ui.recoveredDismissed) {
@@ -361,13 +500,23 @@ export function mountLiveView(
       connectCardEverShown = false;
       if (cardWanted) container.appendChild(renderDisconnectedChip());
       if (session === null) {
-        container.appendChild(renderLiveEmpty());
+        // Task 3.0 (carry-forward fix wave) — while `init()` is still
+        // resolving (identify can take up to IDENTIFY_WAIT_MS before the
+        // persistent-data mirror is even reachable — see main.ts), `session`
+        // reads `null` regardless of whether a recovery is actually about to
+        // land. Before `initializing` existed, that null was indistinguishable
+        // from "nothing to restore, ever" and this pane said so — a real
+        // "no active session" flash on every slow-identify boot, restored
+        // session or not. Deliberately does NOT also gate the Connect card
+        // above: that card is about connectivity, not session existence, and
+        // showing it makes no claim this fix needs to correct.
+        container.appendChild(state.initializing ? renderLiveRestoring() : renderLiveEmpty());
       } else {
         container.appendChild(renderLive(session, state));
       }
     }
 
-    restoreFocus(focusSnapshot);
+    restoreFocus(container, focusSnapshot);
   }
 
   // Ruling C — the persistent way back to the card the operator dismissed.
@@ -381,6 +530,18 @@ export function mountLiveView(
       render();
     });
     return chip;
+  }
+
+  // Task 3.0 (carry-forward fix wave) — see the `state.initializing` check at
+  // this function's one call site, above, for the full story. Deliberately
+  // minimal (no Add-overlay button, no recovered/clamp banners — none of
+  // those can be meaningfully true yet: `recovered`/`clamp` are still at
+  // their construction defaults and `session` is still null) — this is a
+  // placeholder for "don't know yet", not a second empty state to maintain.
+  function renderLiveRestoring(): HTMLElement {
+    const wrap = el('div', { 'data-testid': 'live-restoring', class: 'live-empty' });
+    wrap.appendChild(el('div', {}, 'Restoring session…'));
+    return wrap;
   }
 
   function renderLiveEmpty(): HTMLElement {
@@ -418,6 +579,27 @@ export function mountLiveView(
 
       if (state.note !== null) {
         wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-note', class: 'diag-note' }, state.note));
+      }
+      // Task 3.4 (AC 29/30) — mirrors Diagnostics' own three note slots
+      // (settings-issues/eye-off/multi-source), driven by the SAME shared
+      // `addOverlayButtonState` this whole block already reads `state` from,
+      // so the two views can never disagree about what they show.
+      if (state.settingsIssues.length > 0) {
+        wrap.appendChild(
+          el(
+            'div',
+            { 'data-testid': 'live-add-overlay-settings-issues', class: 'diag-note' },
+            state.settingsIssues.join(' · '),
+          ),
+        );
+      }
+      if (state.eyeOff) {
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-eye-off', class: 'diag-note' }, OVERLAY_EYE_OFF_TEXT));
+      }
+      if (state.multiSourceWarning !== null) {
+        wrap.appendChild(
+          el('div', { 'data-testid': 'live-add-overlay-multi-source', class: 'diag-note' }, state.multiSourceWarning),
+        );
       }
       if (state.retry) {
         if (state.retryMessage !== null) {
@@ -465,7 +647,7 @@ export function mountLiveView(
     // Review fold-in: the written URL's port now comes from the SAME live
     // mirror the Connect card edits, not a value frozen at mount — so what
     // the operator last typed and what gets written can no longer diverge.
-    const port = parseConnectPort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_CONNECT_PORT;
+    const port = parsePort(connectUi.portRaw) ?? opts.initialSettings?.wsPort ?? DEFAULT_WS_PORT;
     // runAddOverlay() flips the shared busy lock synchronously before
     // returning (see diagnostics.ts) — render() right after already paints
     // this button disabled, with no separate flag needed.
@@ -559,7 +741,7 @@ export function mountLiveView(
 
     const submitBtn = button('connect-submit', 'Connect');
     submitBtn.addEventListener('click', () => {
-      const port = parseConnectPort(portInput.value);
+      const port = parsePort(portInput.value);
       if (port === null) {
         connectUi.portErrorVisible = true;
         render();
@@ -591,7 +773,7 @@ export function mountLiveView(
       el(
         'div',
         { 'data-testid': 'connect-optional-note', class: 'connect-optional-note' },
-        'You can count without OBS — create a session in Setup. Connecting adds session persistence, LIVE status and Add overlay.',
+        'You can count without OBS. Create a session in Setup. Connecting adds session persistence, LIVE status, Add overlay, keyboard shortcuts and Stream Deck.',
       ),
     );
 
@@ -609,44 +791,6 @@ export function mountLiveView(
     }
 
     return card;
-  }
-
-  // Captures the currently-focused element's data-testid (+ text selection,
-  // for an input/textarea) so a full rebuild can restore it afterward.
-  // Returns null when nothing inside this view is focused, or the focused
-  // element carries no testid to re-find it by.
-  function captureFocus(): FocusSnapshot | null {
-    const active = document.activeElement;
-    if (!(active instanceof HTMLElement) || !container.contains(active)) return null;
-    const testid = active.getAttribute('data-testid');
-    if (!testid) return null;
-    let selectionStart: number | null = null;
-    let selectionEnd: number | null = null;
-    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-      selectionStart = active.selectionStart;
-      selectionEnd = active.selectionEnd;
-    }
-    return { testid, selectionStart, selectionEnd };
-  }
-
-  function restoreFocus(snapshot: FocusSnapshot | null): void {
-    if (!snapshot) return;
-    const target = container.querySelector<HTMLElement>(`[data-testid="${snapshot.testid}"]`);
-    if (!target) return;
-    target.focus();
-    if (
-      (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
-      snapshot.selectionStart !== null &&
-      snapshot.selectionEnd !== null
-    ) {
-      try {
-        target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-      } catch {
-        // Some input types (e.g. a future numeric-only variant) don't
-        // support selection ranges — restoring focus alone is still
-        // strictly better than nothing, so swallow and move on.
-      }
-    }
   }
 
   function overlaySilent(): boolean {
@@ -671,15 +815,52 @@ export function mountLiveView(
     return overlaySilent();
   }
 
-  // SHOWING/HIDDEN describe the RENDER-level hide flag, which is only
-  // meaningful information if the dock is actually talking to OBS. With the
-  // socket down the dock knows nothing about what the audience sees, so it
-  // must say so rather than assert SHOWING (contracts:status-chip-no-unknown;
-  // the plan's DOM contract locks UNKNOWN as a Phase 2 chip state, and PRD
-  // §8.11 calls this chip "the continuous safeguard"). LIVE stays Phase 3.
-  function chipFor(session: Session): { state: string; text: string } {
-    if (!isConnected()) return { state: 'unknown', text: 'UNKNOWN' };
-    return session.overlayVisible ? { state: 'showing', text: 'SHOWING' } : { state: 'hidden', text: 'HIDDEN' };
+  // Task 3.2 — the chip's real six-row decision table (PRD §8.11), fed by
+  // the LIVE-status tracker's merged relay (overlay `window.obsstudio`
+  // relay, over ANY transport) + ws (obs-websocket GetSourceActive/
+  // Input*StateChanged, scoped to the matched overlay source) layers, plus
+  // this session's own `overlayVisible` render flag. Replaces the Phase 2
+  // "unknown iff disconnected, else SHOWING/HIDDEN by overlayVisible" chip —
+  // trust is now entirely the tracker's concern (each layer already reports
+  // `null` when it isn't currently trustworthy; see live-status.ts), so
+  // `isConnected()` no longer factors into the chip at all (it still drives
+  // the Connect card and banner-ws elsewhere in this file). No tracker at
+  // all (a caller that omits `opts.liveStatus`) reads as "nothing known" —
+  // always UNKNOWN — the same as a tracker that has never heard from either
+  // layer.
+  // Gate fix wave (M-7) — `state` is typed `ChipState` (chipFrom's own return
+  // type), not the widened plain `string` this signature used to declare:
+  // `chipFrom` already returns the narrow union, and re-widening it here (and
+  // in `applyChipToElement` below) threw away that precision through both
+  // call paths for no reason — `chipEl.dataset.state` only ever holds one of
+  // the five real values regardless, so the type should say so too.
+  function chipFor(session: Session): { state: ChipState; text: string; detail: string | null } {
+    const snap = opts.liveStatus?.snapshot() ?? {
+      overlaySeen: false,
+      relay: { active: null, showing: null },
+      ws: { active: null, showing: null },
+    };
+    return chipFrom({
+      overlaySeen: snap.overlaySeen,
+      relay: snap.relay,
+      ws: snap.ws,
+      overlayVisible: session.overlayVisible,
+    });
+  }
+
+  // Shared between renderLive() (building the element fresh) and
+  // updateStatusChip() (the surgical poll/tracker-subscription update), so
+  // the data-detail/title pairing can never drift between the two paths.
+  function applyChipToElement(chipEl: HTMLElement, chip: { state: ChipState; text: string; detail: string | null }): void {
+    chipEl.dataset.state = chip.state;
+    chipEl.textContent = chip.text;
+    if (chip.detail !== null) {
+      chipEl.dataset.detail = chip.detail;
+      chipEl.title = chip.detail;
+    } else {
+      delete chipEl.dataset.detail;
+      chipEl.removeAttribute('title');
+    }
   }
 
   // Fix round 1 (Task 2.5 review, Critical 2): the once-a-second poll below
@@ -707,9 +888,7 @@ export function mountLiveView(
     if (session === null) return;
     const chipEl = container.querySelector<HTMLElement>('[data-testid="status-chip"]');
     if (!chipEl) return;
-    const chip = chipFor(session);
-    chipEl.dataset.state = chip.state;
-    chipEl.textContent = chip.text;
+    applyChipToElement(chipEl, chipFor(session));
   }
 
   function renderRecoveredBanner(): HTMLElement {
@@ -752,18 +931,27 @@ export function mountLiveView(
     );
   }
 
+  function progressText(session: Session): string {
+    return progressLabel(session) + (session.mode === 'automatic' ? ` · 1 count every ${session.intervalSeconds}s` : '');
+  }
+
+  function jumpPreviewText(session: Session): string {
+    const parsed = parseJumpValue(ui.jumpValue);
+    return `${session.currentValue} → ${parsed !== null ? String(parsed) : '–'}`;
+  }
+
   function renderLive(session: Session, state: ControllerState): HTMLElement {
     const root = el('div', { 'data-testid': 'live-root' });
     const { lo, hi } = rangeOf(session);
 
     root.appendChild(el('div', { 'data-testid': 'current-value', class: 'current-value' }, formatValue(session.currentValue)));
 
-    const progressText =
-      progressLabel(session) + (session.mode === 'automatic' ? ` · 1 count every ${session.intervalSeconds}s` : '');
-    root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText));
+    root.appendChild(el('div', { 'data-testid': 'progress-line', class: 'progress-line' }, progressText(session)));
 
     const chip = chipFor(session);
-    root.appendChild(el('div', { 'data-testid': 'status-chip', 'data-state': chip.state, class: 'status-chip' }, chip.text));
+    const chipEl = el('div', { 'data-testid': 'status-chip', class: 'status-chip' });
+    applyChipToElement(chipEl, chip);
+    root.appendChild(chipEl);
 
     root.appendChild(
       el(
@@ -809,6 +997,12 @@ export function mountLiveView(
 
     if (ui.resetConfirmOpen) root.appendChild(renderResetConfirm());
     if (ui.endConfirmOpen) root.appendChild(renderEndConfirm());
+    // Task 3.3 — independent of jumpOpen/resetConfirmOpen/endConfirmOpen: a
+    // guarded Jump keeps the jump box open underneath this (both render
+    // together, the operator sees exactly what they're about to do); a
+    // guarded Reset shows this FIRST, then its own reset-confirm once
+    // acknowledged (see guardLiveSafety's Reset pending action).
+    if (ui.safetyConfirmOpen) root.appendChild(renderSafetyConfirm());
 
     return root;
   }
@@ -857,9 +1051,16 @@ export function mountLiveView(
     const row = el('div', { class: 'btn-row' });
 
     const showHide = button('btn-show-hide', session.overlayVisible ? 'Hide' : 'Show');
-    showHide.addEventListener('click', () =>
-      dispatch({ type: session.overlayVisible ? 'hideOverlay' : 'showOverlay', nonce: generateNonce() }),
-    );
+    showHide.addEventListener('click', () => {
+      // Task 3.3 — only the SHOW side is guarded (brief: "Hide is never
+      // guarded" — hiding the overlay can never surprise the audience with a
+      // NEW visible change).
+      if (session.overlayVisible) {
+        dispatch({ type: 'hideOverlay', nonce: generateNonce() });
+        return;
+      }
+      guardLiveSafety(() => dispatch({ type: 'showOverlay', nonce: generateNonce() }));
+    });
     row.appendChild(showHide);
 
     return row;
@@ -870,8 +1071,14 @@ export function mountLiveView(
 
     const reset = button('btn-reset', 'Reset', { extraClass: 'ctl-small danger' });
     reset.addEventListener('click', () => {
-      ui.resetConfirmOpen = true;
-      render();
+      // Task 3.3 — Reset's guarded flow is two cheap steps in sequence: the
+      // live-safety confirm first (once per session), THEN this exact
+      // pre-existing reset-confirm — guardLiveSafety's pending action IS
+      // "open the reset confirm", never the reset itself.
+      guardLiveSafety(() => {
+        ui.resetConfirmOpen = true;
+        render();
+      });
     });
     row.appendChild(reset);
 
@@ -914,8 +1121,7 @@ export function mountLiveView(
 
     const parsed = parseJumpValue(ui.jumpValue);
     const valid = parsed !== null && parsed >= lo && parsed <= hi;
-    const previewTarget = parsed !== null ? String(parsed) : '–';
-    box.appendChild(el('div', { 'data-testid': 'jump-preview' }, `${session.currentValue} → ${previewTarget}`));
+    box.appendChild(el('div', { 'data-testid': 'jump-preview' }, jumpPreviewText(session)));
 
     if (ui.jumpValue.length > 0 && !valid) {
       box.appendChild(el('div', { 'data-testid': 'jump-error', class: 'jump-error' }, `Enter a whole number between ${lo} and ${hi}`));
@@ -924,10 +1130,15 @@ export function mountLiveView(
     const apply = button('jump-apply', 'Apply', { disabled: !valid });
     apply.addEventListener('click', () => {
       if (parsed === null || !valid) return;
-      dispatch({ type: 'jump', value: parsed, nonce: generateNonce() });
-      ui.jumpOpen = false;
-      ui.jumpValue = '';
-      render();
+      // Task 3.3 — validity is checked BEFORE the guard (an invalid jump was
+      // never going anywhere regardless); the guard only ever intercepts a
+      // jump that would actually apply.
+      guardLiveSafety(() => {
+        dispatch({ type: 'jump', value: parsed, nonce: generateNonce() });
+        ui.jumpOpen = false;
+        ui.jumpValue = '';
+        render();
+      });
     });
     box.appendChild(apply);
 
@@ -965,14 +1176,60 @@ export function mountLiveView(
       ui.endConfirmOpen = false;
       dispatch({ type: 'endSession', keepOverlay: false, nonce: generateNonce() });
     });
+    // 2026-09-25 review, item 1: a way back out, same as reset-no.
+    const cancel = button('end-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      ui.endConfirmOpen = false;
+      render();
+    });
     box.appendChild(keep);
     box.appendChild(hide);
+    box.appendChild(cancel);
+    return box;
+  }
+
+  // Task 3.3 (AC 14) — text is picked from the CURRENT tracker snapshot at
+  // render time (not one frozen when the guard first opened): both variants
+  // describe "why this is armed right now", and re-deriving it here is one
+  // fewer piece of state to keep in sync for the rare case that the
+  // underlying fact changes while the confirm happens to still be open.
+  function renderSafetyConfirm(): HTMLElement {
+    const snap = opts.liveStatus?.snapshot();
+    const studioModeOffVariant = snap !== undefined && snap.studioMode === false && mergedActiveFromSnapshot(snap) !== true;
+
+    const box = el('div', { 'data-testid': 'live-safety-confirm', class: 'confirm-box' });
+    box.appendChild(el('span', {}, studioModeOffVariant ? SAFETY_TEXT_STUDIO_OFF : SAFETY_TEXT_LIVE));
+
+    const proceed = button('safety-proceed', "Continue — don't ask again this session");
+    proceed.addEventListener('click', () => {
+      safetyAcked = true;
+      ui.safetyConfirmOpen = false;
+      const action = pendingSafetyAction;
+      pendingSafetyAction = null;
+      // The pending action (dispatch(showOverlay/jump), or "open the reset
+      // confirm") always ends in its own render() — directly, or via
+      // dispatch()'s own unconditional one — so no extra render() is needed
+      // here beyond what running it already produces.
+      action?.();
+    });
+    const cancel = button('safety-cancel', 'Cancel');
+    cancel.addEventListener('click', () => {
+      // "Cancel does nothing" (brief) — the pending action is dropped
+      // entirely, never run, and acknowledgment is NOT granted: the very
+      // next guarded action re-opens this same confirm.
+      ui.safetyConfirmOpen = false;
+      pendingSafetyAction = null;
+      render();
+    });
+    box.appendChild(proceed);
+    box.appendChild(cancel);
     return box;
   }
 
   function renderModeToggle(session: Session): HTMLElement {
     const row = el('div', { class: 'mode-row' });
-    const label = session.mode === 'manual' ? 'Manual' : 'Automatic';
+    // Labelled by the action, like Show/Hide (2026-09-25 review, DOCKUX-8).
+    const label = session.mode === 'manual' ? 'Switch to Automatic' : 'Switch to Manual';
     const toggle = button('mode-toggle', label);
     toggle.addEventListener('click', () =>
       dispatch({ type: 'setMode', mode: session.mode === 'manual' ? 'automatic' : 'manual', nonce: generateNonce() }),
@@ -1040,7 +1297,47 @@ export function mountLiveView(
     }
   }
 
-  const unsubController = controller.subscribe(() => render());
+  // Item 8's in-place update: every element the count feeds, and nothing
+  // else. Returns false if the pane is missing one of them (it is not showing
+  // this session), so the caller falls back to render().
+  function patchCount(session: Session): boolean {
+    const find = <T extends HTMLElement>(testid: string): T | null =>
+      container.querySelector<T>(`[data-testid="${testid}"]`);
+    const value = find('current-value');
+    const progress = find('progress-line');
+    const undo = find<HTMLButtonElement>('btn-undo');
+    const plus = find<HTMLButtonElement>('btn-plus');
+    const minus = find<HTMLButtonElement>('btn-minus');
+    if (!value || !progress || !undo || !plus || !minus) return false;
+
+    const { lo, hi } = rangeOf(session);
+    value.textContent = formatValue(session.currentValue);
+    progress.textContent = progressText(session);
+    undo.disabled = session.undoStack.length === 0;
+    plus.disabled = session.currentValue === hi;
+    minus.disabled = session.currentValue === lo;
+    const preview = find('jump-preview');
+    if (preview) preview.textContent = jumpPreviewText(session);
+    return true;
+  }
+
+  // The single exception to the full rebuild (see the module doc comment):
+  // an update that only moved the count is patched in place, so a press held
+  // across an automatic tick still ends on the button it started on.
+  function onControllerUpdate(): void {
+    if (destroyed) return;
+    const state = controller.getState();
+    if (lastRendered !== null && isCountOnlyChange(lastRendered, state) && state.session !== null) {
+      refreshConnectTiming();
+      if (patchCount(state.session)) {
+        lastRendered = state;
+        return;
+      }
+    }
+    render();
+  }
+
+  const unsubController = controller.subscribe(() => onControllerUpdate());
   const unsubBus = bus.onMessage((m: BusMessage) => {
     if (m.kind === 'hello' || m.kind === 'overlay-status') {
       lastOverlaySeenAt = Date.now();
@@ -1078,6 +1375,13 @@ export function mountLiveView(
   // (see obsws-client.ts — 'connecting' has none of its own, which is why
   // the poll above exists at all) rather than waiting out up to one full
   // BANNER_POLL_MS tick to notice.
+  // Task 3.2 — the tracker's own subscription is a SEPARATE trigger from the
+  // 1s bannerPoll below: relay/ws facts can change at any moment (a bus
+  // heartbeat, an Input*StateChanged event, a GetSourceActive poll landing),
+  // and reusing the same surgical, focus-safe updateStatusChip() path here
+  // means the chip reflects a change immediately rather than waiting out up
+  // to one full BANNER_POLL_MS tick.
+  const unsubLiveStatus = opts.liveStatus?.subscribe(() => updateStatusChip());
   const unsubIdentified = client?.on('identified', () => {
     // Ruling A item 1: every (re)identify re-seeds the shared scan, so this
     // mirror's verb is truthful from the first moment it is clickable.
@@ -1113,6 +1417,7 @@ export function mountLiveView(
       destroyed = true;
       unsubController();
       unsubBus();
+      unsubLiveStatus?.();
       unsubIdentified?.();
       unsubAuthFailed?.();
       unsubAddOverlayBusyLive();

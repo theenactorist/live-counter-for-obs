@@ -2,6 +2,21 @@
 // and the global `WebSocket` — no `node:crypto` / `ws` import — so this file
 // bundles unchanged for both the dock/overlay pages and Node test runs.
 
+// obs-websocket 5.x's EventSubscription bitmask (protocol.md) — named bits
+// this codebase actually composes into a subscription mask, rather than a
+// magic number at each call site. `General|Inputs|Ui|InputActiveStateChanged|
+// InputShowStateChanged` (src/dock/main.ts) sums to 394249 — Task 3.2's
+// dock-side event mask, needed for the LIVE-status ws layer's
+// InputActiveStateChanged/InputShowStateChanged/StudioModeStateChanged
+// events (the last is a `Ui`-category event).
+export const EventSub = {
+  General: 1 << 0,
+  Inputs: 1 << 3,
+  Ui: 1 << 10,
+  InputActiveStateChanged: 1 << 17,
+  InputShowStateChanged: 1 << 18,
+} as const;
+
 export interface ObsWsOptions {
   url: string;
   password?: string;
@@ -11,7 +26,18 @@ export interface ObsWsOptions {
 }
 
 type ObsWsState = 'connecting' | 'identified' | 'closed' | 'auth-failed';
-type LifecycleEvent = 'identified' | 'closed' | 'auth-failed';
+// Task 3.2 fix round 1 — `'disconnected'` is a SUPERSET signal fired
+// alongside every path that stops the client being identified: an explicit
+// `close()`, an auth failure, AND (the gap this exists to close) the
+// automatic reconnect-with-backoff path (`handleClose()`'s non-auth-failed
+// branch), which previously fired no lifecycle event at all — it only ever
+// flipped `_state` to 'connecting' and scheduled a reconnect. A consumer
+// that needs to know "the client just stopped being identified, for ANY
+// reason, including one that will silently retry" (e.g.
+// src/dock/live-status.ts's LiveStatusTracker resetting ws-layer trust) has
+// no other way to observe that transition — 'closed'/'auth-failed' alone
+// miss the ordinary network-blip case entirely.
+type LifecycleEvent = 'identified' | 'closed' | 'auth-failed' | 'disconnected';
 type EventListener = (eventType: string, eventData: Record<string, unknown>) => void;
 
 interface PendingRequest {
@@ -68,6 +94,7 @@ export class ObsWsClient {
     identified: new Set(),
     closed: new Set(),
     'auth-failed': new Set(),
+    disconnected: new Set(),
   };
   private readonly eventListeners = new Set<EventListener>();
 
@@ -111,6 +138,7 @@ export class ObsWsClient {
     this._state = 'closed';
     this.rejectAllPending(new Error('client closed'));
     this.emit('closed');
+    this.emit('disconnected');
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       this.ws.close(1000);
     }
@@ -237,11 +265,19 @@ export class ObsWsClient {
       this._state = 'auth-failed';
       this.rejectAllPending(new Error('authentication failed'));
       this.emit('auth-failed');
+      this.emit('disconnected');
       return;
     }
 
     this.rejectAllPending(new Error('connection closed'));
     this._state = 'connecting';
+    // Fix round 1 — this is the exact transition that previously fired NO
+    // lifecycle event at all: a real network blip (server restart, dropped
+    // socket) severs an IDENTIFIED connection and this branch runs, but
+    // `scheduleReconnect()` below means the client will silently try again
+    // on its own. Any consumer relying only on `'closed'`/`'auth-failed'`
+    // would never learn this happened.
+    this.emit('disconnected');
     this.scheduleReconnect();
   }
 

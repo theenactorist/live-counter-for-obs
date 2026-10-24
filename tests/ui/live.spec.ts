@@ -8,6 +8,14 @@ import { serializeSession } from '../../src/engine/migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DOCK_URL = pathToFileURL(path.resolve(__dirname, '../../dist/dock.html')).href;
+// Task 3.2 — dock.html and overlay.html are sibling files in the same
+// `dist/` (vite.config.ts's shared outDir), so this is exactly the URL
+// diagnostics.ts's overlayBaseUrl() would derive from the dock's own
+// location at runtime — seeding a mock browser_source input with this exact
+// URL is what makes overlaySourceNames() (and therefore the LIVE-status
+// tracker's ws layer) actually find it.
+const OVERLAY_URL = pathToFileURL(path.resolve(__dirname, '../../dist/overlay.html')).href;
+const OVERLAY_INPUT_NAME = 'Live Counter Overlay';
 
 const MINUS = '−'; // U+2212 MINUS SIGN — the exact glyph controller.ts's LABELS map uses for decrement.
 
@@ -20,13 +28,35 @@ interface StartCfg {
 
 async function openDock(
   page: Page,
-  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number },
+  opts: { port: number; devhook?: boolean; overlaySilenceMs?: number; livePollMs?: number; liveFreshnessMs?: number },
 ): Promise<void> {
   const params = new URLSearchParams();
   params.set('wsPort', String(opts.port));
   if (opts.devhook !== false) params.set('devhook', '1');
   if (opts.overlaySilenceMs !== undefined) params.set('overlaySilenceMs', String(opts.overlaySilenceMs));
+  if (opts.livePollMs !== undefined) params.set('livePollMs', String(opts.livePollMs));
+  if (opts.liveFreshnessMs !== undefined) params.set('liveFreshnessMs', String(opts.liveFreshnessMs));
   await page.goto(`${DOCK_URL}?${params.toString()}`);
+}
+
+// Task 3.2 — simulates the overlay page's own bus heartbeat (hello/
+// overlay-status) reaching the dock over obs-websocket's BroadcastCustomEvent,
+// WITHOUT needing a second real overlay.html page open (live.spec.ts only
+// ever drives the dock). Feeds the LIVE-status tracker's `overlaySeen`
+// freshness flag — several existing chip tests below predate the tracker and
+// need this to keep exercising the render-flag-driven SHOWING/HIDDEN path
+// (chipFrom's row 6) rather than falling to UNKNOWN for "no overlay page ever
+// seen", which is the new (and correct) behavior when nothing establishes
+// overlaySeen at all.
+function injectOverlayHeartbeat(mock: MockObs, payload: { obsActive?: boolean | null; obsShowing?: boolean | null } = {}): void {
+  mock.injectEvent('CustomEvent', {
+    app: 'live-counter',
+    v: 1,
+    source: 'overlay',
+    kind: 'overlay-status',
+    nonce: `test-overlay-status-${Math.random().toString(36).slice(2)}`,
+    payload: { obsActive: payload.obsActive ?? null, obsShowing: payload.obsShowing ?? null },
+  });
 }
 
 async function readValue(page: Page): Promise<number> {
@@ -85,8 +115,15 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // Task 3.3 EDIT (justification: liveSafetyArmed's studio-mode-off branch
+  // arms whenever nothing else is known about activity AND Studio Mode reads
+  // `false` — the mock server's own default. This test isn't about
+  // live-safety, so `setStudioMode(true)` establishes an explicit not-armed
+  // baseline before anything connects, matching the other jump/reset/show
+  // tests below that got the same treatment for the same reason.
   test('jump two-step: preview updates while typing, Apply commits', async ({ page }) => {
     const mock = await startMockObs();
+    mock.setStudioMode(true);
     try {
       await openDock(page, { port: mock.port });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
@@ -217,6 +254,27 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // 2026-09-25 review, DOCKUX-8: the toggle names the action it takes (like
+  // Show/Hide beside it), not the mode the session is already in.
+  test('mode-toggle is labelled with the mode it switches to', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const toggle = page.getByTestId('mode-toggle');
+      await expect(toggle).toHaveText('Switch to Automatic');
+      await toggle.click(); // manual -> automatic
+      await expect(page.getByTestId('auto-start')).toBeVisible();
+      await expect(toggle).toHaveText('Switch to Manual');
+      await toggle.click(); // automatic -> manual
+      await expect(page.getByTestId('auto-start')).toHaveCount(0);
+      await expect(toggle).toHaveText('Switch to Automatic');
+    } finally {
+      await mock.close();
+    }
+  });
+
   // Task 2.18 fix wave 5 (coordinator re-review residual) — Setup no longer
   // has any path that changes a running session's mode (ruling 1: Mode's
   // dedicated control is HERE, on Live); the deleted Setup-side test that
@@ -291,8 +349,68 @@ test.describe('dock Live view', () => {
     }
   });
 
+  // 2026-09-25 review, item 8 (RUNTIME-2): a real press is held for a moment.
+  // If an automatic tick rebuilt the pane between mouse-down and mouse-up,
+  // the button under the pointer was replaced and the click never fired.
+  // Each Pause here is held for 150ms at the fastest speed, while counting.
+  test('automatic: a held Pause press is not lost to a tick', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+
+      for (let press = 1; press <= 8; press++) {
+        // Wait for the count to move, so every press is made mid-count.
+        const before = await readValue(page);
+        await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(before);
+
+        await page.getByTestId('auto-pause').click({ delay: 150 });
+
+        // A lost click leaves the count running with Pause still enabled.
+        await expect(page.getByTestId('auto-pause'), `press ${press} was lost`).toBeDisabled();
+        await expect(page.getByTestId('auto-start')).toHaveText('Resume');
+        const paused = await readValue(page);
+        await page.waitForTimeout(400); // longer than one 0.25s tick
+        expect(await readValue(page), `press ${press} did not stop the count`).toBe(paused);
+
+        await page.getByTestId('auto-start').click();
+        await expect(page.getByTestId('auto-pause')).toBeEnabled();
+      }
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Item 8 updates the count in place on a tick. The Jump preview shows the
+  // count too, so it has to move with it.
+  test('automatic: the jump preview follows the count between renders', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 1000, mode: 'automatic', intervalSeconds: 0.25 });
+      await page.getByTestId('auto-start').click();
+      await page.getByTestId('btn-jump').click();
+
+      await expect.poll(() => readValue(page), { timeout: 3000 }).toBeGreaterThan(1);
+      // Read both in one go, while it is still counting.
+      const [value, preview] = await page.evaluate(() => [
+        document.querySelector('[data-testid="current-value"]')?.textContent,
+        document.querySelector('[data-testid="jump-preview"]')?.textContent,
+      ]);
+      expect(preview).toBe(`${value} → –`);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.3 EDIT (justification: same as the jump test above — establishes
+  // a not-armed baseline so this Reset isn't intercepted by the new
+  // live-safety confirm; Reset's own confirmation flow is this test's actual
+  // subject).
   test('reset requires confirmation: No leaves value, Yes resets to start', async ({ page }) => {
     const mock = await startMockObs();
+    mock.setStudioMode(true);
     try {
       await openDock(page, { port: mock.port });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
@@ -347,11 +465,59 @@ test.describe('dock Live view', () => {
     }
   });
 
-  test('show/hide flips status-chip between SHOWING and HIDDEN', async ({ page }) => {
+  // 2026-09-25 review, item 1: the End confirm needs a way back out, the
+  // same as the Reset confirm's reset-no.
+  test('end session: Cancel closes the confirm and the session keeps running', async ({ page }) => {
     const mock = await startMockObs();
     try {
       await openDock(page, { port: mock.port });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const plus = page.getByTestId('btn-plus');
+      await plus.click();
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+
+      await page.getByTestId('btn-end').click();
+      await expect(page.getByTestId('end-confirm')).toBeVisible();
+      await page.getByTestId('end-cancel').click();
+
+      await expect(page.getByTestId('end-confirm')).toHaveCount(0);
+      await expect(page.getByTestId('end-keep')).toHaveCount(0);
+      await expect(page.getByTestId('end-hide')).toHaveCount(0);
+      await expect(page.getByTestId('live-empty')).toHaveCount(0);
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+
+      await plus.click();
+      await expect(page.getByTestId('current-value')).toHaveText('2');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Task 3.2 EDIT (justification: chipFor's chip logic was replaced wholesale
+  // by the locked `chipFrom` decision table — see live-status.ts. The
+  // SHOWING/HIDDEN-by-overlayVisible legend this test exercises is now row 6
+  // of that table, reached only once `overlaySeen` is true (the tracker has
+  // heard a hello/overlay-status from an actual overlay page within the
+  // freshness window) — this test drives the dock alone, with no real
+  // overlay.html page open, so nothing would ever establish that fact
+  // without help. `injectOverlayHeartbeat` simulates exactly the bus message
+  // a real overlay page sends, with `obsActive`/`obsShowing` left `null` so
+  // the assertions below still exercise the SAME render-flag-driven fallback
+  // this test always meant to cover, not the new OBS-active layer (covered
+  // separately by the new setSourceActive-driven LIVE tests further down).
+  // Task 3.3 EDIT (justification: same as the two tests above — this test's
+  // second btn-show-hide click is a Show with mergedActive still null
+  // (`injectOverlayHeartbeat` below sends obsActive:null); without an
+  // explicit not-armed baseline the new live-safety confirm would intercept
+  // it via the studio-mode-off branch, which is not what this test is about).
+  test('show/hide flips status-chip between SHOWING and HIDDEN', async ({ page }) => {
+    const mock = await startMockObs();
+    mock.setStudioMode(true);
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      injectOverlayHeartbeat(mock);
 
       const chip = page.getByTestId('status-chip');
       await expect(chip).toHaveText('SHOWING');
@@ -368,28 +534,188 @@ test.describe('dock Live view', () => {
     }
   });
 
-  // Phase 2 final-review fix (contracts:status-chip-no-unknown). SHOWING /
-  // HIDDEN describe the render-level hide flag, which only means anything
-  // while the dock is actually talking to OBS; with the socket down the dock
-  // knows nothing about what the audience sees. The plan's DOM contract locks
-  // UNKNOWN as a Phase 2 chip state and dock.html already carried the (until
-  // now dead) `[data-state='unknown']` styling.
-  test('status-chip flips to UNKNOWN when the ws connection drops, alongside banner-ws', async ({ page }) => {
+  // Phase 2 final-review fix (contracts:status-chip-no-unknown), UPDATED for
+  // Task 3.2 (justification: same as the test immediately above —
+  // SHOWING/HIDDEN now require `overlaySeen`, established here via
+  // `injectOverlayHeartbeat` before the ws connection drops). The chip's
+  // OWN "distrust" story has also changed: dropping the ws connection no
+  // longer means UNKNOWN by itself (Task 2.13's whole point is that the
+  // overlay keeps heartbeating over the direct transport with no OBS at
+  // all — see integration.spec.ts's new dock+overlay coverage of exactly
+  // that) — here, with no real overlay page re-heartbeating after the one
+  // injected message, the chip only reaches UNKNOWN once THAT single
+  // heartbeat's own freshness window elapses, which is why this test now
+  // opens the dock with a shrunk `liveFreshnessMs` to keep that within the
+  // existing timeout instead of waiting out the real 10s default.
+  test('status-chip flips to UNKNOWN once the last-seen overlay heartbeat goes stale, alongside banner-ws on a ws drop', async ({
+    page,
+  }) => {
     const mock = await startMockObs();
     const port = mock.port;
 
-    await openDock(page, { port });
+    await openDock(page, { port, liveFreshnessMs: 500 });
     await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+    injectOverlayHeartbeat(mock);
 
     const chip = page.getByTestId('status-chip');
     await expect(chip).toHaveAttribute('data-state', 'showing');
     await expect(chip).toHaveText('SHOWING');
 
-    await mock.close(); // server goes away mid-session
+    await mock.close(); // server goes away mid-session; no further heartbeats arrive either
 
     await expect(chip).toHaveAttribute('data-state', 'unknown', { timeout: 5000 });
     await expect(chip).toHaveText('UNKNOWN');
     await expect(page.getByTestId('banner-ws')).toBeVisible({ timeout: 5000 });
+  });
+
+  // Task 3.2 — the ws layer end to end: a real obs-websocket source
+  // (matched by overlaySourceNames() via its settings URL) reporting
+  // active:true through GetSourceActive polling + setSourceActive's
+  // InputActiveStateChanged event flips the chip to LIVE, with no overlay
+  // page open at all (the ws layer is entirely self-sufficient here).
+  test('setSourceActive(active:true) on a matched overlay source flips the chip to LIVE', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      // Baseline once the ws layer has landed (poll response false/false,
+      // overlayVisible true by default): HIDDEN with the "not visible" detail
+      // — proves the ws layer alone (no overlay page, no relay) already
+      // drives the chip once a source is matched and polled.
+      await expect(chip).toHaveAttribute('data-state', 'hidden', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-detail', 'Source not visible in OBS');
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-state', 'live');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('render-hide while the OBS source is active shows HIDDEN with the live-in-program detail', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      await page.getByTestId('btn-show-hide').click(); // operator Hide -> overlayVisible false
+      await expect(chip).toHaveText('HIDDEN');
+      await expect(chip).toHaveAttribute('data-state', 'hidden');
+      await expect(chip).toHaveAttribute('data-detail', 'Source is live in Program — Show would be visible immediately');
+      await expect(chip).toHaveAttribute('title', 'Source is live in Program — Show would be visible immediately');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('setSourceActive({showing:true}) only, active still false, shows SHOWING (PREVIEW) while overlayVisible', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      await expect(chip).toHaveAttribute('data-state', 'hidden', { timeout: 3000 }); // baseline: active/showing both false
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: false, showing: true });
+      await expect(chip).toHaveText('SHOWING (PREVIEW)', { timeout: 3000 });
+      await expect(chip).toHaveAttribute('data-state', 'showing-preview');
+      await expect(chip).toHaveAttribute('data-detail', 'Preview or projector only — not in Program');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Real-OBS walkthrough D4 — the overlay Browser Source removed entirely
+  // (obs-websocket RemoveInput) while LIVE. OBS sends InputRemoved and then
+  // the removed source's deactivate/hide events; the ws layer used to keep
+  // that last false/false reading, so once the overlay page went silent the
+  // chip sat on HIDDEN "Source not visible in OBS" instead of UNKNOWN.
+  test('overlay source removed while LIVE: chip goes UNKNOWN once the overlay page is silent, not HIDDEN', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200, liveFreshnessMs: 1000 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true, showing: true });
+      injectOverlayHeartbeat(mock, { obsActive: true, obsShowing: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      mock.removeInput(OVERLAY_INPUT_NAME); // the overlay page goes with it: no further heartbeats
+
+      await expect(chip).toHaveAttribute('data-state', 'unknown', { timeout: 5000 });
+      await expect(chip).toHaveText('UNKNOWN');
+      await expect(chip).toHaveAttribute('data-detail', 'No overlay page seen yet');
+      await expect(chip).toHaveAttribute('title', 'No overlay page seen yet');
+
+      // Several 200ms GetSourceActive polls later, nothing has brought the
+      // removed source's reading back.
+      await page.waitForTimeout(1000);
+      await expect(chip).toHaveAttribute('data-state', 'unknown');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // 2026-09-25 review, item 5: all five chip states must render as a filled
+  // pill. LIVE and SHOWING (PREVIEW) previously had no rule, so LIVE showed
+  // as bare text while HIDDEN got a red pill. Driven through the relay layer
+  // (the overlay's own heartbeat), so no matched OBS source is needed.
+  test('every status-chip state has its own non-transparent background', async ({ page }) => {
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      const backgrounds = new Map<string, string>();
+      const record = async (state: string): Promise<void> => {
+        await expect(chip).toHaveAttribute('data-state', state, { timeout: 3000 });
+        const bg = await chip.evaluate((node) => getComputedStyle(node).backgroundColor);
+        expect(bg, `${state} background`).not.toBe('rgba(0, 0, 0, 0)');
+        expect(bg, `${state} background`).not.toBe('transparent');
+        backgrounds.set(state, bg);
+      };
+
+      await record('unknown'); // no overlay heartbeat yet
+
+      injectOverlayHeartbeat(mock);
+      await record('showing');
+
+      injectOverlayHeartbeat(mock, { obsActive: false, obsShowing: true });
+      await record('showing-preview');
+
+      injectOverlayHeartbeat(mock, { obsActive: true, obsShowing: true });
+      await record('live');
+
+      await page.getByTestId('btn-show-hide').click(); // Hide is never guarded
+      await record('hidden');
+
+      // Each state reads differently at a glance, LIVE vs HIDDEN included.
+      expect(new Set(backgrounds.values()).size).toBe(5);
+    } finally {
+      await mock.close();
+    }
   });
 
   // Phase 2 final-review fix (code-quality:P2-Q-07): the +/- handler is on
@@ -424,13 +750,25 @@ test.describe('dock Live view', () => {
   // operator-initiated. Warning that "the audience may not see updates" about
   // an overlay the operator deliberately hid — directly above a chip reading
   // HIDDEN — is exactly the noise that teaches them to ignore the real thing.
+  //
+  // Task 3.2 EDIT (justification: same as the two chip tests above — this
+  // test's incidental `status-chip` HIDDEN check now needs `overlaySeen`,
+  // which nothing establishes without a real overlay page or the injected
+  // heartbeat below; the banner-overlay behavior itself, this test's actual
+  // subject, is untouched by Task 3.2).
+  // Task 3.3 EDIT (justification: same as the chip test above — this test's
+  // final btn-show-hide click ("Show again") would otherwise be intercepted
+  // by the new live-safety confirm; the banner-overlay suppression story
+  // this test actually covers is untouched).
   test('banner-overlay is suppressed while the overlay is deliberately hidden, and returns on Show', async ({
     page,
   }) => {
     const mock = await startMockObs();
+    mock.setStudioMode(true);
     try {
       await openDock(page, { port: mock.port, overlaySilenceMs: 500 });
       await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      injectOverlayHeartbeat(mock);
 
       await expect(page.getByTestId('banner-overlay')).toBeVisible({ timeout: 3000 });
 
@@ -973,6 +1311,27 @@ test.describe('dock Live view', () => {
     await expect(page.getByTestId('connect-paste-error')).toBeHidden();
   });
 
+  // Checklist B2: readText() never settles inside OBS's dock (CEF 127), and
+  // this card is the first place a new operator pastes the password.
+  test('connect-card: Paste stops waiting on a clipboard read that never settles: the hint shows within 3 s and the field is untouched', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      navigator.clipboard.readText = () => new Promise<string>(() => {});
+    });
+    await openDock(page, { port: 39469, devhook: false });
+    await expect(page.getByTestId('connect-card')).toBeVisible();
+
+    await page.getByTestId('connect-password').fill('unchanged');
+    await page.getByTestId('connect-paste').click();
+
+    await expect(page.getByTestId('connect-paste-error')).toBeVisible({ timeout: 3000 });
+    await expect(page.getByTestId('connect-paste-error')).toHaveText(
+      'Paste is blocked inside OBS on this computer. Type it instead.',
+    );
+    await expect(page.getByTestId('connect-password')).toHaveValue('unchanged');
+  });
+
   test('live-empty mirrors add-overlay: creates the overlay once identified with no session, without visiting Diagnostics', async ({
     page,
   }) => {
@@ -1073,6 +1432,383 @@ test.describe('dock Live view', () => {
       await expect(page.getByTestId('live-empty')).toHaveCount(1, { timeout: 5000 });
       await expect(page.getByTestId('live-add-overlay')).toHaveCount(1);
       await expect(page.getByTestId('live-add-overlay')).toBeEnabled({ timeout: 5000 });
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.0: carry-forward fix wave — "Restoring session…" -----------
+  // Before ControllerState.initializing existed, `session: null` was
+  // indistinguishable from "nothing to restore, ever": a slow identify (up
+  // to IDENTIFY_WAIT_MS before the persistent-data mirror is even reachable
+  // — see main.ts) showed "No active session — create one in Setup" for the
+  // ENTIRE wait, real recovery in flight or not (deferred Phase 2 concern:
+  // "may deserve a Restoring… placeholder in Phase 3").
+  test('slow init: "Restoring session…" shows instead of "No active session", with no premature flash of the latter', async ({
+    page,
+  }) => {
+    const mock = await startMockObs();
+    try {
+      // Identify itself stays fast (no Connect-card race to reason about —
+      // isConnected() flips true almost immediately); only the SESSION
+      // LOAD's own GetPersistentData response is held back, so
+      // controller.init() cannot resolve — and `initializing` cannot flip
+      // false — until this delay elapses.
+      mock.delayResponsesFor('GetPersistentData', 1500);
+      await openDock(page, { port: mock.port, devhook: false });
+
+      const restoring = page.getByTestId('live-restoring');
+      await expect(restoring).toBeVisible();
+      await expect(restoring).toHaveText('Restoring session…');
+      await expect(page.getByTestId('live-empty')).toHaveCount(0);
+
+      // Once init() resolves (nothing was ever stored — a genuine "no
+      // session"), it settles into the ordinary empty state.
+      await expect(page.getByTestId('live-empty')).toBeVisible({ timeout: 5000 });
+      await expect(restoring).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // --- Task 3.3 (AC 14): live-safety blocking confirm on Show/Reset/Jump --
+
+  test('Show guard: armed via active:true opens the safety confirm; cancel leaves it hidden; proceed shows it and acknowledges for the rest of the session', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 }); // ws layer landed and trusted, merged active === true
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await expect(showHide).toHaveText('Hide'); // overlayVisible defaults true
+      await showHide.click(); // Hide is NEVER guarded
+      await expect(showHide).toHaveText('Show');
+
+      await showHide.click(); // Show — armed, unacknowledged: must be intercepted
+      await expect(confirm).toBeVisible();
+      await expect(confirm).toContainText(
+        'The counter source is live in Program — this change is visible to your audience immediately.',
+      );
+      await expect(showHide).toHaveText('Show'); // not dispatched yet
+
+      await page.getByTestId('safety-cancel').click();
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Show'); // cancel really does nothing
+
+      await showHide.click(); // still unacknowledged — re-opens
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Hide'); // proceed actually ran the guarded Show
+
+      // Acknowledged for the rest of THIS session: Hide, then Show again —
+      // no confirm this time.
+      await showHide.click(); // Hide
+      await showHide.click(); // Show
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Hide');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('Jump guard: apply is intercepted while armed, then proceeding actually applies the jump', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      await page.getByTestId('btn-jump').click();
+      await page.getByTestId('jump-input').fill('4');
+      await page.getByTestId('jump-apply').click();
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      await expect(confirm).toBeVisible();
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // not applied yet
+      await expect(page.getByTestId('jump-input')).toBeVisible(); // the jump box stays open underneath
+
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+      await expect(page.getByTestId('current-value')).toHaveText('4'); // the pending jump actually ran
+      await expect(page.getByTestId('jump-input')).toHaveCount(0); // and closed the jump box, as usual
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('Reset guard: the safety confirm comes first, then the existing reset confirm is still required', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await page.getByTestId('btn-plus').click();
+      await page.getByTestId('btn-plus').click();
+      await expect(page.getByTestId('current-value')).toHaveText('2');
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      const safetyConfirm = page.getByTestId('live-safety-confirm');
+      const resetConfirm = page.getByTestId('reset-confirm');
+
+      await page.getByTestId('btn-reset').click();
+      await expect(safetyConfirm).toBeVisible();
+      await expect(resetConfirm).toHaveCount(0); // not yet — safety comes first
+      await expect(page.getByTestId('current-value')).toHaveText('2');
+
+      await page.getByTestId('safety-proceed').click();
+      await expect(safetyConfirm).toHaveCount(0);
+      await expect(resetConfirm).toBeVisible(); // NOW the ordinary two-step reset confirm
+      await expect(page.getByTestId('current-value')).toHaveText('2'); // still not reset
+
+      await page.getByTestId('reset-no').click();
+      await expect(page.getByTestId('current-value')).toHaveText('2');
+
+      // Acknowledged now — a second Reset this session skips straight to the
+      // reset confirm, no safety confirm in between.
+      await page.getByTestId('btn-reset').click();
+      await expect(safetyConfirm).toHaveCount(0);
+      await expect(resetConfirm).toBeVisible();
+      await page.getByTestId('reset-yes').click();
+      await expect(page.getByTestId('current-value')).toHaveText('0');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('not armed (active false, studio mode on): Show/Reset/Jump never show the safety confirm', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: false });
+      await expect(chip).toHaveAttribute('data-state', 'hidden', { timeout: 3000 }); // ws landed: merged active === false
+
+      // A "distractor": Studio Mode on has no bearing here at all — a merged
+      // active of `false` is decisive on its own (liveSafetyArmed's own unit
+      // coverage: "not armed when merged active is false, regardless of
+      // studioMode") — set only to prove that, not because the test needs it.
+      mock.setStudioMode(true);
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide (unguarded; overlay starts visible)
+      await showHide.click(); // Show — NOT armed, must go straight through
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Hide');
+
+      await page.getByTestId('btn-reset').click();
+      await expect(confirm).toHaveCount(0);
+      await expect(page.getByTestId('reset-confirm')).toBeVisible(); // Reset's OWN confirm still applies
+      await page.getByTestId('reset-no').click();
+
+      await page.getByTestId('btn-jump').click();
+      await page.getByTestId('jump-input').fill('5');
+      await page.getByTestId('jump-apply').click();
+      await expect(confirm).toHaveCount(0);
+      await expect(page.getByTestId('current-value')).toHaveText('5');
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('studio-mode-off secondary case: no relay/ws activity known at all + Studio Mode off -> armed, with the studio-off variant text', async ({
+    page,
+  }) => {
+    // No inputs seeded at all (the ws layer never has a name to match) and no
+    // overlay heartbeat is injected (the relay layer never establishes
+    // anything either) — merged active stays null for the whole test; only
+    // Studio Mode (default `false` in the mock) can arm it.
+    const mock = await startMockObs();
+    try {
+      await openDock(page, { port: mock.port });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      // Deterministic sync instead of an arbitrary wait: once the tracker's
+      // own identify-triggered GetStudioModeEnabled request has actually
+      // reached the (real, local) mock server, the round trip back is a
+      // single-digit-ms local websocket hop.
+      await expect.poll(() => mock.requestLog.filter((t) => t === 'GetStudioModeEnabled').length).toBeGreaterThanOrEqual(1);
+      await page.waitForTimeout(100);
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide (unguarded)
+      await showHide.click(); // Show — armed via the studio-mode-off branch
+
+      await expect(confirm).toBeVisible();
+      await expect(confirm).toContainText(
+        "Studio Mode is off and the counter's live state is unknown — this change may be visible immediately.",
+      );
+      await expect(showHide).toHaveText('Show'); // not dispatched yet
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('new session (end + start) re-arms the safety confirm once', async ({ page }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      const showHide = page.getByTestId('btn-show-hide');
+      const confirm = page.getByTestId('live-safety-confirm');
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — guarded
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+
+      // End this session, start a brand new one — the ws layer's own
+      // active:true fact is untouched by the session boundary (it tracks the
+      // OBS SOURCE, not the counting session), so the only thing that could
+      // make Show skip the confirm again is the once-per-session ack, which
+      // must have been reset by the null -> non-null transition.
+      await page.getByTestId('btn-end').click();
+      await page.getByTestId('end-keep').click();
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 }); // still armed, fresh session
+
+      await showHide.click(); // Hide
+      await showHide.click(); // Show — re-armed for the NEW session
+      await expect(confirm).toBeVisible();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // Gate fix wave (I-2) — a pending guarded action (here, Jump) leaves the
+  // safety confirm open and a captured dispatch closure sitting in
+  // `pendingSafetyAction`. Ending the session (End is unguarded — it never
+  // routes through the confirm) used to leave both untouched: the NEXT
+  // session's first render re-appended the stale confirm unprompted, and
+  // Continuing it would both replay session A's captured jump into session B
+  // and silently grant session B's own ack. Fixed by resetting the whole
+  // safety-guard state (ack + open confirm + pending action) on the
+  // non-null -> null session-end transition, same seam as I-1's
+  // session-identity reset.
+  test('End while a safety confirm is pending clears it — no stale confirm or replayed action lands on the next session (gate fix I-2)', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      const chip = page.getByTestId('status-chip');
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+
+      // Open the safety confirm via Jump, but never resolve it — End the
+      // session (the unguarded action) while it's still pending.
+      await page.getByTestId('btn-jump').click();
+      await page.getByTestId('jump-input').fill('7');
+      await page.getByTestId('jump-apply').click();
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      await expect(confirm).toBeVisible();
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // not applied yet
+
+      await page.getByTestId('btn-end').click();
+      await page.getByTestId('end-keep').click();
+      await expect(page.getByTestId('live-empty')).toBeVisible();
+      await expect(confirm).toHaveCount(0); // gone the moment the session ended
+
+      // Start a brand-new session — the still-active ws source keeps this
+      // armed, but session B must get its OWN fresh confirm on its OWN first
+      // guarded action, never an unprompted stale one, and session A's
+      // pending jump must never land on it.
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+      await expect(chip).toHaveText('LIVE', { timeout: 3000 });
+      await expect(confirm).toHaveCount(0); // no unprompted re-appearance
+      await expect(page.getByTestId('current-value')).toHaveText('0'); // session A's jump never replayed
+
+      // The ack was not silently granted either — a guarded action in
+      // session B still requires its own confirmation.
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide
+      await showHide.click(); // Show
+      await expect(confirm).toBeVisible();
+      await page.getByTestId('safety-proceed').click();
+      await expect(confirm).toHaveCount(0);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  // 2026-09-25 review, item 6: in a short dock the safety confirm renders
+  // below Reset/End, out of sight. Opening it must bring it into view and put
+  // focus on Cancel, without disabling +1/-1.
+  test('Show guard in a short dock: the safety confirm scrolls into view with Cancel focused, and +1 still works', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [{ inputName: OVERLAY_INPUT_NAME, inputKind: 'browser_source', inputSettings: { url: OVERLAY_URL } }],
+    });
+    try {
+      await page.setViewportSize({ width: 300, height: 260 });
+      await openDock(page, { port: mock.port, livePollMs: 200 });
+      await startSession(page, { startValue: 0, finishValue: 10, mode: 'manual' });
+
+      mock.setSourceActive(OVERLAY_INPUT_NAME, { active: true });
+      await expect(page.getByTestId('status-chip')).toHaveText('LIVE', { timeout: 3000 });
+
+      const showHide = page.getByTestId('btn-show-hide');
+      await showHide.click(); // Hide, never guarded
+      await expect(showHide).toHaveText('Show');
+      await showHide.click(); // Show, armed and not yet acknowledged
+
+      const confirm = page.getByTestId('live-safety-confirm');
+      const cancel = page.getByTestId('safety-cancel');
+      await expect(confirm).toBeVisible();
+      await expect(cancel).toBeFocused();
+      await expect(cancel).toBeInViewport({ ratio: 1 });
+      await expect(confirm).toBeInViewport();
+
+      // No backdrop and no lockout: counting still works while it is open.
+      await expect(page.getByTestId('btn-plus')).toBeEnabled();
+      await page.getByTestId('btn-plus').click();
+      await expect(page.getByTestId('current-value')).toHaveText('1');
+      await expect(confirm).toBeVisible();
+
+      await cancel.click();
+      await expect(confirm).toHaveCount(0);
+      await expect(showHide).toHaveText('Show');
     } finally {
       await mock.close();
     }

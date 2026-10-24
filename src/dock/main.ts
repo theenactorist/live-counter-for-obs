@@ -12,7 +12,7 @@ import '../styles/fonts.css';
  * re-deriving style/template from its preset (see the `adoptPresentation`
  * calls in `boot()`).
  */
-import { ObsWsClient, awaitIdentified } from '../protocol/obsws-client.js';
+import { ObsWsClient, awaitIdentified, EventSub } from '../protocol/obsws-client.js';
 import { Bus } from '../protocol/bus.js';
 import { DockStorage } from '../protocol/persistence.js';
 import { AutoTimer } from './timer.js';
@@ -20,14 +20,39 @@ import { SessionController, type Scheduler } from './controller.js';
 import { mountLiveView, type LiveViewHandle } from './views/live.js';
 import { mountSetupView, type SetupViewHandle } from './views/setup.js';
 import { mountPresetsView, type PresetsViewHandle } from './views/presets.js';
-import { mountDiagnosticsView, type DiagnosticsViewHandle } from './diagnostics.js';
+import {
+  mountDiagnosticsView,
+  type DiagnosticsViewHandle,
+  overlaySourceNames,
+  getOverlayScan,
+  onOverlayScanChange,
+} from './diagnostics.js';
+import { LiveStatusTracker, liveSafetyArmed } from './live-status.js';
 import type { SessionConfig } from '../engine/counter.js';
 import type { StyleConfig, AnimationConfig } from '../engine/types.js';
 import { DEFAULT_STYLE } from '../shared/default-style.js';
 import { CONNECTION_GRACE_MS } from './connection-grace.js';
 import { installClipboardKeyboardHandler } from './clipboard-keys.js';
+import { installHotkeyBridge } from './hotkey-bridge.js';
 
-const EVENT_SUBSCRIPTIONS = 9; // General | Inputs
+// Task 3.2 — General | Inputs | Ui | InputActiveStateChanged |
+// InputShowStateChanged (394249). `Ui` is needed for StudioModeStateChanged
+// (the LIVE-status tracker's passive studioMode signal); the two
+// Input*StateChanged bits are the ws layer's own push events. Composed from
+// EventSub's named bits (src/protocol/obsws-client.ts), not a magic number,
+// so a future addition/removal of a subscribed event category is visible at
+// the call site instead of silently baked into an opaque integer.
+const EVENT_SUBSCRIPTIONS =
+  EventSub.General | EventSub.Inputs | EventSub.Ui | EventSub.InputActiveStateChanged | EventSub.InputShowStateChanged;
+// Task 3.2 — how often main.ts re-derives the mapped overlay input names
+// (diagnostics.ts's overlaySourceNames()) and hands them to the tracker, on
+// top of the identify-triggered refresh below. Overridable via
+// `?livePollMs=`/`?liveFreshnessMs=` (see those params below) only insofar
+// as those seams also shrink the TRACKER's own poll/freshness windows for
+// Playwright — this names-refresh interval itself is not test-seamed since
+// no mandatory test depends on shrinking it specifically (the identify-time
+// refresh already covers every Playwright scenario this task needs).
+const OVERLAY_NAMES_POLL_MS = 30_000;
 // Fix round 1 (Task 2.5 review): banner-ws is a continuous "not connected"
 // monitor, not a one-shot first-run check — a connection that drops well
 // after boot (server restarted, network hiccup) must surface it too, not
@@ -54,6 +79,12 @@ const DEV_DEFAULT_STYLE: StyleConfig = DEFAULT_STYLE;
 // localStorage-less recovery (live-safety:F2) — and short enough that an
 // OBS-down boot still puts the operator's session on screen promptly.
 const IDENTIFY_WAIT_MS = 2500;
+
+// How long the dock waits after an overlay's 'hello' before re-sending the
+// current state. One overlay says hello twice (on load, then again once its
+// own websocket identifies) and several can reload together, so a short
+// debounce answers them all with one broadcast.
+const HELLO_REBROADCAST_DEBOUNCE_MS = 250;
 
 class RealScheduler implements Scheduler {
   schedule(ms: number, fn: () => void): unknown {
@@ -225,6 +256,21 @@ function main(): void {
   // see diagnostics.ts's own `refreshMs` option doc comment.
   const diagRefreshMsParam = params.get('diagRefreshMs');
   const diagRefreshMsOverride = diagRefreshMsParam !== null ? Number(diagRefreshMsParam) : undefined;
+  // Test seam (Task 3.1): lets Playwright shrink the hotkeys row's 90s
+  // "silent since" threshold instead of waiting out the real window — same
+  // reasoning as `overlaySilenceMs` above, for the hotkey bridge's own
+  // staleness check (see diagnostics.ts's `hotkeyStaleMs` option doc comment).
+  const hotkeyStaleMsParam = params.get('hotkeyStaleMs');
+  const hotkeyStaleMsOverride = hotkeyStaleMsParam !== null ? Number(hotkeyStaleMsParam) : undefined;
+  // Test seam (Task 3.2): lets Playwright shrink the LIVE-status tracker's
+  // GetSourceActive re-poll interval / relay-freshness window instead of
+  // waiting out the real 30s/10s defaults — same pattern as every other
+  // `?xMs=` seam in this file (see live-status.ts's own `pollMs`/
+  // `freshnessMs` option doc comments).
+  const livePollMsParam = params.get('livePollMs');
+  const livePollMsOverride = livePollMsParam !== null ? Number(livePollMsParam) : undefined;
+  const liveFreshnessMsParam = params.get('liveFreshnessMs');
+  const liveFreshnessMsOverride = liveFreshnessMsParam !== null ? Number(liveFreshnessMsParam) : undefined;
 
   // loadSettings() only ever touches localStorage — reading it before a
   // client exists (to learn what port/password to build the client with) is
@@ -244,6 +290,40 @@ function main(): void {
   // onActivate callback); boot() only assigns it.
   let wsBannerPoll: ReturnType<typeof setInterval> | null = null;
   let disconnectedSince: number | null = null;
+  // Task 3.1 — per-boot hotkey-bridge subscription (installHotkeyBridge's own
+  // teardown), and the "last time ANY valid bridge payload (including a
+  // `hello` heartbeat) arrived" timestamp Diagnostics' hotkeys row reads via
+  // the `bridgeSeenAt` option below. Deliberately NOT reset to null on a
+  // settings-save reconnect: the Lua script keeps sending `hello` every 30s
+  // regardless of the dock's OWN websocket connection lifecycle, and a
+  // reconnect that lands well within that window should not make a genuinely
+  // live bridge look freshly "never seen" again.
+  let bridgeTeardown: (() => void) | null = null;
+  let bridgeLastSeenAt: number | null = null;
+  // Per-boot 'hello' listener and its pending debounce (see the wiring next
+  // to the controller in boot()).
+  let helloTeardown: (() => void) | null = null;
+  let helloRebroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  // Task 3.2 — per-boot LIVE-status tracker (mirrors bridgeTeardown's own
+  // per-boot lifecycle immediately above: constructed after `bus`, disposed
+  // at the top of the NEXT boot() call before it's reassigned) and the
+  // periodic "re-derive the overlay's mapped input names" poll that keeps it
+  // current across an operator adding/removing/renaming a Browser Source
+  // mid-session, on top of the identify-triggered refresh.
+  let liveStatus: LiveStatusTracker | null = null;
+  let overlayNamesPoll: ReturnType<typeof setInterval> | null = null;
+  // Task 3.0 (carry-forward fix wave) — true for the whole span of
+  // `onResetAll` (below), including the awaited `resetPersistentMirror()`
+  // round trip — which can take seconds on a slow/unreachable OBS — during
+  // which the OLD, not-yet-torn-down Diagnostics view (boot() only rebuilds
+  // it AFTER that await resolves) is still fully interactive. Declared here,
+  // outside boot(), so it survives the reconnect boot() calls at the end of
+  // BOTH onSaveSettings and onResetAll themselves — a settings-save attempted
+  // mid-reset used to write a fresh `lc.settings.v1` (and kick off its OWN
+  // reconnect) that could land either before or after clearAllLocal()/
+  // resetPersistentMirror(), racing the reset's own final boot() with no
+  // guarantee which "everything cleared" the operator actually ended up with.
+  let resetInFlight = false;
 
   function showBannerWs(text: string): void {
     shell.bannerWs.textContent = text;
@@ -287,6 +367,36 @@ function main(): void {
       clearInterval(wsBannerPoll);
       wsBannerPoll = null;
     }
+    if (overlayNamesPoll !== null) {
+      clearInterval(overlayNamesPoll);
+      overlayNamesPoll = null;
+    }
+
+    // Task 3.1 — the bridge subscribes to THIS boot's `client.onEvent` and
+    // dispatches through THIS boot's `controller`; both are about to be
+    // torn down/replaced below, so the subscription must go first (same
+    // reasoning as controller.dispose()/bus.destroy()/client.close() just
+    // beneath it).
+    if (bridgeTeardown) {
+      bridgeTeardown();
+      bridgeTeardown = null;
+    }
+    // Task 3.2 — same reasoning: the tracker subscribes THIS boot's
+    // `client`/`bus`, both about to be torn down/replaced below.
+    if (liveStatus) {
+      liveStatus.dispose();
+      liveStatus = null;
+    }
+    // Same again: the hello listener sits on THIS boot's bus, and a pending
+    // debounce would call THIS boot's controller.
+    if (helloTeardown) {
+      helloTeardown();
+      helloTeardown = null;
+    }
+    if (helloRebroadcastTimer !== null) {
+      clearTimeout(helloRebroadcastTimer);
+      helloRebroadcastTimer = null;
+    }
 
     // Fix round 1 (Task 2.5 review, Critical 1): tear down the PREVIOUS
     // stack, if any, before building a new one. `controller`/`client` are
@@ -313,9 +423,92 @@ function main(): void {
     });
     storage = new DockStorage(window.localStorage, client, onWriteError);
     bus = new Bus(client, 'dock');
+
+    // Task 3.2 — constructed right after Bus, before any view mounts (this
+    // task's brief: the Live view's chip needs a real tracker instance at
+    // its very first render, not one wired in after the fact).
+    liveStatus = new LiveStatusTracker({
+      client,
+      bus,
+      ...(livePollMsOverride !== undefined ? { pollMs: livePollMsOverride } : {}),
+      ...(liveFreshnessMsOverride !== undefined ? { freshnessMs: liveFreshnessMsOverride } : {}),
+    });
+    // Captured immediately (same pattern as `bootedClient` further down):
+    // the outer `liveStatus` binding is reassigned by a later settings-save
+    // reconnect, and every closure below (the identify listener, the names
+    // poll, mountLiveView's own options) must always act against THIS boot's
+    // instance regardless of what happens to the outer variable later.
+    const bootedLiveStatus = liveStatus;
+    // Feeds the tracker's mapped overlay input names from the SAME URL-match
+    // scan diagnostics.ts's add-overlay flow uses — on every (re)identify
+    // (truthful from the first moment the chip can know anything) and every
+    // OVERLAY_NAMES_POLL_MS thereafter (an operator adding/renaming/removing
+    // the Browser Source mid-session), skipped entirely while unidentified
+    // since nothing could resolve then anyway.
+    // Gate fix wave (M-1) — `overlaySourceNames` now returns `null` on a
+    // transient request failure, distinct from a genuine `[]` ("really no
+    // matching source"). `null` is skipped entirely here: the tracker keeps
+    // whatever names it already knew rather than having them wiped for up to
+    // this poll's own interval by a one-off dropped request.
+    client.on('identified', () => {
+      void overlaySourceNames(client).then((names) => {
+        if (names !== null) bootedLiveStatus.setSourceNames(names);
+      });
+    });
+    overlayNamesPoll = setInterval(() => {
+      if (client.state !== 'identified') return;
+      void overlaySourceNames(client).then((names) => {
+        if (names !== null) bootedLiveStatus.setSourceNames(names);
+      });
+    }, OVERLAY_NAMES_POLL_MS);
+
     const timer = new AutoTimer(() => performance.now());
     const scheduler = new RealScheduler();
     controller = new SessionController({ storage, bus, timer, scheduler });
+
+    // An overlay says 'hello' when it loads or reloads (OBS Refresh,
+    // Diagnostics' Fix) and draws nothing until state arrives, which used to
+    // mean waiting for the next 2s heartbeat. Answer the hello with the
+    // current state instead. Only 'hello': the 2s 'overlay-status' ping from
+    // every overlay would otherwise double the broadcast rate for nothing.
+    const helloController = controller;
+    helloTeardown = bus.onMessage((m) => {
+      if (m.kind !== 'hello') return;
+      if (helloRebroadcastTimer !== null) clearTimeout(helloRebroadcastTimer);
+      helloRebroadcastTimer = setTimeout(() => {
+        helloRebroadcastTimer = null;
+        helloController.rebroadcast();
+      }, HELLO_REBROADCAST_DEBOUNCE_MS);
+    });
+
+    // Task 3.1 — installed fresh against THIS boot's client/controller (per-
+    // boot, per installHotkeyBridge's own contract); torn down at the top of
+    // this same function on the next boot() call, above.
+    bridgeTeardown = installHotkeyBridge({
+      client,
+      getSession: () => controller.getState().session,
+      // Task 3.3 (AC 14) — PRD ruling: a bridge/hotkey Show NEVER opens the
+      // live-safety confirm (installHotkeyBridge dispatches straight through
+      // this closure, never through live.ts, so there is no modal to
+      // structurally intercept it with) — but it still leaves an audit trail.
+      // hotkey-bridge.ts's own 'showHide' handler has already decided
+      // showOverlay vs. hideOverlay by the time it calls this (from the
+      // CURRENT session's overlayVisible) — checking the command's own type
+      // is exactly "the button would SHOW", the same condition live.ts's own
+      // guard applies, with Hide correctly left alone. `bootedLiveStatus` is
+      // THIS boot's tracker (captured just above), not the outer `liveStatus`
+      // binding a later reconnect reassigns.
+      dispatch: (cmd) => {
+        if (cmd.type === 'showOverlay' && liveSafetyArmed(bootedLiveStatus.snapshot())) {
+          storage.log('bridge-show-while-live');
+        }
+        return controller.dispatch(cmd);
+      },
+      log: (event, detail) => storage.log(event, detail),
+      onBridgeSeen: () => {
+        bridgeLastSeenAt = Date.now();
+      },
+    });
 
     hideBannerWs();
     disconnectedSince = null;
@@ -351,9 +544,19 @@ function main(): void {
     // reconnect, and both callers are torn down and remounted by that same
     // boot() call anyway).
     const storageForSave = storage;
-    const onSaveSettings = (port: number, password: string): void => {
+    // Task 3.0 (carry-forward fix wave) — returns a refusal NOTE (never
+    // thrown, never surfaced any other way) instead of saving, whenever a
+    // reset is in flight; `null` on the normal, accepted path. Only
+    // Diagnostics' own Settings form actually reads the return value and
+    // shows it (see diagnostics.ts's `settings-save` handler) — Live's
+    // Connect card (the other of this "one implementation, two entry
+    // points" callback's two callers) ignores it, same as it always ignored
+    // this function's `void` return before.
+    const onSaveSettings = (port: number, password: string): string | null => {
+      if (resetInFlight) return 'Reset in progress — try again in a moment';
       storageForSave.saveSettings({ wsPort: port, wsPassword: password, schemaVersion: 1 });
       boot(port, password);
+      return null;
     };
     // Task 2.14, hardened per fix-wave review (Important 1) — captures THIS
     // boot()'s controller/storage the same way `storageForSave` does above,
@@ -363,39 +566,50 @@ function main(): void {
     const controllerForReset = controller;
     const storageForReset = storage;
     const onResetAll = async (): Promise<void> => {
-      // Stop the OLD controller/timer/heartbeat FIRST — before touching
-      // storage at all. dispose() is idempotent (this same instance gets
-      // dispose()'d again, harmlessly, by boot()'s own teardown block below
-      // once it runs) and, per its own contract, makes dispatch() a
-      // PERMANENT no-op from this line on. Without this ordering, an
-      // automatic session's still-running AutoTimer could dispatch a 'tick'
-      // in the window this function awaits below (which can be SECONDS
-      // wide — resetPersistentMirror() waits on a real websocket round
-      // trip) — that tick calls storage.saveSession() (and mirrorSet()),
-      // writing a fresh session right back after clearAllLocal() below had
-      // already removed it. The operator would be told "everything
-      // cleared" and then find a resurrected session on the next boot.
-      controllerForReset.dispose();
+      // Task 3.0 (carry-forward fix wave) — set BEFORE anything else runs,
+      // cleared in `finally` regardless of how this settles (resetPersistent
+      // Mirror() never rejects, but this is cheap insurance against ever
+      // leaving a future settings-save permanently refused). See
+      // `resetInFlight`'s own doc comment (declared outside boot()) for why a
+      // guard is needed here at all.
+      resetInFlight = true;
+      try {
+        // Stop the OLD controller/timer/heartbeat FIRST — before touching
+        // storage at all. dispose() is idempotent (this same instance gets
+        // dispose()'d again, harmlessly, by boot()'s own teardown block below
+        // once it runs) and, per its own contract, makes dispatch() a
+        // PERMANENT no-op from this line on. Without this ordering, an
+        // automatic session's still-running AutoTimer could dispatch a 'tick'
+        // in the window this function awaits below (which can be SECONDS
+        // wide — resetPersistentMirror() waits on a real websocket round
+        // trip) — that tick calls storage.saveSession() (and mirrorSet()),
+        // writing a fresh session right back after clearAllLocal() below had
+        // already removed it. The operator would be told "everything
+        // cleared" and then find a resurrected session on the next boot.
+        controllerForReset.dispose();
 
-      // Local half — routes through the injected storage seam (never a
-      // bare `window.localStorage` reach); failures are caught and reported
-      // via the existing onWriteError -> banner-ws path, never thrown here.
-      storageForReset.clearAllLocal();
+        // Local half — routes through the injected storage seam (never a
+        // bare `window.localStorage` reach); failures are caught and reported
+        // via the existing onWriteError -> banner-ws path, never thrown here.
+        storageForReset.clearAllLocal();
 
-      // Mirror half — still needs the CURRENT (not yet closed) client
-      // connection, so this runs before boot()'s own teardown below closes
-      // it. Awaited: a still-in-flight clear could otherwise lose a race
-      // against the fresh boot's own GetPersistentData read.
-      await storageForReset.resetPersistentMirror();
+        // Mirror half — still needs the CURRENT (not yet closed) client
+        // connection, so this runs before boot()'s own teardown below closes
+        // it. Awaited: a still-in-flight clear could otherwise lose a race
+        // against the fresh boot's own GetPersistentData read.
+        await storageForReset.resetPersistentMirror();
 
-      // `bootStorage.loadSettings()` now finds nothing on disk (just
-      // cleared above) and returns its own built-in defaults — the same
-      // path a genuinely fresh install takes. Never `location.reload()`
-      // (brief): Playwright cannot drive a real page navigation from
-      // inside the page that is reloading, and a reload would also discard
-      // the one-time `justReset` flag below.
-      const freshSettings = bootStorage.loadSettings();
-      boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
+        // `bootStorage.loadSettings()` now finds nothing on disk (just
+        // cleared above) and returns its own built-in defaults — the same
+        // path a genuinely fresh install takes. Never `location.reload()`
+        // (brief): Playwright cannot drive a real page navigation from
+        // inside the page that is reloading, and a reload would also discard
+        // the one-time `justReset` flag below.
+        const freshSettings = bootStorage.loadSettings();
+        boot(freshSettings.wsPort, freshSettings.wsPassword, { justReset: true });
+      } finally {
+        resetInFlight = false;
+      }
     };
     const connectSettings = { wsPort, wsPassword, schemaVersion: 1 as const };
 
@@ -413,6 +627,7 @@ function main(): void {
       client: bootedClient,
       initialSettings: connectSettings,
       onSaveSettings,
+      liveStatus: bootedLiveStatus,
     };
     liveHandle = mountLiveView(shell.panes.live, controller, bus, liveOpts);
 
@@ -420,6 +635,13 @@ function main(): void {
       controller,
       storage,
       onSessionStarted: () => tabs.activate('live'),
+      // OVERLAY-2: the canvas size Diagnostics' overlay scan already reads,
+      // for the preview's "cut off on air" note.
+      canvasSize: () => {
+        const scan = getOverlayScan(bootedClient);
+        return scan === null || scan.status === 'unknown' ? null : { width: scan.baseWidth, height: scan.baseHeight };
+      },
+      onCanvasSizeChange: onOverlayScanChange,
     });
     presetsHandle = mountPresetsView(shell.panes.presets, {
       controller,
@@ -438,6 +660,7 @@ function main(): void {
     const diagnosticsOpts = {
       ...(overlaySilenceMsOverride !== undefined ? { overlaySilenceMs: overlaySilenceMsOverride } : {}),
       ...(diagRefreshMsOverride !== undefined ? { refreshMs: diagRefreshMsOverride } : {}),
+      ...(hotkeyStaleMsOverride !== undefined ? { hotkeyStaleMs: hotkeyStaleMsOverride } : {}),
       ...(bootOpts.justReset ? { justReset: true } : {}),
     };
     diagnosticsHandle = mountDiagnosticsView(shell.panes.diagnostics, {
@@ -447,6 +670,11 @@ function main(): void {
       initialSettings: connectSettings,
       onSaveSettings,
       onResetAll,
+      // Task 3.1 — reads THIS boot's `bridgeLastSeenAt` closure on every poll
+      // tick; deliberately a live getter, not a snapshotted value, so the
+      // row's "seen ≤/> 90s ago" check is always evaluated against the
+      // CURRENT time when Diagnostics reads it, not whatever it was at mount.
+      bridgeSeenAt: () => bridgeLastSeenAt,
       ...diagnosticsOpts,
     });
 

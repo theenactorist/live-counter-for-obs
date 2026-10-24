@@ -20,7 +20,7 @@
 - Every bus command carries a `nonce`; the dock deduplicates (PRD §8.12).
 - All operator text HTML-escaped before rendering (PRD §8.8).
 - TDD throughout: failing test → minimal code → pass → commit. Frequent small commits.
-- The repo is `/Users/olumide/Documents/Vibe coding/OBS Plugin` (git-initialized in Phase 0, Task 0.1).
+- The repo is `/Users/olumide/Documents/Vibe coding/OBS Plugins/Countdown Plugin` (git-initialized in Phase 0, Task 0.1).
 
 ## Repository layout (locked)
 
@@ -121,7 +121,7 @@ Storage keys: `lc.session.v1`, `lc.presets.v1`, `lc.log.v1` (localStorage) and s
 
 ### Task 0.2: Operator-side OBS setup (user, ~3 min — mirrors the real setup flow)
 - [ ] Tools → WebSocket Server Settings → **Enable WebSocket server**; temporarily **uncheck Enable Authentication**; OK
-- [ ] Docks → Custom Browser Docks → name `Counter Probe`, URL `file:///Users/olumide/Documents/Vibe%20coding/OBS%20Plugin/feasibility/counter-test.html?role=dock`
+- [ ] Docks → Custom Browser Docks → name `Counter Probe`, URL `file:///Users/olumide/Documents/Vibe%20coding/OBS%20Plugins/Countdown%20Plugin/feasibility/counter-test.html?role=dock`
 - [ ] Tools → Scripts → **+** → `feasibility/hotkey-bridge-test.lua`
 - [ ] Leave OBS running; confirm "done"
 
