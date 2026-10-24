@@ -578,9 +578,9 @@ main() {
   finish
 
   say ""
-  say "In OBS, the Live Counter panel opens on the right and connects by itself."
+  say "In OBS, the Live Counter panel opens and connects by itself."
   say "Keys: Ctrl+Option with = adds one, - takes one away, Z undoes, P pauses, H shows or hides."
-  say "To show the counter, click Add overlay in the panel and choose a scene."
+  say "To show the counter, pick your scene in OBS, then click Add overlay to my scene in the panel."
   say "Done. Open OBS."
 }
 
