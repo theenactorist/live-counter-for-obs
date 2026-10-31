@@ -310,6 +310,7 @@ setup_websocket() {
   case "$outcome" in
     created) say "Turned on the OBS WebSocket server with a new password." ;;
     generated) say "Turned on the OBS WebSocket server and made a password for it." ;;
+    already-on) say "The OBS WebSocket server is on (password kept)." ;;
     *) say "Turned on the OBS WebSocket server (password kept)." ;;
   esac
   say "Connected the Live Counter panel to OBS."
@@ -409,7 +410,8 @@ function findDocks(lines) {
 JXA
 
   # argv: config.json path, connection file path, revision. Prints created,
-  # generated or kept. The password stays inside this step.
+  # generated, already-on (server was on) or kept. The password stays inside
+  # this step.
   cat "$WORK/common.js" - >"$WORK/websocket.js" <<'JXA'
 function newPassword() {
   var out = '';
@@ -428,13 +430,14 @@ function run(argv) {
     outcome = 'created';
   }
   var before = JSON.stringify(cfg);
+  if (outcome === 'kept' && cfg.server_enabled === true) outcome = 'already-on';
   cfg.server_enabled = true;
   cfg.auth_required = true;
   var port = cfg.server_port;
   if (typeof port !== 'number' || Math.floor(port) !== port || port < 1 || port > 65535) cfg.server_port = 4455;
   if (typeof cfg.server_password !== 'string' || cfg.server_password === '') {
     cfg.server_password = newPassword();
-    if (outcome === 'kept') outcome = 'generated';
+    if (outcome === 'kept' || outcome === 'already-on') outcome = 'generated';
   }
   if (outcome === 'created' || JSON.stringify(cfg) !== before) writeText(path, JSON.stringify(cfg, null, 2) + '\n');
   writeText(connPath, 'window.LIVE_COUNTER_CONFIG = { port: ' + cfg.server_port + ', password: ' +

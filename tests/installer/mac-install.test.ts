@@ -190,6 +190,24 @@ describe.skipIf(process.platform !== 'darwin')('Mac installer (install.sh)', () 
     expect(statSync(file).mode & 0o777).toBe(0o644);
   });
 
+  it('says it turned the WebSocket server on only when it was off', async () => {
+    const f = setup();
+    const r = await run(installSh, f);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('Turned on the OBS WebSocket server (password kept).');
+    expect(r.out).not.toContain('The OBS WebSocket server is on');
+  });
+
+  it('says the WebSocket server is on when it already was', async () => {
+    const f = setup({
+      websocket: { auth_required: true, server_enabled: true, server_password: 'Abc123def456GhiJ', server_port: 4455 },
+    });
+    const r = await run(installSh, f);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('The OBS WebSocket server is on (password kept).');
+    expect(r.out).not.toContain('Turned on');
+  });
+
   it('generates a 16-character password when it is empty, with auth on', async () => {
     const f = setup({
       websocket: {
