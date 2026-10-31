@@ -98,7 +98,23 @@ export function fakeObsExe(version: string): string {
 export function powershell(command: string): string {
   return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
     encoding: 'utf8',
+    env: baseEnv(),
   });
+}
+
+/**
+ * The real environment without LC_* and without PSModulePath: a test runner
+ * started from PowerShell 7 (GitHub's default shell) passes down 7's module
+ * folders, and 5.1 then fails to load Microsoft.PowerShell.Security
+ * (Get-Acl). An operator's PowerShell 5.1 window never has that.
+ */
+function baseEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    const key = k.toUpperCase();
+    if (!key.startsWith('LC_') && key !== 'PSMODULEPATH') env[k] = v;
+  }
+  return env;
 }
 
 export function makeFixture(opts: FixtureOptions = {}): Fixture {
@@ -156,7 +172,9 @@ export function makeFixture(opts: FixtureOptions = {}): Fixture {
     obsExe,
     zip,
     installDir,
-    dockUrl: pathToFileURL(path.join(installDir, 'dock.html')).href,
+    // .NET's Uri, which install.ps1 uses, keeps ~ (GitHub's temp folder is
+    // C:\Users\RUNNER~1\...) where Node writes %7E. Both open the same file.
+    dockUrl: pathToFileURL(path.join(installDir, 'dock.html')).href.replace(/%7E/gi, '~'),
     luaPath: path.join(installDir, LUA).replace(/\\/g, '/'),
     cleanup: () => rmSync(tmp, { recursive: true, force: true }),
   };
@@ -184,10 +202,8 @@ export interface RunResult {
 
 /** The environment every run gets: the real one plus the test overrides, all LC_* set explicitly. */
 function runEnv(fx: Fixture, extraEnv: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) if (!k.toUpperCase().startsWith('LC_')) env[k] = v;
   return {
-    ...env,
+    ...baseEnv(),
     LC_OBS_CONFIG_DIR: fx.cfg,
     LC_OBS_EXE: fx.obsExe,
     LC_OBS_PROCESS: 'lc-test-no-such-process',
