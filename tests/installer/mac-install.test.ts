@@ -313,6 +313,30 @@ describe.skipIf(process.platform !== 'darwin')('Mac installer (install.sh)', () 
     expect(second.out.trim().split('\n').at(-1)).toBe('Done. Open OBS.');
   });
 
+  // T4: a run that changed nothing says so instead of "Added" (same lines as install.ps1).
+  it('says Added on the first run and that everything is in place on the second', async () => {
+    const f = setup({ collections: { Untitled: collection('Untitled'), Second: collection('Second') } });
+    const first = await run(installSh, f);
+    expect(first.code, first.out).toBe(0);
+    expect(first.out).toContain('Added the hotkey script to 2 scene collections.');
+    expect(first.out).toContain('Added the Live Counter panel to OBS.');
+    const second = await run(installSh, f);
+    expect(second.code, second.out).toBe(0);
+    expect(second.out).toContain('The hotkey script is in every scene collection.');
+    expect(second.out).toContain('The Live Counter panel is in OBS.');
+    expect(second.out).not.toContain('Added');
+  });
+
+  it('counts only the collections it changed', async () => {
+    const f = setup({ collections: { Untitled: collection('Untitled'), Second: collection('Second') } });
+    expect((await run(installSh, f)).code).toBe(0);
+    writeFileSync(path.join(f.cfg, 'basic/scenes/Third.json'), JSON.stringify(collection('Third'), null, 4));
+    const r = await run(installSh, f);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain('Added the hotkey script to 1 scene collection.');
+    expect(r.out).toContain('The Live Counter panel is in OBS.');
+  });
+
   it('updates the files in place on a second run with a newer download', async () => {
     const f = setup();
     expect((await run(installSh, f)).code).toBe(0);
