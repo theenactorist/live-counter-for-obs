@@ -204,6 +204,30 @@
         font-size: 0.85rem;
         margin: 0.35rem 0;
       }
+      /* T4a: a note that needs the operator to act (old copy, settings
+         mismatch, eye off, more than one source) uses the dock's warning
+         colour, the same #ffd699 as .banner-warn and a 'warn' checklist row,
+         plus a small warning mark, so it never reads as helper text. The mark
+         is a CSS mask, not a character, so it looks the same on Mac and
+         Windows and stays out of textContent and Copy diagnostics. */
+      .diag-note-warn {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.4em;
+        color: #ffd699;
+      }
+      .diag-note-warn::before {
+        content: '';
+        flex: none;
+        width: 1em;
+        height: 1em;
+        margin-top: 0.15em;
+        background-color: currentColor;
+        -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 1 15.5 14.5H.5zM7.1 5.5h1.8v4.6H7.1zm0 5.9h1.8v1.7H7.1z'/%3E%3C/svg%3E")
+          center / contain no-repeat;
+        mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 1 15.5 14.5H.5zM7.1 5.5h1.8v4.6H7.1zm0 5.9h1.8v1.7H7.1z'/%3E%3C/svg%3E")
+          center / contain no-repeat;
+      }
       .current-value {
         font-size: clamp(2.5rem, 14vw, 5rem);
         font-weight: 700;

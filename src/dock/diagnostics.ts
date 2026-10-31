@@ -1169,7 +1169,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   // T2: its own slot, like the three below, because it can be true with
   // any of them, and it must never be folded into the "Overlay not rendering"
   // banner or the scan-failed error, which mean different things.
-  const addOverlayOldCopy = el('div', { 'data-testid': 'add-overlay-old-copy', class: 'diag-note' }, OVERLAY_OLD_COPY_TEXT);
+  const addOverlayOldCopy = el('div', { 'data-testid': 'add-overlay-old-copy', class: 'diag-note diag-note-warn' }, OVERLAY_OLD_COPY_TEXT);
   addOverlayOldCopy.hidden = true;
   root.appendChild(addOverlayOldCopy);
   // Task 3.4 (AC 29/30) — three more note slots, each with its own stable
@@ -1179,13 +1179,13 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
   // warning can all be true AT THE SAME TIME as each other (and independently
   // of `note`), so folding them into one string would either lose one or
   // force fragile substring assertions in tests.
-  const addOverlaySettingsIssues = el('div', { 'data-testid': 'add-overlay-settings-issues', class: 'diag-note' });
+  const addOverlaySettingsIssues = el('div', { 'data-testid': 'add-overlay-settings-issues', class: 'diag-note diag-note-warn' });
   addOverlaySettingsIssues.hidden = true;
   root.appendChild(addOverlaySettingsIssues);
-  const addOverlayEyeOff = el('div', { 'data-testid': 'add-overlay-eye-off', class: 'diag-note' }, OVERLAY_EYE_OFF_TEXT);
+  const addOverlayEyeOff = el('div', { 'data-testid': 'add-overlay-eye-off', class: 'diag-note diag-note-warn' }, OVERLAY_EYE_OFF_TEXT);
   addOverlayEyeOff.hidden = true;
   root.appendChild(addOverlayEyeOff);
-  const addOverlayMultiSource = el('div', { 'data-testid': 'add-overlay-multi-source', class: 'diag-note' });
+  const addOverlayMultiSource = el('div', { 'data-testid': 'add-overlay-multi-source', class: 'diag-note diag-note-warn' });
   addOverlayMultiSource.hidden = true;
   root.appendChild(addOverlayMultiSource);
   root.appendChild(el('div', { 'data-testid': 'add-overlay-url-note', class: 'diag-note' }, ADD_OVERLAY_URL_NOTE));

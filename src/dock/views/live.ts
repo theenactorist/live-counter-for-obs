@@ -584,7 +584,7 @@ export function mountLiveView(
       // T2: mirrors Diagnostics' `add-overlay-old-copy` slot, from the same
       // shared state, with the Fix button above as the way out.
       if (state.oldCopy) {
-        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-old-copy', class: 'diag-note' }, OVERLAY_OLD_COPY_TEXT));
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-old-copy', class: 'diag-note diag-note-warn' }, OVERLAY_OLD_COPY_TEXT));
       }
       // Task 3.4 (AC 29/30) — mirrors Diagnostics' own three note slots
       // (settings-issues/eye-off/multi-source), driven by the SAME shared
@@ -594,17 +594,17 @@ export function mountLiveView(
         wrap.appendChild(
           el(
             'div',
-            { 'data-testid': 'live-add-overlay-settings-issues', class: 'diag-note' },
+            { 'data-testid': 'live-add-overlay-settings-issues', class: 'diag-note diag-note-warn' },
             state.settingsIssues.join(' · '),
           ),
         );
       }
       if (state.eyeOff) {
-        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-eye-off', class: 'diag-note' }, OVERLAY_EYE_OFF_TEXT));
+        wrap.appendChild(el('div', { 'data-testid': 'live-add-overlay-eye-off', class: 'diag-note diag-note-warn' }, OVERLAY_EYE_OFF_TEXT));
       }
       if (state.multiSourceWarning !== null) {
         wrap.appendChild(
-          el('div', { 'data-testid': 'live-add-overlay-multi-source', class: 'diag-note' }, state.multiSourceWarning),
+          el('div', { 'data-testid': 'live-add-overlay-multi-source', class: 'diag-note diag-note-warn' }, state.multiSourceWarning),
         );
       }
       if (state.retry) {

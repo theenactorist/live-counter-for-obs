@@ -2022,3 +2022,66 @@ test.describe('overlay address check (T2)', () => {
     }
   });
 });
+
+// T4a: notes that need the operator to act read as warnings (the dock's
+// warning colour and a mark), in Diagnostics and on the Live tab; helper
+// notes stay neutral grey.
+test.describe('warning notes (T4a)', () => {
+  const WARN_COLOR = 'rgb(255, 214, 153)'; // #ffd699, as .banner-warn
+  const HELPER_COLOR = 'rgb(160, 160, 160)'; // #a0a0a0, .diag-note
+
+  test('old copy, settings, eye off and multi-source notes use the warning style; the URL note does not', async ({
+    page,
+  }) => {
+    const mock = await startMockObs({
+      inputs: [
+        {
+          inputName: 'Live Counter Overlay',
+          inputKind: 'browser_source',
+          inputSettings: { url: OLD_COPY_OVERLAY_URL, width: 1280, height: 720 },
+          sceneItemEnabled: false,
+        },
+        {
+          inputName: 'Counter (copy)',
+          inputKind: 'browser_source',
+          inputSettings: { url: `${OVERLAY_SOURCE_URL}?port=4455`, width: 1920, height: 1080 },
+          scenes: ['Other'],
+        },
+      ],
+    });
+    try {
+      await openDock(page, { port: mock.port, devhook: false });
+      const warnIds = ['old-copy', 'settings-issues', 'eye-off', 'multi-source'];
+
+      await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
+      for (const id of warnIds) {
+        const note = page.getByTestId(`live-add-overlay-${id}`);
+        await expect(note).toBeVisible();
+        await expect(note).toHaveClass(/\bdiag-note-warn\b/);
+        await expect(note).toHaveCSS('color', WARN_COLOR);
+      }
+
+      await page.getByTestId('tab-diagnostics').click();
+      await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings');
+      for (const id of warnIds) {
+        const note = page.getByTestId(`add-overlay-${id}`);
+        await expect(note).toBeVisible();
+        await expect(note).toHaveClass(/\bdiag-note-warn\b/);
+        await expect(note).toHaveCSS('color', WARN_COLOR);
+        // The mark is drawn, not typed: it never reaches the note's text.
+        const mark = await note.evaluate((n) => {
+          const before = getComputedStyle(n, '::before');
+          return before.maskImage || before.webkitMaskImage;
+        });
+        expect(mark).toContain('data:image/svg+xml');
+      }
+      await expect(page.getByTestId('add-overlay-old-copy')).toHaveText('The overlay points at an old copy of Live Counter.');
+
+      const urlNote = page.getByTestId('add-overlay-url-note');
+      await expect(urlNote).not.toHaveClass(/\bdiag-note-warn\b/);
+      await expect(urlNote).toHaveCSS('color', HELPER_COLOR);
+    } finally {
+      await mock.close();
+    }
+  });
+});
