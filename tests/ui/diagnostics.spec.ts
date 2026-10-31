@@ -419,7 +419,7 @@ test.describe('Diagnostics view', () => {
       // Task 3.1 — the Hotkeys line now mirrors its real state, same shape
       // as every other row; nothing has been sent this test, so it must read
       // 'neutral', never a false "ok".
-      expect(clipboardText).toContain('Hotkeys: neutral —');
+      expect(clipboardText).toContain('Hotkeys: neutral.');
       expect(clipboardText).not.toContain('Hotkeys: ok');
 
       // T2: no installer file here, so the settings count as typed.
@@ -1282,7 +1282,7 @@ test.describe('Diagnostics view', () => {
       // untouched install's own experience), Live shows the first-run
       // connect card instead of any session, and the preset list is empty.
       await expect(page.getByTestId('diag-reset-done')).toBeVisible();
-      await expect(page.getByTestId('diag-reset-done')).toHaveText('Everything cleared — the dock is back to first-run.');
+      await expect(page.getByTestId('diag-reset-done')).toHaveText('Everything cleared. The dock is back to first-run.');
 
       await page.getByTestId('tab-live').click();
       await expect(page.getByTestId('connect-card')).toBeVisible();
@@ -1585,7 +1585,7 @@ test.describe('Diagnostics view', () => {
 
       const error = page.getByTestId('diag-settings-error');
       await expect(error).toBeVisible();
-      await expect(error).toHaveText('Reset in progress — try again in a moment');
+      await expect(error).toHaveText('Reset in progress. Try again in a moment.');
 
       // Never wrote a fresh lc.settings.v1 during the reset.
       expect(await page.evaluate(() => window.localStorage.getItem('lc.settings.v1'))).toBeNull();
@@ -1625,8 +1625,8 @@ test.describe('Diagnostics view', () => {
 
       const issues = page.getByTestId('add-overlay-settings-issues');
       await expect(issues).toBeVisible();
-      await expect(issues).toContainText('width 1280 — expected 1920');
-      await expect(issues).toContainText('height 720 — expected 1080');
+      await expect(issues).toContainText('width 1280, expected 1920');
+      await expect(issues).toContainText('height 720, expected 1080');
       await expect(issues).toContainText('Shutdown source when not visible');
 
       // restart_when_active was never set (absent means false) — not named.
@@ -1636,8 +1636,8 @@ test.describe('Diagnostics view', () => {
       await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
       await page.getByTestId('diag-copy-log').click();
       const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
-      expect(clipboardText).toContain('width 1280 — expected 1920');
-      expect(clipboardText).toContain('height 720 — expected 1080');
+      expect(clipboardText).toContain('width 1280, expected 1920');
+      expect(clipboardText).toContain('height 720, expected 1080');
     } finally {
       await mock.close();
     }
@@ -1715,7 +1715,7 @@ test.describe('Diagnostics view', () => {
       await expect(page.getByTestId('add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
       const issues = page.getByTestId('add-overlay-settings-issues');
       await expect(issues).toBeVisible();
-      await expect(issues).toContainText('fps 15 — expected 30 or higher');
+      await expect(issues).toContainText('fps 15, expected 30 or higher');
     } finally {
       await mockLow.close();
     }
@@ -1758,7 +1758,7 @@ test.describe('Diagnostics view', () => {
     try {
       await openDock(page, { port: mock.port, devhook: false });
       await expect(page.getByTestId('live-add-overlay')).toHaveText('Fix overlay settings', { timeout: 5000 });
-      await expect(page.getByTestId('live-add-overlay-settings-issues')).toContainText('width 1280 — expected 1920');
+      await expect(page.getByTestId('live-add-overlay-settings-issues')).toContainText('width 1280, expected 1920');
     } finally {
       await mock.close();
     }
@@ -1893,7 +1893,7 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('add-overlay').click();
       const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
       await expect(fixConfirm).toBeVisible();
-      await expect(fixConfirm).toContainText('websocket password');
+      await expect(fixConfirm).toContainText('WebSocket password');
       await expect(fixConfirm).toContainText('password-free');
     } finally {
       await mockWithPw.close();
@@ -1916,7 +1916,7 @@ test.describe('Diagnostics view', () => {
       await page.getByTestId('add-overlay').click();
       const fixConfirm = page.getByTestId('add-overlay-fix-confirm');
       await expect(fixConfirm).toBeVisible();
-      await expect(fixConfirm).not.toContainText('websocket password');
+      await expect(fixConfirm).not.toContainText('WebSocket password');
     } finally {
       await mockClean.close();
     }

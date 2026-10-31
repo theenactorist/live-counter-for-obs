@@ -2169,8 +2169,8 @@ export function mountSetupView(container: HTMLElement, opts: MountSetupViewOptio
       // range/completion errors added above) nothing on screen said why. The
       // notice now names the next actual step.
       const notice = canUpdate()
-        ? "These settings aren't applied yet — click Update session."
-        : "These settings aren't applied yet — click Update session. Fix the highlighted field first.";
+        ? "These settings aren't applied yet. Click Update session."
+        : "These settings aren't applied yet. Click Update session. Fix the highlighted field first.";
       root.appendChild(el('div', { 'data-testid': 'setup-not-applied-notice', class: 'banner banner-warn' }, notice));
     }
 

@@ -254,7 +254,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       // doing nothing here would strand it. Surface a visible error AND a
       // readonly fallback textarea with the full JSON so a manual
       // select-all-copy still works.
-      ui.exportError = 'Copy failed — select the text below and copy it manually';
+      ui.exportError = 'Copy failed. Select the text below and copy it manually.';
       ui.exportFallbackText = json;
       render();
       return;
@@ -289,7 +289,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
     try {
       parsed = JSON.parse(ui.importText);
     } catch {
-      ui.importError = 'Could not parse — the pasted text is not valid JSON.';
+      ui.importError = 'Could not parse. The pasted text is not valid JSON.';
       render();
       return;
     }
@@ -302,7 +302,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
 
     const loadResult = engineLoadPresets(serializePresets(parsed.presets as Preset[]));
     if (!loadResult.ok) {
-      ui.importError = 'This export contains one or more invalid presets — nothing was imported.';
+      ui.importError = 'This export contains one or more invalid presets, so nothing was imported.';
       render();
       return;
     }
@@ -601,7 +601,7 @@ export function mountPresetsView(container: HTMLElement, opts: MountPresetsViewO
       const needle = ui.search.trim().toLowerCase();
       const filtered = ui.presets.filter((p) => p.title.toLowerCase().includes(needle));
       if (filtered.length === 0) {
-        root.appendChild(el('div', { 'data-testid': 'presets-empty' }, 'No presets yet — create one in Setup.'));
+        root.appendChild(el('div', { 'data-testid': 'presets-empty' }, 'No presets yet. Create one in Setup.'));
       } else {
         const list = el('div', { 'data-testid': 'presets-list' });
         for (const p of [...filtered].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {

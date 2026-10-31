@@ -612,8 +612,8 @@ test.describe('dock Live view', () => {
       await page.getByTestId('btn-show-hide').click(); // operator Hide -> overlayVisible false
       await expect(chip).toHaveText('HIDDEN');
       await expect(chip).toHaveAttribute('data-state', 'hidden');
-      await expect(chip).toHaveAttribute('data-detail', 'Source is live in Program — Show would be visible immediately');
-      await expect(chip).toHaveAttribute('title', 'Source is live in Program — Show would be visible immediately');
+      await expect(chip).toHaveAttribute('data-detail', 'Source is live in Program. Show would be visible immediately.');
+      await expect(chip).toHaveAttribute('title', 'Source is live in Program. Show would be visible immediately.');
     } finally {
       await mock.close();
     }
@@ -635,7 +635,7 @@ test.describe('dock Live view', () => {
       mock.setSourceActive(OVERLAY_INPUT_NAME, { active: false, showing: true });
       await expect(chip).toHaveText('SHOWING (PREVIEW)', { timeout: 3000 });
       await expect(chip).toHaveAttribute('data-state', 'showing-preview');
-      await expect(chip).toHaveAttribute('data-detail', 'Preview or projector only — not in Program');
+      await expect(chip).toHaveAttribute('data-detail', 'Preview or projector only, not in Program');
     } finally {
       await mock.close();
     }
@@ -1496,7 +1496,7 @@ test.describe('dock Live view', () => {
       await showHide.click(); // Show — armed, unacknowledged: must be intercepted
       await expect(confirm).toBeVisible();
       await expect(confirm).toContainText(
-        'The counter source is live in Program — this change is visible to your audience immediately.',
+        'The counter source is live in Program. This change is visible to your audience immediately.',
       );
       await expect(showHide).toHaveText('Show'); // not dispatched yet
 
@@ -1662,7 +1662,7 @@ test.describe('dock Live view', () => {
 
       await expect(confirm).toBeVisible();
       await expect(confirm).toContainText(
-        "Studio Mode is off and the counter's live state is unknown — this change may be visible immediately.",
+        "Studio Mode is off and the counter's live state is unknown. This change may be visible immediately.",
       );
       await expect(showHide).toHaveText('Show'); // not dispatched yet
     } finally {

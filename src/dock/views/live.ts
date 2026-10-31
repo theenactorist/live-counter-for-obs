@@ -92,8 +92,8 @@ const BANNER_POLL_MS = 1000;
 // banner-ws never visibly disagree about when a connection attempt has gone
 // on "too long".
 const CONNECT_GRACE_MS = CONNECTION_GRACE_MS;
-const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off — Tools → WebSocket Server Settings → Enable, then Retry';
-const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted — copy it from Show Connect Info";
+const CONNECT_UNREACHABLE_TEXT = 'OBS WebSocket server is off. Tools → WebSocket Server Settings → Enable, then Retry.';
+const CONNECT_AUTH_FAILED_TEXT = "That password wasn't accepted. Copy it from Show Connect Info.";
 const CONNECT_CONNECTING_TEXT = 'Connecting…';
 
 // Task 3.3 (AC 14) — the live-safety confirm's two locked variants (brief).
@@ -103,9 +103,9 @@ const CONNECT_CONNECTING_TEXT = 'Connecting…';
 // really is live in Program), the Studio-mode-off variant for the OTHER way
 // `liveSafetyArmed` can be true — nothing can say either way AND Studio Mode
 // itself is off, so "no evidence" cannot be treated as safe.
-const SAFETY_TEXT_LIVE = 'The counter source is live in Program — this change is visible to your audience immediately.';
+const SAFETY_TEXT_LIVE = 'The counter source is live in Program. This change is visible to your audience immediately.';
 const SAFETY_TEXT_STUDIO_OFF =
-  "Studio Mode is off and the counter's live state is unknown — this change may be visible immediately.";
+  "Studio Mode is off and the counter's live state is unknown. This change may be visible immediately.";
 
 interface LiveUiState {
   jumpOpen: boolean;
@@ -547,7 +547,7 @@ export function mountLiveView(
 
   function renderLiveEmpty(): HTMLElement {
     const wrap = el('div', { 'data-testid': 'live-empty', class: 'live-empty' });
-    wrap.appendChild(el('div', {}, 'No active session — create one in Setup'));
+    wrap.appendChild(el('div', {}, 'No active session. Create one in Setup.'));
 
     // Task 2.12 — mirrors Diagnostics' add-overlay button here so the "one
     // paste + two clicks" flow never requires a trip to the Diagnostics tab:
@@ -904,7 +904,7 @@ export function mountLiveView(
 
   function renderRecoveredBanner(): HTMLElement {
     const banner = el('div', { 'data-testid': 'banner-recovered', class: 'banner banner-info' });
-    banner.appendChild(el('span', {}, 'Session restored — Resume when ready'));
+    banner.appendChild(el('span', {}, 'Session restored. Resume when ready.'));
     const dismiss = button('recovered-dismiss', 'Dismiss');
     dismiss.addEventListener('click', () => {
       ui.recoveredDismissed = true;
@@ -923,7 +923,7 @@ export function mountLiveView(
     const dismissTarget = clamp;
     const banner = el('div', { 'data-testid': 'banner-clamped', class: 'banner banner-warn' });
     banner.appendChild(
-      el('span', {}, `Value clamped ${clamp.from} → ${clamp.to} — ${clamp.from} was outside the new range.`),
+      el('span', {}, `Value clamped ${clamp.from} → ${clamp.to}. ${clamp.from} was outside the new range.`),
     );
     const dismiss = button('clamped-dismiss', 'Dismiss');
     dismiss.addEventListener('click', () => {
@@ -938,7 +938,7 @@ export function mountLiveView(
     return el(
       'div',
       { 'data-testid': 'banner-overlay', class: 'banner banner-warn' },
-      'Overlay not rendering — count continues, audience may not see updates',
+      'Overlay not rendering. The count continues, but the audience may not see updates.',
     );
   }
 
@@ -1176,7 +1176,7 @@ export function mountLiveView(
 
   function renderEndConfirm(): HTMLElement {
     const box = el('div', { 'data-testid': 'end-confirm', class: 'confirm-box' });
-    box.appendChild(el('span', {}, 'End session — keep the overlay showing its last value, or hide it?'));
+    box.appendChild(el('span', {}, 'End session: keep the overlay showing its last value, or hide it?'));
     const keep = button('end-keep', 'End, keep overlay');
     keep.addEventListener('click', () => {
       ui.endConfirmOpen = false;
@@ -1211,7 +1211,7 @@ export function mountLiveView(
     const box = el('div', { 'data-testid': 'live-safety-confirm', class: 'confirm-box' });
     box.appendChild(el('span', {}, studioModeOffVariant ? SAFETY_TEXT_STUDIO_OFF : SAFETY_TEXT_LIVE));
 
-    const proceed = button('safety-proceed', "Continue — don't ask again this session");
+    const proceed = button('safety-proceed', "Continue (don't ask again this session)");
     proceed.addEventListener('click', () => {
       safetyAcked = true;
       ui.safetyConfirmOpen = false;

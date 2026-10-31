@@ -667,7 +667,7 @@ describe('DockStorage — settings', () => {
 });
 
 describe('DockStorage — log', () => {
-  it('formats entries as "<ISO> event — detail" and "<ISO> event" without detail', () => {
+  it('formats entries as "<ISO> event: detail" and "<ISO> event" without detail', () => {
     const local = new MapStorage();
     const storage = new DockStorage(local, null);
 
@@ -677,7 +677,7 @@ describe('DockStorage — log', () => {
     const log = storage.readLog();
     expect(log).toHaveLength(2);
     expect(log[0]).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z started$/);
-    expect(log[1]).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z rejected — duplicate-nonce$/);
+    expect(log[1]).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z rejected: duplicate-nonce$/);
   });
 
   it('caps the ring buffer at 500 entries, dropping the oldest first', () => {

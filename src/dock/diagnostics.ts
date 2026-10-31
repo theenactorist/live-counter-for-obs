@@ -100,12 +100,12 @@ const PROBE_KEY = 'lc.diag-probe.v1';
 const LOG_TAIL = 100;
 
 const WS_CONNECTED_TEXT = 'Connected to OBS';
-const WS_UNREACHABLE_TEXT = 'OBS WebSocket unreachable — Tools → WebSocket Server Settings → Enable, check the port';
+const WS_UNREACHABLE_TEXT = 'OBS WebSocket unreachable. Tools → WebSocket Server Settings → Enable, then check the port.';
 const WS_WRONG_PASSWORD_TEXT =
-  'Wrong password — Tools → WebSocket Server Settings → Show Connect Info, update it in Settings below';
+  'Wrong password. Tools → WebSocket Server Settings → Show Connect Info, then update it in Settings below.';
 const OVERLAY_SEEN_TEXT = 'Overlay connected';
 const OVERLAY_NOT_SEEN_TEXT =
-  'Overlay not seen — add the overlay Browser Source (copy its URL below) or check that its scene is loaded';
+  'Overlay not seen. Add the overlay Browser Source (copy its URL below) or check that its scene is loaded.';
 // Task 2.13 — the direct panel<->overlay transport's own row. Always
 // suffixed with the SAME help text (item 5 of the brief: "document that in
 // the row's help text") regardless of which transports are currently up,
@@ -122,16 +122,16 @@ const TRANSPORT_HELP_TEXT =
 // -> ok; seen once but gone quiet -> warn (the script may have been removed,
 // or OBS's Scripts list reloaded without it).
 const HOTKEYS_NEVER_SEEN_TEXT =
-  'Hotkey bridge — add counter-hotkeys.lua in OBS Tools → Scripts, then assign keys in Settings → Hotkeys';
+  'Hotkey bridge not seen yet. If the script is missing, add counter-hotkeys.lua in Tools → Scripts. The keys come pre-set; change them in Settings → Hotkeys.';
 // Hotkey presses reach the dock only as obs-websocket events (Lua script ->
 // the channel input's settings -> InputSettingsChanged), so with no
 // connection the install hint above would point at the wrong fix.
 const HOTKEYS_NEEDS_WS_TEXT = 'Keyboard shortcuts need the OBS connection above';
 const HOTKEYS_OK_TEXT = 'Hotkey bridge connected';
-const HOTKEYS_WARN_TEXT = 'Hotkey bridge silent — was the script removed or OBS Scripts reloaded?';
+const HOTKEYS_WARN_TEXT = 'Hotkey bridge silent. Was the script removed, or were OBS Scripts reloaded?';
 const STORAGE_OK_TEXT = 'Local storage is writable';
 const STORAGE_FAIL_TEXT =
-  'Local storage write failed — settings and session may not be saved. Check browser storage permissions/quota.';
+  'Local storage write failed. Settings and session may not be saved. Check browser storage permissions/quota.';
 // --- Task 2.14: Reset everything (PRD §9, AC 26) --------------------------
 // Operator feedback drove the Setup redesign this task otherwise belongs to,
 // but the guarded reset lives here (Diagnostics already owns "connection
@@ -146,17 +146,17 @@ const STORAGE_FAIL_TEXT =
 // enumerates keys rather than listing them, so a new key like
 // `lc.presentation.v1` is covered the day it lands.
 export const RESET_ALL_WARNING_TEXT =
-  'This permanently deletes every setting, preset, session, snapshot, and log entry stored on this device — plus the mirrored backup on OBS if connected. This cannot be undone.';
+  'This permanently deletes every setting, preset, session, snapshot, and log entry stored on this device, plus the mirrored backup on OBS if connected. This cannot be undone.';
 // Brief's exact confirm text, shown once the reboot (through main.ts's
 // existing boot() path, never location.reload()) has landed back on
 // first-run state.
-export const RESET_ALL_DONE_TEXT = 'Everything cleared — the dock is back to first-run.';
+export const RESET_ALL_DONE_TEXT = 'Everything cleared. The dock is back to first-run.';
 // Review fold-in (L4 / AC 23, "a clipboard denial surfaces the select-to-copy
 // fallback rather than a false success") — the WRITE-side counterpart of
 // CLIPBOARD_BLOCKED_TEXT above. Shown next to whichever Copy button was
 // denied, with that button's source text selected so the operator's own
 // Cmd/Ctrl+C still works.
-export const COPY_BLOCKED_TEXT = 'Copy blocked — select the highlighted text and copy it manually';
+export const COPY_BLOCKED_TEXT = 'Copy blocked. Select the highlighted text and copy it manually.';
 
 // --- Task 2.12: one-card connect + add-overlay-to-scene -------------------
 // Driver: operator feedback after testing in real OBS — 6 manual steps
@@ -194,14 +194,14 @@ export const ADD_OVERLAY_ATTACH_LABEL = 'Add overlay to this scene';
 // before the scan has actually established that nothing is there.
 export const ADD_OVERLAY_CHECKING_LABEL = 'Checking your scene…';
 export const ADD_OVERLAY_SCAN_FAILED_TEXT =
-  "Couldn't check your scene for an existing overlay — nothing was changed. Retry, or check the OBS connection.";
+  "Couldn't check your scene for an existing overlay, so nothing was changed. Retry, or check the OBS connection.";
 export const ADD_OVERLAY_STALE_TEXT =
-  'Your OBS scenes changed while this was open — nothing was changed. The button now shows what to do next.';
+  'Your OBS scenes changed while this was open, so nothing was changed. The button now shows what to do next.';
 // Ruling B: what the button writes into the scene collection carries NO
 // credentials, so the operator's websocket password never lands in
 // (or gets shared with) a scene-collection JSON.
 export const ADD_OVERLAY_URL_NOTE =
-  'Writes a password-free overlay URL — your websocket password is never saved into the scene collection.';
+  'Writes a password-free overlay URL. Your WebSocket password is never saved into the scene collection.';
 
 export type AddOverlayResult =
   | { ok: true; action: 'created' | 'updated' | 'attached'; sceneName: string; inputName: string }
@@ -273,14 +273,14 @@ const MIN_RECOMMENDED_FPS = 30;
 function computeSettingsIssues(settings: Record<string, unknown>, baseWidth: number, baseHeight: number): string[] {
   const issues: string[] = [];
   const width = Number(settings.width);
-  if (width !== baseWidth) issues.push(`width ${width} — expected ${baseWidth}`);
+  if (width !== baseWidth) issues.push(`width ${width}, expected ${baseWidth}`);
   const height = Number(settings.height);
-  if (height !== baseHeight) issues.push(`height ${height} — expected ${baseHeight}`);
-  if (settings.shutdown === true) issues.push(`"${SHUTDOWN_LABEL}" is on — expected off`);
-  if (settings.restart_when_active === true) issues.push(`"${RESTART_LABEL}" is on — expected off`);
+  if (height !== baseHeight) issues.push(`height ${height}, expected ${baseHeight}`);
+  if (settings.shutdown === true) issues.push(`"${SHUTDOWN_LABEL}" is on, expected off`);
+  if (settings.restart_when_active === true) issues.push(`"${RESTART_LABEL}" is on, expected off`);
   if (settings.fps_custom === true) {
     const fps = Number(settings.fps);
-    if (fps < MIN_RECOMMENDED_FPS) issues.push(`fps ${fps} — expected ${MIN_RECOMMENDED_FPS} or higher`);
+    if (fps < MIN_RECOMMENDED_FPS) issues.push(`fps ${fps}, expected ${MIN_RECOMMENDED_FPS} or higher`);
   }
   return issues;
 }
@@ -294,7 +294,7 @@ const MULTI_SOURCE_TAIL = 'LIVE detection assumes one; remove duplicates.';
 
 function multiSourceWarningFor(matches: string[]): string | null {
   if (matches.length <= 1) return null;
-  return `Overlay URL found in ${matches.length} sources: ${matches.join(', ')} — ${MULTI_SOURCE_TAIL}`;
+  return `Overlay URL found in ${matches.length} sources: ${matches.join(', ')}. ${MULTI_SOURCE_TAIL}`;
 }
 
 // T2 (improvement review INSTALL-5, T1 Q4): shown when the in-scene overlay
@@ -740,8 +740,8 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
         intent: 'attach',
         note:
           scan.otherSceneName !== null
-            ? `An overlay already exists in '${scan.otherSceneName}' — this adds that same source to '${scan.sceneName}'.`
-            : `An overlay already exists in another scene — this adds that same source to '${scan.sceneName}'.`,
+            ? `An overlay already exists in '${scan.otherSceneName}'. This adds that same source to '${scan.sceneName}'.`
+            : `An overlay already exists in another scene. This adds that same source to '${scan.sceneName}'.`,
         retry: false,
         retryMessage: null,
         settingsIssues: [],
@@ -763,7 +763,7 @@ export function addOverlayButtonState(client: ObsWsClient): AddOverlayButtonStat
 // imports it directly) — kept as the module-private constant it always
 // should have been, rather than a public export with no external reader.
 const FIX_CONFIRM_PASSWORD_SENTENCE =
-  'This replaces the existing URL, which contained the websocket password — the saved one is password-free.';
+  'This replaces the existing URL, which contained the WebSocket password. The saved one is password-free.';
 
 /**
  * Names EXACTLY what the Fix action will change, shown BEFORE any request goes
@@ -1424,7 +1424,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
       // every other line instead of a fixed "not built yet" placeholder.
       ['Hotkeys', rowHotkeys],
     ];
-    const checklistText = rows.map(([label, r]) => `${label}: ${r.row.dataset.state} — ${r.textEl.textContent}`).join('\n');
+    const checklistText = rows.map(([label, r]) => `${label}: ${r.row.dataset.state}. ${r.textEl.textContent}`).join('\n');
     // Task 3.4 (AC 29/30) — the same shared add-overlay state the visible
     // notes above render from, folded into the copyable dump so a remote
     // helper reading a pasted report sees the exact same mismatches/warnings
@@ -1439,7 +1439,7 @@ export function mountDiagnosticsView(container: HTMLElement, opts: MountDiagnost
     if (addOverlayState.multiSourceWarning !== null) overlayDiagLines.push(addOverlayState.multiSourceWarning);
     const lines = opts.storage.readLog().slice(-LOG_TAIL).reverse();
     return [
-      `Live Counter diagnostics — v${VERSION}`,
+      `Live Counter diagnostics, v${VERSION}`,
       '',
       checklistText,
       // T2: whether the port and password came from the installer's

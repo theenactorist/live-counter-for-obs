@@ -92,13 +92,13 @@ export function chipFrom(i: ChipInputs): { state: ChipState; text: string; detai
       : {
           state: 'hidden',
           text: 'HIDDEN',
-          detail: 'Source is live in Program — Show would be visible immediately',
+          detail: 'Source is live in Program. Show would be visible immediately.',
         };
   }
 
   if (showing === true) {
     return i.overlayVisible
-      ? { state: 'showing-preview', text: 'SHOWING (PREVIEW)', detail: 'Preview or projector only — not in Program' }
+      ? { state: 'showing-preview', text: 'SHOWING (PREVIEW)', detail: 'Preview or projector only, not in Program' }
       : { state: 'hidden', text: 'HIDDEN', detail: 'Source in Preview' };
   }
 

@@ -75,7 +75,7 @@ export const CLIPBOARD_BLOCKED_TEXT = 'Paste is blocked inside OBS on this compu
 export const CLIPBOARD_READ_TIMEOUT_MS = 1500;
 // I-1 — shown only when BOTH the async Clipboard API AND the legacy
 // execCommand fallback fail to copy/cut.
-export const CLIPBOARD_COPY_BLOCKED_TEXT = 'Copy blocked — select the text and copy it manually';
+export const CLIPBOARD_COPY_BLOCKED_TEXT = 'Copy blocked. Select the text and copy it manually.';
 // M-4 (operator feedback origin story: silence on the refused password
 // copy/cut reads as broken, not as a deliberate safeguard) — shown whenever
 // Cmd/Ctrl+C or +X is pressed inside an `input[type=password]`, which this

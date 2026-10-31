@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Live Counter — Setup</title>
+    <title>Live Counter Setup</title>
     <style>
       /* Task 3.4 (AC 32) — deliberately the system font stack, not the
          Inter/Oswald webfonts the dock/overlay bundles inline: this page
@@ -124,7 +124,7 @@
     </style>
   </head>
   <body>
-    <h1>Live Counter — Setup</h1>
+    <h1>Live Counter Setup</h1>
     <p class="setup-intro">
       This page shows the addresses of the Live Counter files on this computer, so you can add them to OBS without
       typing them. It makes no network connection: it reads its own location and shows the two files next to it.
@@ -143,7 +143,7 @@
     <section>
       <h2>Overlay URL</h2>
       <p class="setup-url-help">
-        Add this in OBS as a Browser Source. This link never carries your websocket password.
+        Add this in OBS as a Browser Source. This link never carries your WebSocket password.
       </p>
       <div class="setup-url-row">
         <input data-testid="setup-overlay-url" type="text" readonly />
@@ -180,7 +180,9 @@
           </div>
         </li>
         <li>
-          In OBS: Tools → Scripts → add <code>counter-hotkeys.lua</code>, then assign keys in Settings → Hotkeys.
+          In OBS: Tools → Scripts → add <code>counter-hotkeys.lua</code>. Its keys come pre-set: Ctrl+Option (Mac) or
+          Ctrl+Alt (Windows) with = − Z P H for +1, −1, Undo, Pause/Resume and Show/Hide. Change them in Settings →
+          Hotkeys.
         </li>
       </ol>
     </section>

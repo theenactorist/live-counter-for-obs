@@ -78,7 +78,7 @@ describe('chipFrom — decision table', () => {
     expect(chipFrom(inputs({ relay: { active: true, showing: null }, overlayVisible: false }))).toEqual({
       state: 'hidden',
       text: 'HIDDEN',
-      detail: 'Source is live in Program — Show would be visible immediately',
+      detail: 'Source is live in Program. Show would be visible immediately.',
     });
   });
 
@@ -86,7 +86,7 @@ describe('chipFrom — decision table', () => {
     expect(chipFrom(inputs({ relay: { active: false, showing: true }, overlayVisible: true }))).toEqual({
       state: 'showing-preview',
       text: 'SHOWING (PREVIEW)',
-      detail: 'Preview or projector only — not in Program',
+      detail: 'Preview or projector only, not in Program',
     });
   });
 
@@ -202,7 +202,7 @@ describe('chipFrom — decision table', () => {
     ).toEqual({
       state: 'hidden',
       text: 'HIDDEN',
-      detail: 'Source is live in Program — Show would be visible immediately',
+      detail: 'Source is live in Program. Show would be visible immediately.',
     });
   });
 });

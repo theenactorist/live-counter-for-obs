@@ -3729,7 +3729,7 @@ test.describe('dock Setup + Presets views', () => {
         await expect(page.getByTestId('tab-setup')).toHaveClass(/active/);
         await expect(page.getByTestId('setup-not-applied-notice')).toBeVisible();
         await expect(page.getByTestId('setup-not-applied-notice')).toContainText(
-          "These settings aren't applied yet — click Update session.",
+          "These settings aren't applied yet. Click Update session.",
         );
 
         await page.getByTestId('setup-update-session').click();

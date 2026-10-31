@@ -62,7 +62,7 @@ const OVERLAY_NAMES_POLL_MS = 30_000;
 // two hand-synced 3000s).
 const WS_BANNER_GRACE_MS = CONNECTION_GRACE_MS;
 const WS_BANNER_POLL_MS = 500;
-const BANNER_WS_TEXT = 'Not connected to OBS — Tools → WebSocket Server Settings, then enter the password in Settings';
+const BANNER_WS_TEXT = 'Not connected to OBS. Check Tools → WebSocket Server Settings, then enter the password in Settings.';
 
 // Dev-hook-only default style: `?devhook`'s startSession() shortcut still
 // needs SOME StyleConfig to hand `SessionController.startSession()` (a
@@ -362,7 +362,7 @@ function main(): void {
   function onWriteError(key: string, err: unknown): void {
     // eslint-disable-next-line no-console
     console.error(`[dock] storage write failed for "${key}"`, err);
-    showBannerWs('Local storage write failed — settings and session may not be saved. See console for details.');
+    showBannerWs('Local storage write failed. Settings and session may not be saved. See console for details.');
   }
 
   function boot(wsPort: number, wsPassword: string, bootOpts: { justReset?: boolean } = {}): void {
@@ -572,7 +572,7 @@ function main(): void {
     // points" callback's two callers) ignores it, same as it always ignored
     // this function's `void` return before.
     const onSaveSettings = (port: number, password: string): string | null => {
-      if (resetInFlight) return 'Reset in progress — try again in a moment';
+      if (resetInFlight) return 'Reset in progress. Try again in a moment.';
       // T2: panelSettings keeps the installer revision already applied, so
       // a password typed here is not overwritten on the next launch.
       storageForSave.saveSettings(panelSettings(port, password, storageForSave.loadSettings()));

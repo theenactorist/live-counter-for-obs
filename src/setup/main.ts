@@ -37,7 +37,7 @@ function siblingUrl(fileName: string): string {
 }
 
 const COPY_CONFIRM_MS = 1500;
-const COPY_BLOCKED_TEXT = 'Copy blocked — select the highlighted text and copy it manually';
+const COPY_BLOCKED_TEXT = 'Copy blocked. Select the highlighted text and copy it manually.';
 
 /** Selects the source input's text so the operator's own Cmd/Ctrl+C still works after a denied programmatic write — this page runs in a normal browser (not an OBS dock), so that native shortcut always works. */
 function selectInputText(input: HTMLInputElement): void {

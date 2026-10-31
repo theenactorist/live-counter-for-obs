@@ -536,7 +536,7 @@ export class DockStorage {
   clearAllLocal(): void {
     const store = this.local;
     if (typeof store.length !== 'number' || typeof store.key !== 'function') {
-      this.reportWriteError('lc.*', new Error('This storage does not support key enumeration — nothing was cleared.'));
+      this.reportWriteError('lc.*', new Error('This storage does not support key enumeration, so nothing was cleared.'));
       return;
     }
     let keys: string[];
@@ -588,7 +588,7 @@ export class DockStorage {
     if (this.memoryLog === null) {
       this.memoryLog = this.readLogRaw();
     }
-    const line = `${new Date().toISOString()} ${event}${detail ? ' — ' + detail : ''}`;
+    const line = `${new Date().toISOString()} ${event}${detail ? ': ' + detail : ''}`;
     const entries = [...this.memoryLog, line];
     const trimmed = entries.length > LOG_MAX_ENTRIES ? entries.slice(entries.length - LOG_MAX_ENTRIES) : entries;
     // Update the in-memory copy regardless of whether persistence below

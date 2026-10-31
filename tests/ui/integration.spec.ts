@@ -799,7 +799,7 @@ test.describe('Phase 2 integration gate: dock + overlay against one mock server'
       await expect(dock.getByTestId('status-chip')).toHaveText('HIDDEN', { timeout: 3000 });
       await expect(dock.getByTestId('status-chip')).toHaveAttribute(
         'data-detail',
-        'Source is live in Program — Show would be visible immediately',
+        'Source is live in Program. Show would be visible immediately.',
       );
 
       // Simulates counter-hotkeys.lua's send('showHide') — installHotkeyBridge

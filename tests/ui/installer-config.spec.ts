@@ -77,7 +77,7 @@ test.describe('installer connection file (live-counter-config.js)', () => {
         connectionSource: 'installer',
       });
       const log = await eventLog(page);
-      expect(log).toContain('installer-config-applied — revision 20261024-101500');
+      expect(log).toContain('installer-config-applied: revision 20261024-101500');
       expect(log).not.toContain(PASSWORD);
 
       // Copy diagnostics names where the connection came from, never the password.
