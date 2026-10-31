@@ -24,6 +24,12 @@
 // set (zip -X keeps it, and so does Archive Utility). Also writes
 // release/live-counter-for-obs.zip, the same archive under the unversioned
 // name that install.sh downloads from the latest GitHub release.
+//
+// T4: also ships installer/windows/ and puts "Install Live Counter.bat" and
+// "Uninstall Live Counter.bat" at the top of the release folder (CRLF kept, see
+// .gitattributes). On Windows, where there is no `zip` command, it zips with
+// the tar.exe that Windows 10 and later include (bsdtar, which writes forward
+// slashes in the archive like zip does).
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
@@ -58,6 +64,8 @@ const FILES = [
   ['docs/install-guide/index.html', 'install-guide/index.html'],
   ['installer/mac/Install Live Counter.command', 'Install Live Counter.command'],
   ['installer/mac/Uninstall Live Counter.command', 'Uninstall Live Counter.command'],
+  ['installer/windows/Install Live Counter.bat', 'Install Live Counter.bat'],
+  ['installer/windows/Uninstall Live Counter.bat', 'Uninstall Live Counter.bat'],
 ];
 // Copied whole, minus dotfiles such as .DS_Store.
 const DIRS = [
@@ -74,7 +82,10 @@ function fail(message) {
 }
 
 const zipCheck = spawnSync('zip', ['-v'], { stdio: 'ignore' });
-if (zipCheck.error || zipCheck.status !== 0) {
+const hasZip = !zipCheck.error && zipCheck.status === 0;
+const windowsTar = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
+const useWindowsTar = !hasZip && process.platform === 'win32' && existsSync(windowsTar);
+if (!hasZip && !useWindowsTar) {
   fail('the "zip" command was not found. Install it (macOS and most Linux systems include it) and run again.');
 }
 
@@ -103,8 +114,8 @@ for (const [from, to] of DIRS) {
   if (!existsSync(src) || !statSync(src).isDirectory()) fail(`missing folder: ${from}`);
   cpSync(src, path.join(outDir, to), {
     recursive: true,
-    // The .command files go at the top of the folder (FILES), not twice.
-    filter: (p) => !path.basename(p).startsWith('.') && !p.endsWith('.command'),
+    // The .command and .bat files go at the top of the folder (FILES), not twice.
+    filter: (p) => !path.basename(p).startsWith('.') && !p.endsWith('.command') && !p.endsWith('.bat'),
   });
 }
 for (const rel of readdirSync(outDir, { recursive: true }).map(String)) {
@@ -124,7 +135,12 @@ if (shippedConfigs.length > 0) {
 
 // -r recurse, -X leave out extra file attributes, -q quiet. Run from release/
 // so the archive holds live-counter-for-obs/... and not the full local path.
-execFileSync('zip', ['-r', '-X', '-q', zipName, FOLDER_NAME], { cwd: releaseDir, stdio: 'inherit' });
+// -a picks the zip format from the .zip name.
+if (useWindowsTar) {
+  execFileSync(windowsTar, ['-a', '-c', '-f', zipName, FOLDER_NAME], { cwd: releaseDir, stdio: 'inherit' });
+} else {
+  execFileSync('zip', ['-r', '-X', '-q', zipName, FOLDER_NAME], { cwd: releaseDir, stdio: 'inherit' });
+}
 
 const latestZipPath = path.join(releaseDir, `${FOLDER_NAME}.zip`);
 copyFileSync(zipPath, latestZipPath);

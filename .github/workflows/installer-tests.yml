@@ -1,0 +1,48 @@
+# T4: the installer fixture tests on GitHub's machines. The Windows tests need
+# Windows PowerShell 5.1, which only a Windows machine has; the Mac tests need
+# osascript and ditto. Runs on pushes to the test-only branch ci/windows-tests
+# (never merged) and on pull requests into main.
+name: Installer tests
+
+on:
+  push:
+    branches: [ci/windows-tests]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Windows PowerShell version
+        shell: powershell
+        run: $PSVersionTable.PSVersion.ToString()
+      - run: npm ci
+      - run: npm run build
+      - run: npm run package
+      - name: Installer tests
+        run: npx vitest run tests/installer
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run package
+      - name: Installer tests
+        run: npx vitest run tests/installer

@@ -1,0 +1,6 @@
+# T4: cmd.exe needs CRLF in a .bat file; the Mac scripts must stay LF even
+# when the repo is checked out on Windows (GitHub's Windows runners turn
+# core.autocrlf on).
+*.bat text eol=crlf
+*.sh text eol=lf
+*.command text eol=lf

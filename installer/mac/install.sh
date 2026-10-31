@@ -316,26 +316,37 @@ setup_websocket() {
   say "Connected the Live Counter panel to OBS."
 }
 
+# T4: the count is of collections this run changed; when it changed none,
+# it says so instead of "Added" (the same lines as install.ps1).
 add_script_to_collections() {
-  local f count=0
+  local f outcome changed=0
   for f in "$CFG"/basic/scenes/*.json; do
     if [ -f "$f" ]; then
-      jxa collection.js "$f" "$INSTALL_DIR/counter-hotkeys.lua" >/dev/null ||
+      outcome=$(jxa collection.js "$f" "$INSTALL_DIR/counter-hotkeys.lua") ||
         fail "Could not read the scene collection $(basename "$f"). Open OBS, choose that collection in the Scene Collection menu so OBS saves it again, quit OBS, then run this again."
-      count=$((count + 1))
+      if [ "$outcome" = changed ]; then
+        changed=$((changed + 1))
+      fi
     fi
   done
-  if [ "$count" = 1 ]; then
+  if [ "$changed" = 0 ]; then
+    say "The hotkey script is in every scene collection."
+  elif [ "$changed" = 1 ]; then
     say "Added the hotkey script to 1 scene collection."
   else
-    say "Added the hotkey script to $count scene collections."
+    say "Added the hotkey script to $changed scene collections."
   fi
 }
 
 add_dock() {
-  jxa userini.js "$CFG/user.ini" "$INSTALL_DIR/dock.html" "$LC_TITLE" >/dev/null ||
+  local outcome
+  outcome=$(jxa userini.js "$CFG/user.ini" "$INSTALL_DIR/dock.html" "$LC_TITLE") ||
     fail "Could not read the Custom Browser Docks list in $CFG/user.ini. Open OBS, open Docks → Custom Browser Docks, click Apply, quit OBS, then run this again."
-  say "Added the Live Counter panel to OBS."
+  if [ "$outcome" = unchanged ]; then
+    say "The Live Counter panel is in OBS."
+  else
+    say "Added the Live Counter panel to OBS."
+  fi
 }
 
 check_changes() {
