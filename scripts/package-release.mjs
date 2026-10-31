@@ -17,8 +17,25 @@
 // T2: stops before zipping if a live-counter-config.js (the installer's dock
 // connection file, which holds the WebSocket password) would be shipped.
 // Only the installer writes that file, on the operator's machine.
+//
+// T3: ships installer/ (the Mac install.sh and uninstall.sh) and puts the two
+// double-click files, "Install Live Counter.command" and "Uninstall Live
+// Counter.command", at the top of the release folder, each with the run bit
+// set (zip -X keeps it, and so does Archive Utility). Also writes
+// release/live-counter-for-obs.zip, the same archive under the unversioned
+// name that install.sh downloads from the latest GitHub release.
 import { execFileSync, execSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,12 +56,17 @@ const FILES = [
   ['dist/inter-OFL-LICENSE.txt', 'inter-OFL-LICENSE.txt'],
   ['dist/oswald-OFL-LICENSE.txt', 'oswald-OFL-LICENSE.txt'],
   ['docs/install-guide/index.html', 'install-guide/index.html'],
+  ['installer/mac/Install Live Counter.command', 'Install Live Counter.command'],
+  ['installer/mac/Uninstall Live Counter.command', 'Uninstall Live Counter.command'],
 ];
 // Copied whole, minus dotfiles such as .DS_Store.
 const DIRS = [
   ['docs/install-guide/img', 'install-guide/img'],
   ['docs/install-guide/fonts', 'install-guide/fonts'],
+  ['installer', 'installer'],
 ];
+// Files the operator runs: Terminal refuses a .command without the run bit.
+const RUNNABLE = /\.(command|sh)$/;
 
 function fail(message) {
   console.error(`package-release: ${message}`);
@@ -81,8 +103,12 @@ for (const [from, to] of DIRS) {
   if (!existsSync(src) || !statSync(src).isDirectory()) fail(`missing folder: ${from}`);
   cpSync(src, path.join(outDir, to), {
     recursive: true,
-    filter: (p) => !path.basename(p).startsWith('.'),
+    // The .command files go at the top of the folder (FILES), not twice.
+    filter: (p) => !path.basename(p).startsWith('.') && !p.endsWith('.command'),
   });
+}
+for (const rel of readdirSync(outDir, { recursive: true }).map(String)) {
+  if (RUNNABLE.test(rel)) chmodSync(path.join(outDir, rel), 0o755);
 }
 
 const CONFIG_FILE_NAME = 'live-counter-config.js';
@@ -100,4 +126,7 @@ if (shippedConfigs.length > 0) {
 // so the archive holds live-counter-for-obs/... and not the full local path.
 execFileSync('zip', ['-r', '-X', '-q', zipName, FOLDER_NAME], { cwd: releaseDir, stdio: 'inherit' });
 
-console.log(`Packaged ${path.relative(root, zipPath)} (version ${version}).`);
+const latestZipPath = path.join(releaseDir, `${FOLDER_NAME}.zip`);
+copyFileSync(zipPath, latestZipPath);
+
+console.log(`Packaged ${path.relative(root, zipPath)} and ${path.relative(root, latestZipPath)} (version ${version}).`);
